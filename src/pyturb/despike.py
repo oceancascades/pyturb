@@ -22,11 +22,9 @@ def _despike_once(
     pad_right = signal[-pad_len:][::-1]
     padded = np.concatenate([pad_left, signal, pad_right])
 
-    # High-pass filter and rectify
     sos_hp = butter(1, 0.5 / (fs / 2), btype="high", output="sos")
     hp = np.abs(sosfiltfilt(sos_hp, padded))
 
-    # Low-pass filter
     sos_lp = butter(1, smooth / (fs / 2), output="sos")
     lp = sosfiltfilt(sos_lp, hp)
 

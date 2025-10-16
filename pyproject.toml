@@ -23,8 +23,10 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "bokeh>=3.8.0",
+    "ipykernel>=7.0.0",
     "matplotlib>=3.10.7",
     "mypy>=1.17.1",
+    "pip>=25.2",
     "ruff>=0.12.11",
     "scipy-stubs>=1.16.1.1",
 ]
