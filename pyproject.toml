@@ -1,7 +1,7 @@
 [project]
 name = "pyturb"
 version = "0.1.0"
-description = "Add your description here"
+description = "Ocean turbulent microstructure processing"
 readme = "README.md"
 authors = [
     { name = "Jesse Cusack", email = "jesse.cusack@oregonstate.edu" }

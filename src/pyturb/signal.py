@@ -1,8 +1,7 @@
-from typing import Iterable
-
 import numpy as np
-from numpy.typing import NDArray
-from scipy.signal import butter, sosfiltfilt
+import scipy.signal as sig
+from numpy.lib.stride_tricks import sliding_window_view
+from numpy.typing import ArrayLike, NDArray
 
 
 def _despike_once(
@@ -22,11 +21,11 @@ def _despike_once(
     pad_right = signal[-pad_len:][::-1]
     padded = np.concatenate([pad_left, signal, pad_right])
 
-    sos_hp = butter(1, 0.5 / (fs / 2), btype="high", output="sos")
-    hp = np.abs(sosfiltfilt(sos_hp, padded))
+    sos_hp = sig.butter(1, 0.5 / (fs / 2), btype="high", output="sos")
+    hp = np.abs(sig.sosfiltfilt(sos_hp, padded))
 
-    sos_lp = butter(1, smooth / (fs / 2), output="sos")
-    lp = sosfiltfilt(sos_lp, hp)
+    sos_lp = sig.butter(1, smooth / (fs / 2), output="sos")
+    lp = sig.sosfiltfilt(sos_lp, hp)
 
     # Only consider the original (unpadded) region
     region = slice(pad_len, pad_len + length)
@@ -93,7 +92,7 @@ def _despike_once(
 
 
 def despike(
-    signal: Iterable,
+    signal: ArrayLike,
     thresh: float = 8.0,
     smooth: float = 0.5,
     fs: float = 512.0,
@@ -148,3 +147,45 @@ def despike(
 
     despike_fraction = np.sum(cleaned != signal) / len(signal)
     return cleaned, all_spikes, pass_count, despike_fraction
+
+
+def window_mean(y, n_fft, n_diss):
+    y = np.asarray(y)
+    fft_overlap = n_fft // 2
+    y_windowed = sliding_window_view(y, n_diss, writeable=True)[
+        :: n_diss - fft_overlap, :
+    ]
+    return y_windowed.mean(axis=1)
+
+
+def window_psd(y, fs, n_fft, n_diss, window="cosine"):
+    y = np.asarray(y)
+    fft_overlap = n_fft // 2
+
+    if y.ndim != 1:
+        raise ValueError("y must be 1D array")
+    if y.size % fft_overlap != 0:
+        raise ValueError("Length of y must be multiple of n_fft/2")
+    if n_fft % 2 != 0:
+        raise ValueError("n_fft must be even")
+    if n_diss % n_fft != 0:
+        raise ValueError("n_diss must be multiple of n_fft")
+
+    window = sig.windows.get_window(window, n_fft)
+    y_windowed = (
+        sliding_window_view(y, n_fft, writeable=True)[:: n_fft - fft_overlap, :]
+        * window
+    )
+    fft = np.fft.fft(y_windowed, axis=1)[:, : n_fft // 2 + 1]
+    PSD = 2 * np.real(fft * fft.conj()) / (np.sum(window**2) * fs)
+    freq = np.fft.fftfreq(n_fft, d=1 / fs)[: n_fft // 2 + 1]
+
+    # Fix the Nyquist frequency and zero frequency, which should not be doubled
+    freq[-1] *= -1
+    PSD[:, [0, -1]] *= 0.5
+
+    # Average PSDs over dissipation windows
+    ffts_per_diss = (n_diss - fft_overlap) // (n_fft - fft_overlap)
+    PSD = PSD.reshape(-1, ffts_per_diss, PSD.shape[1]).mean(axis=1)
+
+    return freq, PSD

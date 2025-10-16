@@ -164,7 +164,7 @@ def estimate_epsilon(
     fit_order: int = 3,
 ) -> tuple[float, float]:
     """
-    Estimate dissipation (epsilon) from one shear auto-spectrum.
+    Estimate epsilon from one shear spectrum.
 
     Inputs
     f    : frequency vector (Hz), length N
@@ -208,6 +208,7 @@ def estimate_epsilon(
             if fit_mask.any()
             else eps_fit
         )
+
         eps_final = apply_unresolved_variance(e_var, k_max, nu)
         # Low-end missing variance correction
         if k[1] > 0:

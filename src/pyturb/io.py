@@ -3,7 +3,7 @@ import numpy as np
 import xarray as xr
 from scipy.io import loadmat
 
-__all__ = ["load_rockland_mat"]
+__all__ = ["load_rockland_mat", "load_profile_nc"]
 
 
 _variable_map = dict(
@@ -12,12 +12,17 @@ _variable_map = dict(
     gradT1=["t_fast"],
     gradT2=["t_fast"],
     U_EM=["t_slow"],
+    P_slow=["t_slow"],
     fs_fast=[],
     fs_slow=[],
 )
 
 
-def load_rockland_mat(filename):
+def load_profile_nc(filename: str) -> xr.Dataset:
+    return xr.load_dataset(filename, decode_times=False)
+
+
+def load_rockland_mat(filename: str) -> xr.Dataset:
     store = "mat"
 
     try:
