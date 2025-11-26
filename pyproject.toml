@@ -13,8 +13,12 @@ dependencies = [
     "numpy>=2.3.2",
     "profinder>=0.2.4",
     "scipy>=1.16.1",
+    "typer-slim>=0.20.0",
     "xarray>=2025.10.1",
 ]
+
+[project.scripts]
+pyturb = "pyturb.cli:cli"
 
 [build-system]
 requires = ["uv_build>=0.8.12,<0.9.0"]
@@ -29,4 +33,5 @@ dev = [
     "pip>=25.2",
     "ruff>=0.12.11",
     "scipy-stubs>=1.16.1.1",
+    "tqdm>=4.67.1",
 ]

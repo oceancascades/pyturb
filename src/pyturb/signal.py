@@ -1,3 +1,5 @@
+# Methods for signal processing, including despiking, power spectra and windowed means
+
 import numpy as np
 import scipy.signal as sig
 from numpy.lib.stride_tricks import sliding_window_view
@@ -150,22 +152,27 @@ def despike(
 
 
 def window_mean(y, n_fft, n_diss):
+    """Compute mean over dissipation windows.
+
+    Assumes y has been pre-trimmed to fit an exact number of windows.
+    """
     y = np.asarray(y)
     fft_overlap = n_fft // 2
-    y_windowed = sliding_window_view(y, n_diss, writeable=True)[
-        :: n_diss - fft_overlap, :
-    ]
+    diss_step = n_diss - fft_overlap
+    y_windowed = sliding_window_view(y, n_diss, writeable=True)[::diss_step, :]
     return y_windowed.mean(axis=1)
 
 
 def window_psd(y, fs, n_fft, n_diss, window="cosine"):
+    """Compute windowed power spectral density averaged over dissipation windows.
+
+    Assumes y has been pre-trimmed to fit an exact number of windows.
+    """
     y = np.asarray(y)
     fft_overlap = n_fft // 2
 
     if y.ndim != 1:
         raise ValueError("y must be 1D array")
-    if y.size % fft_overlap != 0:
-        raise ValueError("Length of y must be multiple of n_fft/2")
     if n_fft % 2 != 0:
         raise ValueError("n_fft must be even")
     if n_diss % n_fft != 0:

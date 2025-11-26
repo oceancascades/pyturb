@@ -1,3 +1,6 @@
+# Functions for estimating turbulent dissipation rate from shear microstructure
+
+
 import numpy as np
 
 
@@ -29,16 +32,18 @@ def integrated_nasmyth(k_max: float, eps: float, nu: float = 1e-6) -> float:
     return np.tanh(48 * x43) - 2.9 * x43 * np.exp(-22.3 * x43)
 
 
-def single_pole_response(k: np.ndarray, k0: float = 48.0) -> np.ndarray:
+def single_pole_correction(
+    k: np.ndarray, k0: float = 48.0, k_max: float = 150.0
+) -> np.ndarray:
     """
-    Single pole Macoun & Lueck style correction: 1 + (k/48)^2 up to 150 cpm, then 1.
+    Single pole Macoun & Lueck style correction: 1 + (k/48)^2 up to k_max cpm, then 1.
 
     Note that this is the inverse of the single pole transfer function:
     H^2 = 1 / (1 + (k/k0)^2)
     so this function is equivalent to multiplying by H^-2.
     """
     corr = np.ones_like(k)
-    mask = k <= 150.0
+    mask = k <= k_max
     corr[mask] = 1.0 + (k[mask] / k0) ** 2
     return corr
 
@@ -181,7 +186,7 @@ def estimate_epsilon(
 
     # Converto to wavenumber domain
     k = f / W  # cpm
-    phi = P_f * W * single_pole_response(k)
+    phi = P_f * W * single_pole_correction(k)
 
     # Make a first guess of epsilon from low-wavenumber variance by integrating
     # data to 10 cpm and applying a non-linear correction.
