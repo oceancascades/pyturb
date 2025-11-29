@@ -6,7 +6,7 @@ Implements the algorithm from ODAS library v4.5.1 (make_gradT_odas.m)
 
 import re
 import warnings
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 from scipy import signal
@@ -18,7 +18,6 @@ def make_gradT(
     T_dT: np.ndarray,
     params: Dict,
     fs: float,
-    speed: Optional[np.ndarray] = None,
     method: str = "high_pass",
 ) -> np.ndarray:
     """
@@ -32,21 +31,21 @@ def make_gradT(
         Thermistor parameters including diff_gain, beta, t_0, etc.
     fs : float
         Sampling rate in Hz
-    speed : float or ndarray, optional
-        If provided, converts dT/dt to spatial gradient dT/dz (K/m)
     method : str
         'high_pass' (recommended) or 'first_difference'
 
     Returns
     -------
     ndarray
-        Temperature derivative in K/s (or K/m if speed provided)
+        Temperature time derivative dT/dt in K/s
+
+    Notes
+    -----
+    To convert to spatial gradient dT/dz, divide by fall speed in the
+    processing pipeline (platform-dependent calculation).
     """
     if len(T_dT) == 0:
         raise ValueError("Temperature signal is empty")
-
-    if speed is not None and np.any(np.asarray(speed) <= 0):
-        raise ValueError("Speed must be positive")
 
     # Get diff_gain
     if "diff_gain" not in params:
@@ -139,16 +138,10 @@ def make_gradT(
             f"Unknown method: {method}. Use 'high_pass' or 'first_difference'"
         )
 
-    # Optionally convert from time derivative to spatial gradient
-    if speed is not None:
-        gradT = gradT / speed
-
     return gradT
 
 
-def compute_gradT_channels(
-    data: Dict, speed: Optional[np.ndarray] = None, method: str = "high_pass"
-) -> Dict:
+def compute_gradT_channels(data: Dict, method: str = "high_pass") -> Dict:
     """
     Compute dT/dt for all pre-emphasized thermistor channels (T1_dT1, T2_dT2, etc.).
 
@@ -158,32 +151,23 @@ def compute_gradT_channels(
     ----------
     data : dict
         Data from load_pfile_phys() with 'cfgobj' and 'fs_fast'
-    speed : ndarray, optional
-        If provided, output is dT/dz (K/m) instead of dT/dt (K/s)
     method : str
         'high_pass' (default) or 'first_difference'
 
     Returns
     -------
     dict
-        Input dict with added gradT channels
+        Input dict with added gradT channels (dT/dt in K/s)
+
+    Notes
+    -----
+    To convert to spatial gradient dT/dz, divide by fall speed in the
+    processing pipeline (platform-dependent calculation).
     """
     cfg = data["cfgobj"]
     fs_fast = data["fs_fast"]
 
-    # Determine speed profile (None means return dT/dt)
-    if speed is not None:
-        speed_profile = speed
-    elif "speed_fast" in data:
-        speed_profile = data["speed_fast"]
-    else:
-        speed_profile = None  # Will return dT/dt in K/s
-
-    # Determine units based on whether speed is used
-    output_units = "K/m" if speed_profile is not None else "K/s"
-
     # Find all thermistor channels with diff_gain (pre-emphasized)
-    # Look through all channel sections
     therm_types = ["therm", "t_ms", "xmp_therm"]
 
     for section in cfg.sections:
@@ -224,12 +208,10 @@ def compute_gradT_channels(
             grad_name = f"grad{ch_name}"
 
         try:
-            gradT_result = make_gradT(
-                data[ch_name], params, fs_fast, speed_profile, method
-            )
+            gradT_result = make_gradT(data[ch_name], params, fs_fast, method)
             data[grad_name] = gradT_result
             if "units" in data:
-                data["units"][grad_name] = output_units
+                data["units"][grad_name] = "K/s"
         except Exception as e:
             warnings.warn(f"Could not compute {grad_name} from {ch_name}: {e}")
 

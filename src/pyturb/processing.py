@@ -68,7 +68,7 @@ def _unpack_epsilon_args(args: tuple) -> tuple:
 
 
 def batch_compute_epsilon(
-    pattern: Union[str, Path],
+    files: Union[str, Path, list[Path]],
     output_dir: Optional[Union[str, Path]] = None,
     diss_len_sec: float = 4.0,
     fft_len_sec: float = 1.0,
@@ -89,12 +89,12 @@ def batch_compute_epsilon(
 
     Parameters
     ----------
-    pattern : str or Path
-        Glob pattern to match NetCDF files (e.g., '/path/to/data/*.nc').
-        Can also be a directory path, in which case '*.nc' is appended.
+    files : str, Path, or list of Path
+        Either a glob pattern to match NetCDF files (e.g., '/path/to/data/*.nc'),
+        a directory path (in which case '*.nc' is appended), or a list of
+        Path objects pointing to specific files.
     output_dir : str or Path, optional
-        Directory for output NetCDF files. If None, files are saved in the
-        same directory as the input files.
+        Directory for output NetCDF files. If None, uses current directory.
     diss_len_sec : float, optional
         Dissipation window length in seconds. Default 4.0.
     fft_len_sec : float, optional
@@ -120,17 +120,26 @@ def batch_compute_epsilon(
     Examples
     --------
     >>> from pyturb.processing import batch_compute_epsilon
+    >>> # Using glob pattern
     >>> results = batch_compute_epsilon('/path/to/data/*.nc', output_dir='/path/to/output')
+    >>> # Using list of files
+    >>> results = batch_compute_epsilon([Path('file1.nc'), Path('file2.nc')])
     """
-    pattern = Path(pattern)
-
-    if pattern.is_dir():
-        pattern = pattern / "*.nc"
-
-    if pattern.is_absolute():
-        nc_files = sorted(pattern.parent.glob(pattern.name))
+    # Handle different input types
+    if isinstance(files, list):
+        # Already a list of files
+        nc_files = sorted(files)
     else:
-        nc_files = sorted(Path.cwd().glob(str(pattern)))
+        # It's a pattern or directory
+        pattern = Path(files)
+
+        if pattern.is_dir():
+            pattern = pattern / "*.nc"
+
+        if pattern.is_absolute():
+            nc_files = sorted(pattern.parent.glob(pattern.name))
+        else:
+            nc_files = sorted(Path.cwd().glob(str(pattern)))
 
     if not nc_files:
         if verbose:
@@ -144,7 +153,7 @@ def batch_compute_epsilon(
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
     else:
-        output_dir = nc_files[0].parent
+        output_dir = Path.cwd()
 
     # Filter out files that already have output if not overwriting
     if not overwrite:

@@ -36,15 +36,15 @@ def main(
 
 @app.command()
 def p2nc(
-    input_dir: Annotated[
-        Path, typer.Argument(help="Input directory containing P-files")
-    ],
     output_dir: Annotated[
-        Path, typer.Argument(help="Output directory for NetCDF files")
-    ],
-    pattern: Annotated[
-        str, typer.Option(help="Glob pattern for P-files", show_default=True)
-    ] = "*.p",
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for NetCDF files",
+            show_default="current directory",
+        ),
+    ] = None,
     compress: Annotated[
         bool, typer.Option(help="Compress NetCDF output", show_default=True)
     ] = False,
@@ -72,12 +72,23 @@ def p2nc(
             show_default=True,
         ),
     ] = False,
+    input_files: Annotated[
+        list[Path],
+        typer.Argument(help="Input P-files (supports shell globs)"),
+    ] = None,
 ):
-    """Convert P-files to NetCDF format."""
-    input_path = input_dir / pattern
+    """Convert P-files to NetCDF format.
+    
+    Examples:
+        pyturb p2nc ./data/*.p -o ./output
+        pyturb p2nc file1.p file2.p file3.p
+    """
+    if not input_files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
 
     batch_convert_to_netcdf(
-        pattern=input_path,
+        files=input_files,
         output_dir=output_dir,
         compress=compress,
         compression_level=compression_level,
@@ -89,16 +100,16 @@ def p2nc(
 
 
 @app.command()
-def epsilon(
-    input_dir: Annotated[
-        Path, typer.Argument(help="Input directory containing converted NetCDF files")
-    ],
+def eps(
     output_dir: Annotated[
-        Path, typer.Argument(help="Output directory for epsilon NetCDF files")
-    ],
-    pattern: Annotated[
-        str, typer.Option(help="Glob pattern for NetCDF files", show_default=True)
-    ] = "*.nc",
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for epsilon NetCDF files",
+            show_default="current directory",
+        ),
+    ] = None,
     diss_len: Annotated[
         float,
         typer.Option(
@@ -155,17 +166,23 @@ def epsilon(
             show_default=True,
         ),
     ] = False,
+    input_files: Annotated[
+        list[Path],
+        typer.Argument(help="Input NetCDF files (supports shell globs)"),
+    ] = None,
 ):
     """Compute epsilon TKE dissipation rate from converted NetCDF files.
 
-    This command processes raw p2nc output by smoothing speed/pressure,
-    scaling shear and gradT probes by fall speed, and computing epsilon
-    using the Nasmyth spectrum fit.
+    Examples:
+        pyturb eps ./batch_test/*.nc -o ./output
+        pyturb eps file1.nc file2.nc file3.nc
     """
-    input_path = input_dir / pattern
+    if not input_files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
 
     batch_compute_epsilon(
-        pattern=input_path,
+        files=input_files,
         output_dir=output_dir,
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,

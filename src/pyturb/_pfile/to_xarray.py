@@ -33,7 +33,7 @@ _CF_VARIABLE_METADATA = {
     # Inclinometers
     "Incl_X": (None, "Inclinometer X angle", "degree"),
     "Incl_Y": (None, "Inclinometer Y angle", "degree"),
-    "Incl_T": (None, "Inclinometer temperature", "degree_C"),
+    # "Incl_T": (None, "Inclinometer temperature", "degree_C"),
 }
 
 # Default variables to save (in order of priority)

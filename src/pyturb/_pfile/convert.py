@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 
 from .deconvolve import deconvolve
+from .gradT import make_gradT
 from .sensors import adis_extract
 
 
@@ -329,9 +330,20 @@ def convert_channel(data: np.ndarray, channel_name: str, cfg) -> Tuple[np.ndarra
     return converter(data, params)
 
 
-def convert_all_channels(data: Dict, exclude_types: Optional[list] = None) -> Dict:
+def convert_all_channels(
+    data: Dict,
+    exclude_types: Optional[list] = None,
+    gradT_method: str = "high_pass",
+) -> Dict:
     """
-    Convert all channels to physical units, including deconvolution of pre-emphasized signals.
+    Convert all channels to physical units, including deconvolution and gradT.
+
+    This function performs all conversions needed to produce calibrated physical
+    data from raw P-file counts:
+    - Standard channel conversions (temperature, pressure, conductivity, etc.)
+    - Deconvolution of pre-emphasized signals to high-resolution versions
+    - Temperature gradient (gradT) computation from pre-emphasized thermistors
+    - Shear probe conversion
 
     Parameters
     ----------
@@ -339,11 +351,20 @@ def convert_all_channels(data: Dict, exclude_types: Optional[list] = None) -> Di
         Dictionary from read_pfile()
     exclude_types : list, optional
         Channel types to skip (default: ['gnd', 'raw'])
+    gradT_method : str, optional
+        Method for gradT computation: 'high_pass' (default) or 'first_difference'
 
     Returns
     -------
     dict
-        Converted channels with 'units' dict and metadata preserved
+        Converted channels with 'units' dict and metadata preserved.
+        Includes gradT1, gradT2, etc. (in K/s) for pre-emphasized thermistors.
+
+    Notes
+    -----
+    gradT outputs are time derivatives (K/s). To convert to spatial gradients
+    (K/m), divide by fall speed in the processing pipeline, which is a
+    platform-dependent calculation.
     """
     if exclude_types is None:
         exclude_types = ["gnd", "raw"]
@@ -437,5 +458,45 @@ def convert_all_channels(data: Dict, exclude_types: Optional[list] = None) -> Di
                     result[hires_name] = hires_data
                     result["units"][hires_name] = "counts"
                 break
+
+    # Compute temperature gradients from pre-emphasized thermistor channels
+    fs_fast = data["fs_fast"]
+    therm_types = ["therm", "t_ms", "xmp_therm"]
+
+    for section in channel_sections:
+        params = section["params"]
+        ch_type = params.get("type", "").lower()
+
+        # Only process pre-emphasized thermistor types
+        if ch_type not in therm_types or "diff_gain" not in params:
+            continue
+
+        ch_name = params.get("name", "")
+        if not ch_name or ch_name not in data:
+            continue
+
+        # Determine output name: gradT1 from T1_dT1
+        match = re.match(r"(\w+)_d\1", ch_name, re.IGNORECASE)
+        if match:
+            base_name = match.group(1)
+            grad_name = f"grad{base_name}"
+
+            # Merge base channel params with pre-emphasis params
+            base_params = cfg.get_channel_params(base_name)
+            if base_params:
+                merged_params = base_params.copy()
+                merged_params.update(params)
+                params = merged_params
+        else:
+            grad_name = f"grad{ch_name}"
+
+        try:
+            gradT_result = make_gradT(
+                data[ch_name], params, fs_fast, gradT_method
+            )
+            result[grad_name] = gradT_result
+            result["units"][grad_name] = "K/s"
+        except Exception as e:
+            warnings.warn(f"Could not compute {grad_name} from {ch_name}: {e}")
 
     return result

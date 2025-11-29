@@ -15,7 +15,6 @@ from typing import Dict, Optional, Union
 from ._pfile import (
     SetupConfig,
     adis_extract,
-    compute_gradT_channels,
     convert_all_channels,
     convert_channel,
     deconvolve,
@@ -40,7 +39,6 @@ __all__ = [
     "deconvolve",
     "adis_extract",
     "make_gradT",
-    "compute_gradT_channels",
 ]
 
 
@@ -129,8 +127,6 @@ def load_pfile_phys(
     data = read_pfile(filename, verbose=verbose)
 
     data_phys = convert_all_channels(data, exclude_types=exclude_types)
-
-    data_phys = compute_gradT_channels(data_phys)
 
     return data_phys
 
@@ -259,7 +255,7 @@ def _unpack_worker_args(args: tuple) -> tuple:
 
 
 def batch_convert_to_netcdf(
-    pattern: Union[str, Path],
+    files: Union[str, Path, list[Path]],
     output_dir: Optional[Union[str, Path]] = None,
     variables: Optional[list] = None,
     compress: bool = False,
@@ -275,12 +271,12 @@ def batch_convert_to_netcdf(
 
     Parameters
     ----------
-    pattern : str or Path
-        Glob pattern to match P-files (e.g., '/path/to/data/*.p' or '**/*.p').
-        Can also be a directory path, in which case '*.p' is appended.
+    files : str, Path, or list of Path
+        Either a glob pattern to match P-files (e.g., '/path/to/data/*.p'),
+        a directory path (in which case '*.p' is appended), or a list of
+        Path objects pointing to specific files.
     output_dir : str or Path, optional
-        Directory for output NetCDF files. If None, files are saved in the
-        same directory as the input files.
+        Directory for output NetCDF files. If None, uses current directory.
     variables : list, optional
         Variable names to save. If None, saves default variables.
     compress : bool, optional
@@ -313,20 +309,24 @@ def batch_convert_to_netcdf(
     ...     n_workers=4
     ... )
 
-    >>> # Check for errors
-    >>> errors = [r for r in results if not r['success']]
-    >>> for e in errors:
-    ...     print(f"Failed: {e['input']}: {e['error']}")
+    >>> # Using list of files
+    >>> results = pfile.batch_convert_to_netcdf([Path('file1.p'), Path('file2.p')])
     """
-    pattern = Path(pattern)
-
-    if pattern.is_dir():
-        pattern = pattern / "*.p"
-
-    if pattern.is_absolute():
-        pfiles = sorted(pattern.parent.glob(pattern.name))
+    # Handle different input types
+    if isinstance(files, list):
+        # Already a list of files
+        pfiles = sorted(files)
     else:
-        pfiles = sorted(Path.cwd().glob(str(pattern)))
+        # It's a pattern or directory
+        pattern = Path(files)
+
+        if pattern.is_dir():
+            pattern = pattern / "*.p"
+
+        if pattern.is_absolute():
+            pfiles = sorted(pattern.parent.glob(pattern.name))
+        else:
+            pfiles = sorted(Path.cwd().glob(str(pattern)))
 
     if not pfiles:
         raise RuntimeError("No p files found.")
@@ -352,14 +352,15 @@ def batch_convert_to_netcdf(
     if output_dir is not None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = Path.cwd()
 
     # Filter out files that already have output if not overwriting
     if not overwrite:
         files_to_process = []
         skipped = []
         for pf in pfiles:
-            out_dir = output_dir if output_dir else pf.parent
-            out_file = out_dir / (pf.stem + ".nc")
+            out_file = output_dir / (pf.stem + ".nc")
             if out_file.exists():
                 skipped.append(pf)
             else:
@@ -381,7 +382,7 @@ def batch_convert_to_netcdf(
     args = [
         (
             pf,
-            output_dir if output_dir else pf.parent,
+            output_dir,
             variables,
             compress,
             compression_level,
