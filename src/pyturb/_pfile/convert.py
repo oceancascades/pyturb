@@ -491,9 +491,7 @@ def convert_all_channels(
             grad_name = f"grad{ch_name}"
 
         try:
-            gradT_result = make_gradT(
-                data[ch_name], params, fs_fast, gradT_method
-            )
+            gradT_result = make_gradT(data[ch_name], params, fs_fast, gradT_method)
             result[grad_name] = gradT_result
             result["units"][grad_name] = "K/s"
         except Exception as e:

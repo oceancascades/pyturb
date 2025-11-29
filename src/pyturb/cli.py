@@ -78,7 +78,7 @@ def p2nc(
     ] = None,
 ):
     """Convert P-files to NetCDF format.
-    
+
     Examples:
         pyturb p2nc ./data/*.p -o ./output
         pyturb p2nc file1.p file2.p file3.p
