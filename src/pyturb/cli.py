@@ -148,6 +148,78 @@ def eps(
             show_default=True,
         ),
     ] = "JAC_T",
+    speed: Annotated[
+        str,
+        typer.Option(
+            "--speed",
+            help="Speed variable name. If not found, estimates from pressure.",
+            show_default=True,
+        ),
+    ] = "W",
+    angle_of_attack: Annotated[
+        float,
+        typer.Option(
+            "--aoa",
+            help="Angle of attack in degrees (used when estimating speed from pressure)",
+            show_default=True,
+        ),
+    ] = 3.0,
+    use_pitch_correction: Annotated[
+        bool,
+        typer.Option(
+            "--pitch-correction/--no-pitch-correction",
+            help="Apply pitch correction when estimating speed from pressure",
+            show_default=True,
+        ),
+    ] = False,
+    auxiliary_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--aux",
+            "-a",
+            help="Auxiliary NetCDF file with lat, lon, T, S, density time series",
+        ),
+    ] = None,
+    aux_lat: Annotated[
+        str,
+        typer.Option(
+            "--aux-lat",
+            help="Latitude variable name in auxiliary file",
+            show_default=True,
+        ),
+    ] = "lat",
+    aux_lon: Annotated[
+        str,
+        typer.Option(
+            "--aux-lon",
+            help="Longitude variable name in auxiliary file",
+            show_default=True,
+        ),
+    ] = "lon",
+    aux_temp: Annotated[
+        str,
+        typer.Option(
+            "--aux-temp",
+            help="Temperature variable name in auxiliary file",
+            show_default=True,
+        ),
+    ] = "temperature",
+    aux_sal: Annotated[
+        str,
+        typer.Option(
+            "--aux-sal",
+            help="Salinity variable name in auxiliary file",
+            show_default=True,
+        ),
+    ] = "salinity",
+    aux_dens: Annotated[
+        str,
+        typer.Option(
+            "--aux-dens",
+            help="Density variable name in auxiliary file",
+            show_default=True,
+        ),
+    ] = "density",
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -189,6 +261,15 @@ def eps(
         min_speed=min_speed,
         smoothing_period=smoothing_period,
         temperature=temperature,
+        speed=speed,
+        angle_of_attack=angle_of_attack,
+        use_pitch_correction=use_pitch_correction,
+        auxiliary_file=auxiliary_file,
+        aux_latitude=aux_lat,
+        aux_longitude=aux_lon,
+        aux_temperature=aux_temp,
+        aux_salinity=aux_sal,
+        aux_density=aux_dens,
         n_workers=n_workers,
         overwrite=overwrite,
         verbose=True,

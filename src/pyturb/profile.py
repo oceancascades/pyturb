@@ -18,89 +18,226 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ProfileConfig:
-    """Configuration for profile processing."""
+    """Configuration for profile processing.
 
-    diss_len_sec: float = 4.0
-    fft_len_sec: float = 1.0
+    This dataclass contains all settings needed for the complete profile
+    processing pipeline, including preprocessing (smoothing, scaling) and
+    epsilon estimation.
+    """
 
+    # === Processing window parameters ===
+    diss_len_sec: float = 4.0  # Dissipation window length in seconds
+    fft_len_sec: float = 1.0  # FFT segment length in seconds
+
+    # === Variable names (raw input) ===
     pressure: str = "P"
-    speed: str = "U_EM"
+    speed: str = "W"
     temperature: str = "JAC_T"
+    pitch: str = "Incl_Y"  # Pitch angle variable (degrees, positive nose up)
+
+    # === Speed estimation parameters ===
+    use_pitch_correction: bool = False  # Whether to correct speed for pitch/AoA
+    angle_of_attack: float = 3.0  # Angle of attack in degrees
+    dbar_to_m: float = 1.0197  # Conversion from dbar to meters
+
+    # === Probe names ===
     shear_probes: tuple[str, ...] = ("sh1", "sh2")
     temperature_probes: tuple[str, ...] = ("gradT1", "gradT2")
 
-    min_speed: float = 0.2
+    # === Preprocessing parameters ===
+    smoothing_period: float = 0.25  # Cutoff period for low-pass filter (seconds)
+    speed_smoothing_period: float = (
+        2.0  # Cutoff period for estimated speed smoothing (seconds)
+    )
+    filter_order: int = 4
 
+    # === Thresholds ===
+    min_speed: float = 0.2  # Minimum speed for valid profile segment
+
+    # === Default values for missing data ===
     default_temperature: float = 10.0
     default_salinity: float = 35.0
     default_density: float = 1025.0
 
+    # === Auxiliary dataset variable names ===
+    aux_time: str = "time"  # Time variable in auxiliary dataset
+    aux_latitude: str = "lat"  # Latitude variable in auxiliary dataset
+    aux_longitude: str = "lon"  # Longitude variable in auxiliary dataset
+    aux_temperature: str = "temperature"  # Temperature variable in auxiliary dataset
+    aux_salinity: str = "salinity"  # Salinity variable in auxiliary dataset
+    aux_density: str = "density"  # Density variable in auxiliary dataset
+
+    # === Processing options ===
     chop_start: bool = True
     verbose: bool = False
+    scale_probes: bool = True
 
     @property
     def all_probes(self) -> tuple[str, ...]:
+        """All probe names (shear + temperature)."""
         return self.shear_probes + self.temperature_probes
 
+    @property
+    def speed_smooth(self) -> str:
+        """Name of smoothed speed variable."""
+        return f"{self.speed}_smooth"
 
-@dataclass
-class PrepareConfig:
-    """Configuration for preparing raw p2nc output for processing.
+    @property
+    def pressure_smooth(self) -> str:
+        """Name of smoothed pressure variable."""
+        return f"{self.pressure}_smooth"
 
-    This handles the preprocessing needed for data converted via p2nc,
-    including smoothing of slow variables and scaling of shear/gradT
-    by fall speed.
+
+def merge_auxiliary_data(
+    ds: xr.Dataset,
+    aux_ds: xr.Dataset,
+    config: Optional["ProfileConfig"] = None,
+) -> xr.Dataset:
     """
+    Merge auxiliary data (lat, lon, T, S, density) into profile dataset.
 
-    # Smoothing parameters
-    smoothing_period: float = 0.25  # seconds (cutoff period for low-pass filter)
-    filter_order: int = 4
+    Interpolates auxiliary time series data onto the profile's slow time coordinate.
 
-    # Variables to smooth (slow-sampled)
-    speed_var: str = "U_EM"
-    pressure_var: str = "P"
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Profile dataset with t_slow coordinate (should have decoded times)
+    aux_ds : xr.Dataset
+        Auxiliary dataset with time series of latitude, longitude, temperature,
+        salinity, and/or density
+    config : ProfileConfig, optional
+        Configuration specifying variable names. If None, uses defaults.
 
-    # Output variable names for smoothed data
-    speed_smooth: str = "U_EM_smooth"
-    pressure_smooth: str = "P_smooth"
+    Returns
+    -------
+    xr.Dataset
+        Profile dataset with interpolated auxiliary variables added:
+        - aux_latitude, aux_longitude: position
+        - aux_temperature, aux_salinity, aux_density: for viscosity calculation
+    """
+    if config is None:
+        config = ProfileConfig()
 
-    # Probes to scale by fall speed
-    shear_probes: tuple[str, ...] = ("sh1", "sh2")
-    temperature_probes: tuple[str, ...] = ("gradT1", "gradT2")
+    ds = ds.copy()
+
+    # Get profile time coordinate
+    profile_time = ds.t_slow
+
+    # Get auxiliary time coordinate
+    aux_time_var = config.aux_time
+    if aux_time_var not in aux_ds.dims and aux_time_var not in aux_ds.coords:
+        raise ValueError(
+            f"Auxiliary time variable '{aux_time_var}' not found in auxiliary dataset"
+        )
+
+    # Variables to interpolate: (aux_name, output_name)
+    var_mappings = [
+        (config.aux_latitude, "aux_latitude"),
+        (config.aux_longitude, "aux_longitude"),
+        (config.aux_temperature, "aux_temperature"),
+        (config.aux_salinity, "aux_salinity"),
+        (config.aux_density, "aux_density"),
+    ]
+
+    for aux_var, output_var in var_mappings:
+        if aux_var in aux_ds:
+            # Interpolate onto profile time
+            interp_data = aux_ds[aux_var].interp(
+                {aux_time_var: profile_time},
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+            ds[output_var] = ("t_slow", interp_data.values)
+            if config.verbose:
+                logger.info(f"Interpolated {aux_var} -> {output_var}")
+        elif config.verbose:
+            logger.info(f"Auxiliary variable '{aux_var}' not found, skipping")
+
+    return ds
+
+
+def estimate_speed_from_pressure(
+    pressure: np.ndarray,
+    fs: float,
+    pitch: Optional[np.ndarray] = None,
+    angle_of_attack: float = 3.0,
+    dbar_to_m: float = 1.0197,
+) -> np.ndarray:
+    """
+    Estimate fall speed from pressure rate of change. Optionally corrects for pitch.
+
+    Parameters
+    ----------
+    pressure : ndarray
+        Pressure in dbar
+    fs : float
+        Sampling frequency in Hz
+    pitch : ndarray, optional
+        Pitch angle in degrees (positive = nose up). If None, assumes vertical.
+    angle_of_attack : float
+        Angle of attack in degrees (default: 3.0)
+    dbar_to_m : float
+        Conversion factor from dbar to meters (default: 1.0197)
+
+    Returns
+    -------
+    ndarray
+        Estimated speed along profiler path in m/s (positive = moving through water)
+    """
+    depth = pressure * dbar_to_m
+
+    w = np.gradient(depth, 1 / fs)
+
+    if pitch is not None:
+        total_angle = np.abs(pitch) + angle_of_attack
+        total_angle_rad = np.deg2rad(total_angle)
+        speed = np.abs(w) / np.sin(total_angle_rad)
+    else:
+        # No pitch correction - assume vertical profiler
+        speed = np.abs(w)
+
+    return speed
 
 
 def prepare_profile(
     ds: xr.Dataset,
-    config: Optional[PrepareConfig] = None,
+    config: Optional[ProfileConfig] = None,
 ) -> xr.Dataset:
     """
     Prepare raw p2nc output for epsilon processing.
 
     This function performs the preprocessing needed for data converted via p2nc:
-    1. Low-pass filters the speed and pressure data to remove high-frequency noise
-    2. Scales shear probes by 1/U^2 to convert to du/dz
-    3. Scales temperature gradient probes by 1/U to convert to dT/dz
+    1. Low-pass filters the pressure data
+    2. Estimates or smooths the speed variable
+    3. Scales shear probes by 1/U^2 to convert to du/dz
+    4. Scales temperature gradient probes by 1/U to convert to dT/dz
+
+    If the speed variable (default 'W') is not present in the dataset, speed
+    is estimated from pressure.
 
     Parameters
     ----------
     ds : xr.Dataset
         Raw dataset from p2nc conversion containing:
-        - U_EM, P on t_slow dimension
+        - P on t_slow dimension
+        - Optionally W (speed) on t_slow dimension
+        - Optionally Incl_Y (pitch) on t_slow dimension
         - sh1, sh2, gradT1, gradT2 on t_fast dimension
         - fs_slow, fs_fast sampling rates as attributes or variables
-    config : PrepareConfig, optional
+    config : ProfileConfig, optional
         Configuration for preprocessing. If None, uses defaults.
 
     Returns
     -------
     xr.Dataset
         Dataset with:
-        - U_EM_smooth, P_smooth: smoothed slow variables
-        - sh1, sh2: scaled by 1/U_smooth^2 (overwrites original)
-        - gradT1, gradT2: scaled by 1/U_smooth (overwrites original)
+        - {speed}_smooth: smoothed or estimated speed
+        - {pressure}_smooth: smoothed pressure
+        - sh1, sh2: scaled by 1/speed^2 (overwrites original)
+        - gradT1, gradT2: scaled by 1/speed (overwrites original)
     """
     if config is None:
-        config = PrepareConfig()
+        config = ProfileConfig()
 
     ds = ds.copy()
 
@@ -111,20 +248,55 @@ def prepare_profile(
     cutoff = 1 / (2 * config.smoothing_period)
     sos = sig.butter(config.filter_order, cutoff, btype="low", fs=fs_slow, output="sos")
 
-    # Smooth speed and pressure
-    if config.speed_var in ds:
-        ds[config.speed_smooth] = (
-            "t_slow",
-            sig.sosfiltfilt(sos, ds[config.speed_var].values),
-        )
-    else:
-        raise ValueError(f"Speed variable '{config.speed_var}' not found in dataset")
-
-    if config.pressure_var in ds:
+    # Smooth pressure
+    if config.pressure in ds:
         ds[config.pressure_smooth] = (
             "t_slow",
-            sig.sosfiltfilt(sos, ds[config.pressure_var].values),
+            sig.sosfiltfilt(sos, ds[config.pressure].values),
         )
+    else:
+        raise ValueError(f"Pressure variable '{config.pressure}' not found in dataset")
+
+    if config.speed in ds:
+        # Speed variable exists - smooth it
+        ds[config.speed_smooth] = (
+            "t_slow",
+            sig.sosfiltfilt(sos, ds[config.speed].values),
+        )
+    else:
+        if config.verbose:
+            logger.info(
+                f"Speed variable '{config.speed}' not found, "
+                "estimating from pressure derivative"
+            )
+
+        pitch = None
+        if config.use_pitch_correction and config.pitch in ds:
+            pitch = ds[config.pitch].values
+            if config.verbose:
+                logger.info(
+                    f"Using pitch correction with AoA={config.angle_of_attack}°"
+                )
+        speed_est = estimate_speed_from_pressure(
+            ds[config.pressure_smooth].values,
+            fs_slow,
+            pitch=pitch,
+            angle_of_attack=config.angle_of_attack,
+            dbar_to_m=config.dbar_to_m,
+        )
+
+        # Speed needs a longer smoothing period
+        sos_speed = sig.butter(
+            config.filter_order,
+            1 / (2 * config.speed_smoothing_period),
+            btype="low",
+            fs=fs_slow,
+            output="sos",
+        )
+        ds[config.speed_smooth] = ("t_slow", sig.sosfiltfilt(sos_speed, speed_est))
+
+    if not config.scale_probes:
+        return ds
 
     # Interpolate smoothed speed to fast time for scaling
     interp_kwargs = dict(
@@ -134,12 +306,10 @@ def prepare_profile(
     )
     U_fast = ds[config.speed_smooth].interp(**interp_kwargs)
 
-    # Scale shear probes by 1/U^2
     for probe in config.shear_probes:
         if probe in ds:
             ds[probe] = ds[probe] / U_fast**2
 
-    # Scale temperature gradient probes by 1/U
     for probe in config.temperature_probes:
         if probe in ds:
             ds[probe] = ds[probe] / U_fast
@@ -165,15 +335,21 @@ def despike_variables(
 
 
 def find_valid_segment(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Extract valid profile segment based on speed threshold."""
+    """Extract valid profile segment based on speed threshold.
+
+    Expects smoothed variables from prepare_profile.
+    """
+
+    pressure_var = config.pressure_smooth
+    speed_var = config.speed_smooth
+
     idx = find_segment(
-        ds[config.pressure],
+        ds[pressure_var],
         apply_speed_threshold=True,
         min_speed=config.min_speed,
-        velocity=ds[config.speed],
+        velocity=ds[speed_var],
     )
 
-    # find_segment returns (start, end) where end is exclusive (like Python slice)
     # Clamp end index to valid range
     idx_start = idx[0]
     idx_end = min(idx[1], ds.t_slow.size - 1)
@@ -327,9 +503,34 @@ def process_profile(
     ds: xr.Dataset,
     config: Optional[ProfileConfig] = None,
 ) -> xr.Dataset:
-    """Process a microstructure profile to compute dissipation rates."""
+    """Process a microstructure profile to compute dissipation rates.
+
+    If the dataset hasn't been prepared (no smoothed speed variable),
+    prepare_profile will be called automatically.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset from p2nc conversion or after prepare_profile
+    config : ProfileConfig, optional
+        Configuration for processing. If None, uses defaults.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with epsilon estimates and spectra
+    """
     if config is None:
         config = ProfileConfig()
+
+    # Auto-prepare if smoothed speed doesn't exist
+    if config.speed_smooth not in ds:
+        if config.verbose:
+            logger.info("Smoothed speed not found, running prepare_profile")
+        ds = prepare_profile(ds, config)
+
+    pressure_var = config.pressure_smooth
+    speed_var = config.speed_smooth
 
     ds = despike_variables(ds, config.all_probes)
     ds = find_valid_segment(ds, config)
@@ -342,27 +543,78 @@ def process_profile(
 
     means = compute_window_means(
         ds,
-        ["t_slow", config.pressure, config.speed, config.temperature],
+        ["t_slow", pressure_var, speed_var, config.temperature],
         params,
     )
 
     n_windows = len(means["t_slow"])
-    ds = ds.assign_coords(t_diss=("t_diss", means["t_slow"]))
-    ds["P_diss"] = ("t_diss", means.get(config.pressure, np.full(n_windows, np.nan)))
-    ds["U_diss"] = ("t_diss", means.get(config.speed, np.full(n_windows, np.nan)))
+    ds = ds.assign_coords(time=("time", means["t_slow"]))
+    ds["pressure"] = (
+        "time",
+        means.get(pressure_var, np.full(n_windows, np.nan)).astype("f4"),
+    )
+    ds["W"] = ("time", means.get(speed_var, np.full(n_windows, np.nan)).astype("f4"))
 
     if config.temperature in means:
         T_mean = means[config.temperature]
     else:
         T_mean = np.full(n_windows, config.default_temperature)
 
-    ds["T_diss"] = ("t_diss", T_mean.astype("f4"))
+    # Get salinity and density - prefer auxiliary data if available
+    if "aux_salinity" in ds:
+        S_mean = window_mean(
+            ds["aux_salinity"].values,
+            params["n_fft"] // params["sampling_ratio"],
+            params["n_diss"] // params["sampling_ratio"],
+        )
+        ds["salinity"] = ("time", S_mean.astype("f4"))
+    else:
+        S_mean = np.full(n_windows, config.default_salinity)
+
+    if "aux_density" in ds:
+        rho_mean = window_mean(
+            ds["aux_density"].values,
+            params["n_fft"] // params["sampling_ratio"],
+            params["n_diss"] // params["sampling_ratio"],
+        )
+        ds["density"] = ("time", rho_mean.astype("f4"))
+    else:
+        rho_mean = np.full(n_windows, config.default_density)
+
+    # Use auxiliary temperature if available, otherwise use MicroRider temp or default
+    if "aux_temperature" in ds:
+        T_visc = window_mean(
+            ds["aux_temperature"].values,
+            params["n_fft"] // params["sampling_ratio"],
+            params["n_diss"] // params["sampling_ratio"],
+        )
+        ds["temperature"] = ("time", T_visc.astype("f4"))
+    else:
+        T_visc = T_mean
+        ds["temperature"] = ("time", T_mean.astype("f4"))
+
+    # Compute viscosity using best available T, S, rho
     ds["nu"] = (
-        "t_diss",
-        compute_viscosity(
-            T_mean, config.default_salinity, config.default_density
-        ).astype("f4"),
+        "time",
+        compute_viscosity(T_visc, S_mean, rho_mean).astype("f4"),
     )
+
+    # Add latitude/longitude if available
+    if "aux_latitude" in ds:
+        lat_mean = window_mean(
+            ds["aux_latitude"].values,
+            params["n_fft"] // params["sampling_ratio"],
+            params["n_diss"] // params["sampling_ratio"],
+        )
+        ds["latitude"] = ("time", lat_mean.astype("f4"))
+
+    if "aux_longitude" in ds:
+        lon_mean = window_mean(
+            ds["aux_longitude"].values,
+            params["n_fft"] // params["sampling_ratio"],
+            params["n_diss"] // params["sampling_ratio"],
+        )
+        ds["longitude"] = ("time", lon_mean.astype("f4"))
 
     freq, spectra = compute_spectra(
         ds,
@@ -374,18 +626,15 @@ def process_profile(
 
     ds = ds.assign_coords(frequency=("frequency", freq))
     for name, psd in spectra.items():
-        ds[f"S_{name}"] = (("t_diss", "frequency"), psd.astype("f4"))
+        ds[f"S_{name}"] = (("time", "frequency"), psd.astype("f4"))
 
-    epsilon_results = compute_epsilon(
-        freq, spectra, ds["U_diss"].values, ds["nu"].values
-    )
+    epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
 
     for name, (eps, k_max) in epsilon_results.items():
         probe_num = name[-1]
-        ds[f"eps_{probe_num}"] = ("t_diss", eps.astype("f4"))
-        ds[f"k_max_{probe_num}"] = ("t_diss", k_max.astype("f4"))
+        ds[f"eps_{probe_num}"] = ("time", eps.astype("f4"))
+        ds[f"k_max_{probe_num}"] = ("time", k_max.astype("f4"))
 
-    ds["w"] = -ds[config.pressure].differentiate("t_slow")
-    ds["k"] = ds.frequency / ds.U_diss
+    ds["k"] = ds.frequency / ds.W
 
     return ds

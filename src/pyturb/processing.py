@@ -4,8 +4,15 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Optional, Union
 
+import xarray as xr
+
 from .io import load_profile_nc
-from .profile import PrepareConfig, ProfileConfig, prepare_profile, process_profile
+from .profile import (
+    ProfileConfig,
+    merge_auxiliary_data,
+    prepare_profile,
+    process_profile,
+)
 
 __all__ = [
     "batch_compute_epsilon",
@@ -15,9 +22,9 @@ __all__ = [
 def _process_single_profile(
     input_file: Path,
     output_dir: Path,
-    prepare_config: PrepareConfig,
-    profile_config: ProfileConfig,
+    config: ProfileConfig,
     overwrite: bool,
+    aux_ds: Optional[xr.Dataset] = None,
 ) -> tuple:
     """
     Process a single profile file and save results.
@@ -32,16 +39,33 @@ def _process_single_profile(
 
         ds = load_profile_nc(input_file)
 
+        # Merge auxiliary data if provided (needs decoded times)
+        if aux_ds is not None:
+            ds_decoded = xr.decode_cf(ds)
+            ds_decoded = merge_auxiliary_data(ds_decoded, aux_ds, config)
+            # Copy auxiliary variables back to original dataset
+            # Use ("t_slow", values) to avoid coordinate type mismatch
+            # (ds uses float64 epoch, ds_decoded uses datetime64)
+            for var in [
+                "aux_latitude",
+                "aux_longitude",
+                "aux_temperature",
+                "aux_salinity",
+                "aux_density",
+            ]:
+                if var in ds_decoded:
+                    ds[var] = ("t_slow", ds_decoded[var].values)
+
         # Prepare the profile (smooth speed/pressure, scale shear/gradT)
-        ds = prepare_profile(ds, prepare_config)
+        ds = prepare_profile(ds, config)
 
-        result = process_profile(ds, profile_config)
+        result = process_profile(ds, config)
 
-        # Keep only variables on t_diss dimension (epsilon results)
+        # Keep only variables on time dimension (epsilon results)
         vars_to_keep = [
             v
             for v in result.data_vars
-            if "t_diss" in result[v].dims and len(result[v].dims) > 0
+            if "time" in result[v].dims and len(result[v].dims) > 0
         ]
         result_filtered = result[vars_to_keep]
 
@@ -61,10 +85,8 @@ def _process_single_profile(
 
 def _unpack_epsilon_args(args: tuple) -> tuple:
     """Unpack arguments for imap_unordered."""
-    input_file, output_dir, prepare_config, profile_config, overwrite = args
-    return _process_single_profile(
-        input_file, output_dir, prepare_config, profile_config, overwrite
-    )
+    input_file, output_dir, config, overwrite, aux_ds = args
+    return _process_single_profile(input_file, output_dir, config, overwrite, aux_ds)
 
 
 def batch_compute_epsilon(
@@ -75,6 +97,15 @@ def batch_compute_epsilon(
     min_speed: float = 0.2,
     smoothing_period: float = 0.25,
     temperature: str = "JAC_T",
+    speed: str = "W",
+    angle_of_attack: float = 3.0,
+    use_pitch_correction: bool = False,
+    auxiliary_file: Optional[Union[str, Path]] = None,
+    aux_latitude: str = "lat",
+    aux_longitude: str = "lon",
+    aux_temperature: str = "temperature",
+    aux_salinity: str = "salinity",
+    aux_density: str = "density",
     n_workers: Optional[int] = None,
     verbose: bool = False,
     overwrite: bool = False,
@@ -105,6 +136,19 @@ def batch_compute_epsilon(
         Low-pass filter cutoff period for speed/pressure smoothing. Default 0.25 s.
     temperature : str, optional
         Name of temperature variable for viscosity calculation. Default 'JAC_T'.
+    speed : str, optional
+        Name of speed variable. If not found in dataset, speed is estimated
+        from pressure derivative. Default 'W'.
+    angle_of_attack : float, optional
+        Angle of attack in degrees, used when estimating speed from pressure.
+        Default 3.0.
+    use_pitch_correction : bool, optional
+        Whether to apply pitch correction when estimating speed from pressure.
+        Default False.
+    auxiliary_file : str or Path, optional
+        Path to auxiliary NetCDF file containing time series of latitude,
+        longitude, temperature, salinity, and/or density. These are interpolated
+        onto each profile and used for viscosity calculation and output.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
     verbose : bool, optional
@@ -179,24 +223,54 @@ def batch_compute_epsilon(
     if n_workers is None:
         n_workers = mp.cpu_count()
 
-    prepare_config = PrepareConfig(
-        smoothing_period=smoothing_period,
-    )
-
-    profile_config = ProfileConfig(
+    config = ProfileConfig(
         diss_len_sec=diss_len_sec,
         fft_len_sec=fft_len_sec,
         min_speed=min_speed,
-        # Use smoothed variables from prepare_profile
-        pressure="P_smooth",
-        speed="U_EM_smooth",
+        smoothing_period=smoothing_period,
         temperature=temperature,
+        speed=speed,
+        angle_of_attack=angle_of_attack,
+        use_pitch_correction=use_pitch_correction,
+        aux_latitude=aux_latitude,
+        aux_longitude=aux_longitude,
+        aux_temperature=aux_temperature,
+        aux_salinity=aux_salinity,
+        aux_density=aux_density,
         verbose=verbose,
     )
 
-    args = [
-        (f, output_dir, prepare_config, profile_config, overwrite) for f in nc_files
-    ]
+    # Load auxiliary dataset if provided
+    aux_ds = None
+    if auxiliary_file is not None:
+        auxiliary_file = Path(auxiliary_file)
+        if not auxiliary_file.exists():
+            raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
+        aux_ds = xr.open_dataset(auxiliary_file)
+
+        # Interpolate over NaN values in auxiliary variables (use configured names)
+        aux_vars = [
+            config.aux_latitude,
+            config.aux_longitude,
+            config.aux_temperature,
+            config.aux_salinity,
+            config.aux_density,
+        ]
+        for var in aux_vars:
+            if var in aux_ds and aux_ds[var].isnull().any():
+                # Get the time dimension name
+                time_dim = aux_ds[var].dims[0] if aux_ds[var].dims else None
+                if time_dim is not None:
+                    aux_ds[var] = aux_ds[var].interpolate_na(
+                        dim=time_dim, method="linear", fill_value="extrapolate"
+                    )
+                    if verbose:
+                        print(f"Interpolated NaN values in auxiliary variable '{var}'")
+
+        if verbose:
+            print(f"Loaded auxiliary dataset from {auxiliary_file}")
+
+    args = [(f, output_dir, config, overwrite, aux_ds) for f in nc_files]
 
     results = []
 
