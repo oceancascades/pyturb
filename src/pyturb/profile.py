@@ -534,7 +534,9 @@ def process_profile(
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
-    ds = despike_variables(ds, config.all_probes, single_pass=config.single_pass_despike)
+    ds = despike_variables(
+        ds, config.all_probes, single_pass=config.single_pass_despike
+    )
     ds = find_valid_segment(ds, config)
 
     params = compute_window_parameters(ds, config)
