@@ -71,6 +71,7 @@ class ProfileConfig:
     chop_start: bool = True
     verbose: bool = False
     scale_probes: bool = True
+    single_pass_despike: bool = False  # Single-pass despiking is ~4x faster
 
     @property
     def all_probes(self) -> tuple[str, ...]:
@@ -321,6 +322,7 @@ def despike_variables(
     ds: xr.Dataset,
     variables: tuple[str, ...],
     suffix: str = "_clean",
+    single_pass: bool = False,
 ) -> xr.Dataset:
     """Despike specified variables, creating new cleaned versions."""
     ds = ds.copy()
@@ -328,7 +330,7 @@ def despike_variables(
     for var in variables:
         if var not in ds:
             continue
-        cleaned, _, _, _ = despike(ds[var].values)
+        cleaned, _, _, _ = despike(ds[var].values, single_pass=single_pass)
         ds[var + suffix] = ("t_fast", cleaned)
 
     return ds
@@ -532,7 +534,7 @@ def process_profile(
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
-    ds = despike_variables(ds, config.all_probes)
+    ds = despike_variables(ds, config.all_probes, single_pass=config.single_pass_despike)
     ds = find_valid_segment(ds, config)
 
     params = compute_window_parameters(ds, config)
@@ -549,6 +551,13 @@ def process_profile(
 
     n_windows = len(means["t_slow"])
     ds = ds.assign_coords(time=("time", means["t_slow"]))
+
+    # Copy time units from t_slow if available
+    if "units" in ds.t_slow.attrs:
+        ds.time.attrs["units"] = ds.t_slow.attrs["units"]
+    if "long_name" in ds.t_slow.attrs:
+        ds.time.attrs["long_name"] = "Time (dissipation windows)"
+
     ds["pressure"] = (
         "time",
         means.get(pressure_var, np.full(n_windows, np.nan)).astype("f4"),
@@ -606,7 +615,7 @@ def process_profile(
             params["n_fft"] // params["sampling_ratio"],
             params["n_diss"] // params["sampling_ratio"],
         )
-        ds["latitude"] = ("time", lat_mean.astype("f4"))
+        ds["lat"] = ("time", lat_mean.astype("f4"))
 
     if "aux_longitude" in ds:
         lon_mean = window_mean(
@@ -614,7 +623,7 @@ def process_profile(
             params["n_fft"] // params["sampling_ratio"],
             params["n_diss"] // params["sampling_ratio"],
         )
-        ds["longitude"] = ("time", lon_mean.astype("f4"))
+        ds["lon"] = ("time", lon_mean.astype("f4"))
 
     freq, spectra = compute_spectra(
         ds,

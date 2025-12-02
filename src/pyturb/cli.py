@@ -7,7 +7,7 @@ import typer
 from typing_extensions import Annotated
 
 from .pfile import batch_convert_to_netcdf
-from .processing import batch_compute_epsilon
+from .processing import batch_compute_epsilon, bin_profiles
 
 app = typer.Typer()
 
@@ -274,3 +274,115 @@ def eps(
         overwrite=overwrite,
         verbose=True,
     )
+
+
+@app.command()
+def bin(
+    output_file: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output NetCDF file for binned data",
+            show_default=True,
+        ),
+    ] = Path("binned_profiles.nc"),
+    depth_min: Annotated[
+        float,
+        typer.Option(
+            "--dmin",
+            help="Minimum depth for binning (m)",
+            show_default=True,
+        ),
+    ] = 0.0,
+    depth_max: Annotated[
+        float,
+        typer.Option(
+            "--dmax",
+            help="Maximum depth for binning (m)",
+            show_default=True,
+        ),
+    ] = 1000.0,
+    bin_width: Annotated[
+        float,
+        typer.Option(
+            "--bin-width",
+            "-b",
+            help="Depth bin width (m)",
+            show_default=True,
+        ),
+    ] = 2.0,
+    default_latitude: Annotated[
+        float,
+        typer.Option(
+            "--lat",
+            help="Default latitude for pressure-to-depth conversion if not in data",
+            show_default=True,
+        ),
+    ] = 45.0,
+    bin_by_pressure: Annotated[
+        bool,
+        typer.Option(
+            "--pressure",
+            "-p",
+            help="Bin by pressure (dbar) instead of depth (m)",
+            show_default=True,
+        ),
+    ] = False,
+    variables: Annotated[
+        str | None,
+        typer.Option(
+            "--vars",
+            "-v",
+            help="Comma-separated list of variables to bin (default: eps_1,eps_2,W,temperature,salinity,density,nu,lat,lon)",
+        ),
+    ] = None,
+    n_workers: Annotated[
+        int | None,
+        typer.Option(
+            "--n-workers",
+            "-n",
+            help="Number of parallel workers",
+            show_default="all CPUs",
+        ),
+    ] = None,
+    input_files: Annotated[
+        list[Path],
+        typer.Argument(help="Input epsilon NetCDF files (supports shell globs)"),
+    ] = None,
+):
+    """Bin epsilon profiles by depth and concatenate into a single file.
+
+    By default, bins by depth calculated from pressure using gsw.
+    Use --pressure to bin by pressure instead.
+
+    Examples:
+        pyturb bin ./eps_output/*.nc -o binned.nc
+        pyturb bin ./eps_output/*.nc -b 5.0 --dmax 500
+        pyturb bin ./eps_output/*.nc --pressure --dmin 0 --dmax 500
+    """
+    if not input_files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+
+    # Parse variables if provided
+    var_list = None
+    if variables is not None:
+        var_list = [v.strip() for v in variables.split(",")]
+
+    result = bin_profiles(
+        files=input_files,
+        output_file=output_file,
+        depth_min=depth_min,
+        depth_max=depth_max,
+        bin_width=bin_width,
+        variables=var_list,
+        default_latitude=default_latitude,
+        bin_by_pressure=bin_by_pressure,
+        n_workers=n_workers,
+        verbose=True,
+    )
+
+    if result is None:
+        typer.echo("Error: No data was binned.", err=True)
+        raise typer.Exit(1)

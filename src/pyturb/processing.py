@@ -4,6 +4,8 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Optional, Union
 
+import gsw
+import numpy as np
 import xarray as xr
 
 from .io import load_profile_nc
@@ -16,6 +18,7 @@ from .profile import (
 
 __all__ = [
     "batch_compute_epsilon",
+    "bin_profiles",
 ]
 
 
@@ -69,11 +72,17 @@ def _process_single_profile(
         ]
         result_filtered = result[vars_to_keep]
 
-        # Add coordinates
+        # Add coordinates (time coordinate and its attrs are preserved automatically)
         result_filtered = result_filtered.assign_coords(
             frequency=result.frequency,
             k=result.k,
         )
+
+        # Ensure time coordinate has units attribute
+        if "time" in result.coords and "units" in result.time.attrs:
+            result_filtered.time.attrs["units"] = result.time.attrs["units"]
+        if "time" in result.coords and "long_name" in result.time.attrs:
+            result_filtered.time.attrs["long_name"] = result.time.attrs["long_name"]
 
         result_filtered.to_netcdf(output_file)
 
@@ -320,3 +329,279 @@ def batch_compute_epsilon(
         print(f"\nCompleted: {n_success} succeeded, {n_failed} failed")
 
     return results
+
+
+def _bin_single_profile(
+    file: Path,
+    depth_bins: np.ndarray,
+    variables: list[str],
+    default_latitude: float = 45.0,
+    bin_by_pressure: bool = False,
+) -> Optional[xr.Dataset]:
+    """
+    Bin a single profile dataset by depth (or pressure).
+
+    Parameters
+    ----------
+    file : Path
+        Path to the NetCDF file.
+    depth_bins : np.ndarray
+        Bin edges for depth (or pressure if bin_by_pressure=True).
+    variables : list of str
+        Variables to include in the binned output.
+    default_latitude : float
+        Default latitude for pressure-to-depth conversion if not in data.
+    bin_by_pressure : bool
+        If True, bin by pressure instead of depth.
+
+    Returns binned dataset or None if an error occurs.
+    """
+    try:
+        ds = xr.load_dataset(file, decode_times=False)
+
+        # Determine which variables exist in the dataset
+        vars_to_bin = [v for v in variables if v in ds]
+        if not vars_to_bin:
+            return None
+
+        # Convert time coordinate to epoch seconds (seconds since 1970-01-01)
+        time_epoch = None
+        if "time" in ds.coords:
+            time_values = ds.time.values
+            time_units = ds.time.attrs.get("units", "")
+
+            if time_units.startswith("seconds since "):
+                # Parse the reference time from units string
+                ref_time_str = time_units.replace("seconds since ", "")
+                try:
+                    ref_time = np.datetime64(ref_time_str)
+                    # Convert reference time to epoch seconds
+                    epoch = np.datetime64("1970-01-01T00:00:00")
+                    ref_epoch_sec = (ref_time - epoch) / np.timedelta64(1, "s")
+                    # Add to time values to get epoch seconds
+                    time_epoch = time_values + ref_epoch_sec
+                except ValueError:
+                    # If parsing fails, just use raw values
+                    time_epoch = time_values
+            else:
+                time_epoch = time_values
+
+            ds["time_var"] = ("time", time_epoch)
+            vars_to_bin_with_time = vars_to_bin + ["time_var"]
+        else:
+            vars_to_bin_with_time = vars_to_bin
+
+        # Subset to variables of interest
+        ds_subset = ds[vars_to_bin_with_time]
+
+        if bin_by_pressure:
+            # Bin by pressure directly
+            bin_var = ds.pressure
+            bin_name = "pressure_bins"
+            coord_name = "pressure"
+        else:
+            # Convert pressure to depth using gsw
+            # Get latitude - use data if available, otherwise default
+            if "lat" in ds and not np.all(np.isnan(ds.lat.values)):
+                lat = np.nanmean(ds.lat.values)
+            else:
+                lat = default_latitude
+
+            # Calculate depth from pressure
+            depth = gsw.z_from_p(ds.pressure.values, lat)
+            # gsw returns negative depths (below surface), convert to positive
+            depth = -depth
+            ds_subset["_depth_for_binning"] = ("time", depth)
+            bin_var = ds_subset["_depth_for_binning"]
+            bin_name = "_depth_for_binning_bins"
+            coord_name = "depth"
+
+        # Group by bins and compute mean
+        ds_binned = ds_subset.groupby_bins(bin_var, bins=depth_bins).mean()
+
+        # Convert bin intervals to midpoints
+        ds_binned[bin_name] = np.array(
+            [interval.mid for interval in ds_binned[bin_name].values]
+        )
+        ds_binned = ds_binned.rename({bin_name: coord_name})
+
+        # Remove the temporary depth variable if we added it
+        if not bin_by_pressure and "_depth_for_binning" in ds_binned:
+            ds_binned = ds_binned.drop_vars("_depth_for_binning", errors="ignore")
+
+        # Rename time_var back to time if it exists and add epoch units
+        if "time_var" in ds_binned:
+            ds_binned = ds_binned.rename({"time_var": "time"})
+            ds_binned["time"].attrs["units"] = "seconds since 1970-01-01 00:00:00"
+            ds_binned["time"].attrs["long_name"] = "Time"
+            ds_binned["time"].attrs["calendar"] = "proleptic_gregorian"
+
+        # Add source file as attribute
+        ds_binned.attrs["source_file"] = file.name
+
+        return ds_binned
+
+    except Exception as e:
+        print(f"Error binning {file}: {e}")
+        return None
+
+
+def _unpack_bin_args(args: tuple) -> Optional[xr.Dataset]:
+    """Unpack arguments for imap_unordered."""
+    file, depth_bins, variables, default_latitude, bin_by_pressure = args
+    return _bin_single_profile(
+        file, depth_bins, variables, default_latitude, bin_by_pressure
+    )
+
+
+def bin_profiles(
+    files: Union[str, Path, list[Path]],
+    output_file: Union[str, Path] = "binned_profiles.nc",
+    depth_min: float = 0.0,
+    depth_max: float = 1000.0,
+    bin_width: float = 2.0,
+    variables: Optional[list[str]] = None,
+    default_latitude: float = 45.0,
+    bin_by_pressure: bool = False,
+    n_workers: Optional[int] = None,
+    verbose: bool = False,
+) -> Optional[xr.Dataset]:
+    """
+    Bin multiple profile datasets by depth (or pressure) and concatenate.
+
+    This function reads epsilon output files, bins them by depth (default)
+    or pressure, and concatenates them along a 'profile' dimension.
+    Depth is calculated from pressure using gsw.z_from_p().
+
+    Parameters
+    ----------
+    files : str, Path, or list of Path
+        Either a glob pattern to match NetCDF files (e.g., '/path/to/data/*.nc'),
+        a directory path (in which case '*.nc' is appended), or a list of
+        Path objects pointing to specific files.
+    output_file : str or Path, optional
+        Output file path. Default 'binned_profiles.nc'.
+    depth_min : float, optional
+        Minimum depth for binning. Default 0.0 m.
+    depth_max : float, optional
+        Maximum depth for binning. Default 1000.0 m.
+    bin_width : float, optional
+        Width of depth bins. Default 2.0 m.
+    variables : list of str, optional
+        Variables to include in binned output. Default includes eps_1, eps_2,
+        W, temperature, salinity, density, nu, latitude, longitude.
+    default_latitude : float, optional
+        Latitude to use for pressure-to-depth conversion if not available
+        in the data. Default 45.0 degrees.
+    bin_by_pressure : bool, optional
+        If True, bin by pressure (dbar) instead of depth (m). Default False.
+    n_workers : int, optional
+        Number of parallel workers. Default is number of CPU cores.
+    verbose : bool, optional
+        Print progress information. Default False.
+
+    Returns
+    -------
+    xr.Dataset
+        Binned and concatenated dataset with dimensions (profile, depth)
+        or (profile, pressure) if bin_by_pressure=True.
+
+    Examples
+    --------
+    >>> from pyturb.processing import bin_profiles
+    >>> ds = bin_profiles('/path/to/eps_output/*.nc', output_file='binned.nc')
+    >>> # Bin by pressure instead of depth
+    >>> ds = bin_profiles('/path/to/eps_output/*.nc', bin_by_pressure=True)
+    """
+    # Default variables to bin
+    if variables is None:
+        variables = [
+            "eps_1",
+            "eps_2",
+            "W",
+            "temperature",
+            "salinity",
+            "density",
+            "nu",
+            "lat",
+            "lon",
+        ]
+
+    # Handle different input types
+    if isinstance(files, list):
+        nc_files = sorted(files)
+    else:
+        pattern = Path(files)
+        if pattern.is_dir():
+            pattern = pattern / "*.nc"
+        if pattern.is_absolute():
+            nc_files = sorted(pattern.parent.glob(pattern.name))
+        else:
+            nc_files = sorted(Path.cwd().glob(str(pattern)))
+
+    if not nc_files:
+        if verbose:
+            print("No NetCDF files found.")
+        return None
+
+    if verbose:
+        print(f"Found {len(nc_files)} NetCDF files to bin")
+        coord_type = "pressure" if bin_by_pressure else "depth"
+        print(
+            f"Binning by {coord_type} from {depth_min} to {depth_max} m with {bin_width} m bins"
+        )
+
+    # Create depth (or pressure) bins
+    depth_bins = np.arange(depth_min, depth_max + bin_width, bin_width)
+
+    if n_workers is None:
+        n_workers = mp.cpu_count()
+
+    args = [
+        (f, depth_bins, variables, default_latitude, bin_by_pressure) for f in nc_files
+    ]
+
+    binned_datasets = []
+
+    # Use serial processing for small batches
+    if len(nc_files) <= min(n_workers, 4):
+        if verbose:
+            print("Using serial processing for small batch")
+        for i, arg_tuple in enumerate(args):
+            result = _unpack_bin_args(arg_tuple)
+            if result is not None:
+                binned_datasets.append(result)
+            if verbose:
+                status = "binned" if result is not None else "skipped"
+                print(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+    else:
+        if verbose:
+            print(f"Using {n_workers} parallel workers")
+        with mp.Pool(processes=n_workers) as pool:
+            for i, result in enumerate(pool.imap(_unpack_bin_args, args)):
+                if result is not None:
+                    binned_datasets.append(result)
+                if verbose:
+                    status = "binned" if result is not None else "skipped"
+                    print(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+
+    if not binned_datasets:
+        if verbose:
+            print("No datasets were successfully binned.")
+        return None
+
+    if verbose:
+        print(f"\nConcatenating {len(binned_datasets)} binned profiles...")
+
+    # Concatenate along profile dimension
+    combined = xr.concat(binned_datasets, dim="profile")
+
+    # Save to file
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_netcdf(output_file)
+
+    if verbose:
+        print(f"Saved binned data to {output_file}")
+
+    return combined
