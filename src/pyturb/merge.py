@@ -5,6 +5,7 @@ This module provides functionality to concatenate NetCDF files produced by
 the p2nc command into a single continuous dataset with unified POSIX timestamps.
 """
 
+import logging
 import os
 import re
 from datetime import datetime
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Optional, Union
 
 import netCDF4 as nc
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["merge_netcdf"]
 
@@ -131,9 +134,9 @@ def merge_netcdf(
         )
 
     if verbose:
-        print(f"Merging {len(file_list)} files")
-        print(f"Output: {output_file}")
-        print("-" * 50)
+        logger.info(f"Merging {len(file_list)} files")
+        logger.info(f"Output: {output_file}")
+        logger.debug("-" * 50)
 
     # Get structure from first file
     dims, var_info, global_attrs, _ = _get_file_info(file_list[0])
@@ -162,14 +165,14 @@ def merge_netcdf(
     total_t_slow = sum(f["t_slow_size"] for f in file_info)
 
     if verbose:
-        print(f"Total t_fast: {total_t_fast}")
-        print(f"Total t_slow: {total_t_slow}")
+        logger.info(f"Total t_fast: {total_t_fast}")
+        logger.info(f"Total t_slow: {total_t_slow}")
         for info in file_info:
-            print(
+            logger.debug(
                 f"  {info['path'].name}: "
                 f"t_fast={info['t_fast_size']}, t_slow={info['t_slow_size']}"
             )
-        print("-" * 50)
+        logger.debug("-" * 50)
 
     # Create output directory if needed
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +236,7 @@ def merge_netcdf(
 
             if verbose:
                 progress = (idx + 1) / len(file_list) * 100
-                print(f"[{progress:5.1f}%] Processing {f.name}...")
+                logger.info(f"[{progress:5.1f}%] Processing {f.name}...")
 
             with nc.Dataset(f, "r") as src:
                 for name in src.variables:
@@ -285,7 +288,7 @@ def merge_netcdf(
 
     if verbose:
         output_size = os.path.getsize(output_file) / (1024 * 1024)
-        print("-" * 50)
-        print(f"Done! Output file size: {output_size:.2f} MB")
+        logger.debug("-" * 50)
+        logger.info(f"Done! Output file size: {output_size:.2f} MB")
 
     return output_file

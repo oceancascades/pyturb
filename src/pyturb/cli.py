@@ -1,5 +1,6 @@
 """Command line interface for pyturb."""
 
+import logging
 from importlib.metadata import version
 from pathlib import Path
 
@@ -11,6 +12,24 @@ from .pfile import batch_convert_to_netcdf
 from .processing import batch_compute_epsilon, bin_profiles
 
 app = typer.Typer()
+
+# Map string log levels to logging constants
+LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+
+def _setup_logging(level: str) -> None:
+    """Configure logging for the CLI."""
+    log_level = LOG_LEVELS.get(level.lower(), logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s: %(message)s",
+        force=True,  # Override any existing configuration
+    )
 
 
 def version_callback(value: bool):
@@ -31,8 +50,18 @@ def main(
             "--version", "-v", callback=version_callback, help="Show version and exit."
         ),
     ] = False,
+    log_level: Annotated[
+        str,
+        typer.Option(
+            "--log-level",
+            "-l",
+            help="Logging level (debug, info, warning, error)",
+            show_default=True,
+        ),
+    ] = "info",
 ):
     """pyturb: Tools for processing ocean microstructure data."""
+    _setup_logging(log_level)
 
 
 @app.command()

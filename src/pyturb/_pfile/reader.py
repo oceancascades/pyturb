@@ -2,6 +2,7 @@
 Low-level file reading for RSI P-files.
 """
 
+import logging
 import re
 import warnings
 from datetime import datetime
@@ -11,6 +12,8 @@ from typing import Dict, Tuple, Union
 import numpy as np
 
 from .config import SetupConfig
+
+logger = logging.getLogger(__name__)
 
 # Header field indices (0-based)
 _BYTES_PER_WORD = 2
@@ -199,10 +202,9 @@ def _read_pfile_impl(
                 ch_matrix[i, : len(values)] = values
 
     if verbose:
-        print("\nAddress Matrix:")
+        logger.debug("Address Matrix:")
         for row in ch_matrix:
-            print("".join(f"{x:4d}" for x in row))
-        print()
+            logger.debug("".join(f"{x:4d}" for x in row))
 
     # Build channel list from config
     ch_nums, ch_names = [], []
@@ -230,19 +232,19 @@ def _read_pfile_impl(
         if len(ids) == 1:
             if ids[0] in ch_matrix:
                 if verbose:
-                    print(f"     channel: {ids[0]:2d} = {ch_name}")
+                    logger.debug(f"     channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(ch_name)
         elif len(ids) == 2:
             # Even/odd pair for 32-bit channels
             if ids[0] in ch_matrix:
                 if verbose:
-                    print(f"even channel: {ids[0]:2d} = {ch_name}")
+                    logger.debug(f"even channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(f"{ch_name}_E")
             if ids[1] in ch_matrix:
                 if verbose:
-                    print(f" odd channel: {ids[1]:2d} = {ch_name}")
+                    logger.debug(f" odd channel: {ids[1]:2d} = {ch_name}")
                 ch_nums.append(ids[1])
                 ch_names.append(f"{ch_name}_O")
 

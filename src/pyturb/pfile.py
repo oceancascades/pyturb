@@ -8,6 +8,7 @@ from read_pfile.m and open_pfile.m.
 Author: Translated from MATLAB ODAS library v4.5.1
 """
 
+import logging
 import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, Optional, Union
@@ -23,6 +24,8 @@ from ._pfile import (
     read_pfile,
     to_xarray,
 )
+
+logger = logging.getLogger(__name__)
 
 # Re-export for public API
 __all__ = [
@@ -337,17 +340,17 @@ def batch_convert_to_netcdf(
         pfiles = [pf for pf in pfiles if pf.stat().st_size >= min_file_size]
         skipped_small = original_count - len(pfiles)
         if verbose and skipped_small:
-            print(
+            logger.info(
                 f"Skipping {skipped_small} files smaller than {min_file_size / 1000:.0f} kB"
             )
 
     if not pfiles:
         if verbose:
-            print("No files to process after size filtering")
+            logger.info("No files to process after size filtering")
         return
 
     if verbose:
-        print(f"Found {len(pfiles)} P-files to convert")
+        logger.info(f"Found {len(pfiles)} P-files to convert")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -367,13 +370,13 @@ def batch_convert_to_netcdf(
                 files_to_process.append(pf)
 
         if verbose and skipped:
-            print(f"Skipping {len(skipped)} files (output already exists)")
+            logger.info(f"Skipping {len(skipped)} files (output already exists)")
 
         pfiles = files_to_process
 
         if not pfiles:
             if verbose:
-                print("No files to process (all outputs already exist)")
+                logger.info("No files to process (all outputs already exist)")
             return
 
     if n_workers is None:
@@ -396,7 +399,7 @@ def batch_convert_to_netcdf(
     results = []
     if len(pfiles) <= min(n_workers, 4):
         if verbose:
-            print("Using serial processing for small batch")
+            logger.info("Using serial processing for small batch")
         for i, arg_tuple in enumerate(args):
             input_path, output_path, error = _unpack_worker_args(arg_tuple)
             success = error is None
@@ -410,9 +413,9 @@ def batch_convert_to_netcdf(
             )
             if verbose:
                 status = "successfully converted" if success else "failed to convert"
-                print(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+                logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
                 if error:
-                    print(f"    Error: {error}")
+                    logger.error(f"    Error: {error}")
     else:
         with mp.Pool(processes=n_workers) as pool:
             # Use imap_unordered for streaming results as they complete
@@ -431,12 +434,12 @@ def batch_convert_to_netcdf(
                     status = (
                         "successfully converted" if success else "failed to convert"
                     )
-                    print(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+                    logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
                     if error:
-                        print(f"    Error: {error}")
+                        logger.error(f"    Error: {error}")
 
     # Summary
     if verbose:
         n_success = sum(1 for r in results if r["success"])
         n_failed = len(results) - n_success
-        print(f"\nCompleted: {n_success} succeeded, {n_failed} failed")
+        logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")

@@ -1,5 +1,6 @@
 """Batch processing functions for microstructure data."""
 
+import logging
 import multiprocessing as mp
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -16,6 +17,8 @@ from .profile import (
     process_profile,
     split_into_profiles,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "batch_compute_epsilon",
@@ -267,11 +270,11 @@ def batch_compute_epsilon(
 
     if not nc_files:
         if verbose:
-            print("No NetCDF files found.")
+            logger.info("No NetCDF files found.")
         return []
 
     if verbose:
-        print(f"Found {len(nc_files)} NetCDF files to process")
+        logger.info(f"Found {len(nc_files)} NetCDF files to process")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -338,10 +341,12 @@ def batch_compute_epsilon(
                         dim=time_dim, method="linear", fill_value="extrapolate"
                     )
                     if verbose:
-                        print(f"Interpolated NaN values in auxiliary variable '{var}'")
+                        logger.info(
+                            f"Interpolated NaN values in auxiliary variable '{var}'"
+                        )
 
         if verbose:
-            print(f"Loaded auxiliary dataset from {auxiliary_file}")
+            logger.info(f"Loaded auxiliary dataset from {auxiliary_file}")
 
     args = [(f, output_dir, config, overwrite, aux_ds) for f in nc_files]
 
@@ -352,7 +357,9 @@ def batch_compute_epsilon(
     effective_workers = min(n_workers, len(nc_files))
 
     if verbose:
-        print(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
+        logger.info(
+            f"Using {effective_workers} parallel workers for {len(nc_files)} files"
+        )
 
     with mp.Pool(processes=effective_workers) as pool:
         results_iter = pool.imap_unordered(_unpack_epsilon_args, args)
@@ -374,14 +381,16 @@ def batch_compute_epsilon(
                         status = f"profile {profile_idx} processed"
                     else:
                         status = f"profile {profile_idx} failed ({error})"
-                    print(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
+                    logger.info(
+                        f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}"
+                    )
 
     # Summary
     if verbose:
         n_success = sum(1 for r in results if r["success"])
         n_failed = len(results) - n_success
-        print(
-            f"\nCompleted: {n_success} profiles succeeded, {n_failed} failed from {len(nc_files)} files"
+        logger.info(
+            f"Completed: {n_success} profiles succeeded, {n_failed} failed from {len(nc_files)} files"
         )
 
     return results
@@ -498,7 +507,7 @@ def _bin_single_profile(
         return ds_binned
 
     except Exception as e:
-        print(f"Error binning {file}: {e}")
+        logger.error(f"Error binning {file}: {e}")
         return None
 
 
@@ -597,13 +606,13 @@ def bin_profiles(
 
     if not nc_files:
         if verbose:
-            print("No NetCDF files found.")
+            logger.info("No NetCDF files found.")
         return None
 
     if verbose:
-        print(f"Found {len(nc_files)} NetCDF files to bin")
+        logger.info(f"Found {len(nc_files)} NetCDF files to bin")
         coord_type = "pressure" if bin_by_pressure else "depth"
-        print(
+        logger.info(
             f"Binning by {coord_type} from {depth_min} to {depth_max} m with {bin_width} m bins"
         )
 
@@ -622,32 +631,34 @@ def bin_profiles(
     # Use serial processing for small batches
     if len(nc_files) <= min(n_workers, 4):
         if verbose:
-            print("Using serial processing for small batch")
+            logger.info("Using serial processing for small batch")
         for i, arg_tuple in enumerate(args):
             result = _unpack_bin_args(arg_tuple)
             if result is not None:
                 binned_datasets.append(result)
             if verbose:
                 status = "binned" if result is not None else "skipped"
-                print(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+                logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
     else:
         if verbose:
-            print(f"Using {n_workers} parallel workers")
+            logger.info(f"Using {n_workers} parallel workers")
         with mp.Pool(processes=n_workers) as pool:
             for i, result in enumerate(pool.imap(_unpack_bin_args, args)):
                 if result is not None:
                     binned_datasets.append(result)
                 if verbose:
                     status = "binned" if result is not None else "skipped"
-                    print(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+                    logger.info(
+                        f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}"
+                    )
 
     if not binned_datasets:
         if verbose:
-            print("No datasets were successfully binned.")
+            logger.info("No datasets were successfully binned.")
         return None
 
     if verbose:
-        print(f"\nConcatenating {len(binned_datasets)} binned profiles...")
+        logger.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
     # Concatenate along profile dimension
     combined = xr.concat(binned_datasets, dim="profile")
@@ -660,7 +671,7 @@ def bin_profiles(
         sort_order = np.argsort(profile_times.values)
         combined = combined.isel(profile=sort_order)
         if verbose:
-            print("Sorted profiles by time")
+            logger.info("Sorted profiles by time")
 
     # Save to file
     output_file = Path(output_file)
@@ -668,6 +679,6 @@ def bin_profiles(
     combined.to_netcdf(output_file)
 
     if verbose:
-        print(f"Saved binned data to {output_file}")
+        logger.info(f"Saved binned data to {output_file}")
 
     return combined
