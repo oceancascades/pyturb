@@ -14,7 +14,7 @@ def _despike_once(
     n: int = None,
 ) -> tuple[NDArray, NDArray]:
     if n is None:
-        n = int(0.4 * fs)
+        n = int(0.04 * fs)  # 40 ms of data around each spike (matches MATLAB ODAS)
 
     n_half = n // 2
     length = len(signal)

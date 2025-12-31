@@ -274,9 +274,13 @@ def estimate_epsilon(
     # Missing low-wavenumber variance (half-bin extrapolation) then re-check
     if k[1] > 0:
         phi0 = nasmyth_spectrum(k[1:3], eps_adj, nu)[0]
-        eps_low = eps_adj + 0.25 * 7.5 * nu * k[1] * phi0
+        low_k_correction = 0.25 * 7.5 * nu * k[1] * phi0
+        eps_low = eps_adj + low_k_correction
         if eps_low / eps_adj > 1.1:
-            eps_low = apply_unresolved_variance(eps_low, k_range[-1], nu)
-        eps_adj = eps_low
+            # Significant low-k correction: add to original variance and re-iterate
+            e_3_corrected = e_3 + low_k_correction
+            eps_adj = apply_unresolved_variance(e_3_corrected, k_range[-1], nu)
+        else:
+            eps_adj = eps_low
 
     return eps_adj, k_range[-1]

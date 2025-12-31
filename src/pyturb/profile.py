@@ -38,7 +38,7 @@ class ProfileConfig:
     # === Speed estimation parameters ===
     use_pitch_correction: bool = False  # Whether to correct speed for pitch/AoA
     angle_of_attack: float = 3.0  # Angle of attack in degrees
-    dbar_to_m: float = 1.0197  # Conversion from dbar to meters
+    dbar_to_m: float = 1.005  # Conversion from dbar to meters
 
     # === Probe names ===
     shear_probes: tuple[str, ...] = ("sh1", "sh2")
@@ -48,14 +48,13 @@ class ProfileConfig:
     pressure_smoothing_period: float = (
         0.25  # Cutoff period for pressure low-pass filter (seconds)
     )
-    speed_smoothing_period: float = (
-        2.0  # Cutoff period for estimated speed smoothing (seconds)
-    )
     filter_order: int = 4
     gap_threshold: float = (
         2.0  # Minimum gap duration to treat as discontinuity (seconds)
     )
     gap_factor: float = 4.0  # Gap detected if dt > gap_factor * median(dt)
+    hp_cutoff_hz: float = 0.0  # High-pass cutoff for shear before spectra (Hz)
+    # 0 = auto (0.5/fft_len_sec), >0 = explicit value, <0 = disabled
 
     # === Thresholds ===
     min_speed: float = 0.2  # Minimum speed for valid profile segment
@@ -180,7 +179,7 @@ def estimate_speed_from_pressure(
     fs: float,
     pitch: Optional[np.ndarray] = None,
     angle_of_attack: float = 3.0,
-    dbar_to_m: float = 1.0197,
+    dbar_to_m: float = 1.005,
 ) -> np.ndarray:
     """
     Estimate fall speed from pressure rate of change. Optionally corrects for pitch.
@@ -188,7 +187,7 @@ def estimate_speed_from_pressure(
     Parameters
     ----------
     pressure : ndarray
-        Pressure in dbar
+        Pressure in dbar (should be pre-smoothed)
     fs : float
         Sampling frequency in Hz
     pitch : ndarray, optional
@@ -196,7 +195,7 @@ def estimate_speed_from_pressure(
     angle_of_attack : float
         Angle of attack in degrees (default: 3.0)
     dbar_to_m : float
-        Conversion factor from dbar to meters (default: 1.0197)
+        Conversion factor from dbar to meters (default: 1.005 = 1025 * 9.81 / 1e4)
 
     Returns
     -------
@@ -410,25 +409,8 @@ def prepare_profile(
             dbar_to_m=config.dbar_to_m,
         )
 
-        # Speed needs a longer smoothing period
-        sos_speed = sig.butter(
-            config.filter_order,
-            1 / (2 * config.speed_smoothing_period),
-            btype="low",
-            fs=fs_slow,
-            output="sos",
-        )
-        ds[config.speed_smooth] = (
-            "t_slow",
-            gap_aware_sosfiltfilt(
-                sos_speed,
-                speed_est,
-                t_slow,
-                gap_threshold=config.gap_threshold,
-                gap_factor=config.gap_factor,
-                verbose=config.verbose,
-            ),
-        )
+        # Speed is already smoothed in estimate_speed_from_pressure
+        ds[config.speed_smooth] = ("t_slow", speed_est)
 
     if not config.scale_probes:
         return ds
@@ -466,6 +448,53 @@ def despike_variables(
             continue
         cleaned, _, _, _ = despike(ds[var].values, single_pass=single_pass)
         ds[var + suffix] = ("t_fast", cleaned)
+
+    return ds
+
+
+def highpass_filter(
+    ds: xr.Dataset,
+    variables: tuple[str, ...],
+    fs: float,
+    cutoff_hz: float,
+    suffix: str = "_clean",
+) -> xr.Dataset:
+    """
+    Apply high-pass filter to variables before spectral analysis.
+
+    This removes low-frequency contamination (profiler motion, etc.) that
+    would otherwise bias the spectral variance estimate. MATLAB ODAS recommends
+    HP filtering at ~0.5 / fft_length_seconds before computing dissipation.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with despiked variables.
+    variables : tuple of str
+        Variable names to filter (without suffix).
+    fs : float
+        Sampling frequency in Hz.
+    cutoff_hz : float
+        High-pass cutoff frequency in Hz.
+    suffix : str
+        Suffix for cleaned variables (default: "_clean").
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with high-pass filtered variables (overwrites *_clean).
+    """
+    ds = ds.copy()
+
+    # Design first-order Butterworth high-pass filter
+    sos = sig.butter(1, cutoff_hz / (fs / 2), btype="high", output="sos")
+
+    for var in variables:
+        var_clean = f"{var}{suffix}"
+        if var_clean not in ds:
+            continue
+        filtered = sig.sosfiltfilt(sos, ds[var_clean].values)
+        ds[var_clean] = ("t_fast", filtered.astype(ds[var_clean].dtype))
 
     return ds
 
@@ -803,6 +832,24 @@ def process_profile(
     ds = despike_variables(
         ds, config.all_probes, single_pass=config.single_pass_despike
     )
+
+    # High-pass filter shear probes to remove low-frequency contamination
+    if config.hp_cutoff_hz > 0:
+        hp_cutoff = config.hp_cutoff_hz
+    elif config.hp_cutoff_hz == 0:
+        # Auto-compute from FFT length: 0.5 / fft_len_sec
+        hp_cutoff = 0.5 / config.fft_len_sec
+    else:
+        hp_cutoff = None  # Negative value disables HP filter
+
+    if hp_cutoff is not None and hp_cutoff > 0:
+        ds = highpass_filter(
+            ds,
+            config.shear_probes,
+            float(ds.fs_fast),
+            hp_cutoff,
+        )
+
     ds = find_valid_segment(ds, config)
 
     params = compute_window_parameters(ds, config)
