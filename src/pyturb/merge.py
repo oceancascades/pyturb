@@ -8,7 +8,7 @@ the p2nc command into a single continuous dataset with unified POSIX timestamps.
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -31,7 +31,7 @@ def _parse_time_units(units_str: str) -> float:
     Returns
     -------
     float
-        POSIX timestamp of the reference time
+        POSIX timestamp of the reference time (UTC)
     """
     pattern = r"seconds\s+since\s+(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
     match = re.search(pattern, units_str, re.IGNORECASE)
@@ -46,6 +46,9 @@ def _parse_time_units(units_str: str) -> float:
         dt = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%S.%f")
     else:
         dt = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%S")
+
+    # All times are UTC - explicitly set timezone to avoid local timezone conversion
+    dt = dt.replace(tzinfo=timezone.utc)
 
     return dt.timestamp()
 
