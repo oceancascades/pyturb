@@ -203,30 +203,10 @@ def estimate_epsilon(
 
     # If the first-guess epsilon is above the threshold fit to the inertial subrange directly.
     if e_1 >= e_isr_threshold:
-        # Direct inertial-subrange method
-        eps_fit, k_max, fit_mask = inertial_subrange_fit(
-            k, phi, e_1, nu, min(150.0, k_AA)
-        )
-        # Use variance within fit range for unresolved correction
-        e_var = (
-            7.5 * nu * np.trapezoid(phi[fit_mask], k[fit_mask])
-            if fit_mask.any()
-            else eps_fit
-        )
-
-        eps_final = apply_unresolved_variance(e_var, k_max, nu)
-        # Low-end missing variance correction
-        if k[1] > 0:
-            phi0 = nasmyth_spectrum(k[1:3], eps_final, nu)[0]
-            eps_add = 0.25 * 7.5 * nu * k[1] * phi0
-            eps_new = eps_final + eps_add
-            if eps_new / eps_final > 1.1:
-                eps_final = apply_unresolved_variance(
-                    7.5 * nu * np.trapezoid(phi[k <= k_max], k[k <= k_max]), k_max, nu
-                )
-            else:
-                eps_final = eps_new
-        return eps_final, k_max
+        # Direct inertial-subrange method - return fit result directly
+        # (no additional variance corrections; ISR fit is self-consistent)
+        eps_fit, k_max, _ = inertial_subrange_fit(k, phi, e_1, nu, min(150.0, k_AA))
+        return eps_fit, k_max
 
     # If the first guess is low we undertake a more thorough fitting procedure
     # If there are enough points in the inertial subrange with refine the initial guess
