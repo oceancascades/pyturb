@@ -2,7 +2,7 @@
 
 import multiprocessing as mp
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import gsw
 import numpy as np
@@ -14,6 +14,7 @@ from .profile import (
     merge_auxiliary_data,
     prepare_profile,
     process_profile,
+    split_into_profiles,
 )
 
 __all__ = [
@@ -22,24 +23,22 @@ __all__ = [
 ]
 
 
-def _process_single_profile(
+def _process_file(
     input_file: Path,
     output_dir: Path,
     config: ProfileConfig,
     overwrite: bool,
     aux_ds: Optional[xr.Dataset] = None,
-) -> tuple:
+) -> list[tuple]:
     """
-    Process a single profile file and save results.
+    Process a file that may contain multiple profiles.
 
-    Returns (input_path, output_path, error).
+    Returns list of (input_path, output_path, profile_index, error) tuples.
     """
+    results = []
+    stem = input_file.stem
+
     try:
-        output_file = output_dir / input_file.name
-
-        if output_file.exists() and not overwrite:
-            return (input_file, output_file, "skipped (exists)")
-
         ds = load_profile_nc(input_file)
 
         # Merge auxiliary data if provided (needs decoded times)
@@ -47,8 +46,6 @@ def _process_single_profile(
             ds_decoded = xr.decode_cf(ds)
             ds_decoded = merge_auxiliary_data(ds_decoded, aux_ds, config)
             # Copy auxiliary variables back to original dataset
-            # Use ("t_slow", values) to avoid coordinate type mismatch
-            # (ds uses float64 epoch, ds_decoded uses datetime64)
             for var in [
                 "aux_latitude",
                 "aux_longitude",
@@ -62,40 +59,96 @@ def _process_single_profile(
         # Prepare the profile (smooth speed/pressure, scale shear/gradT)
         ds = prepare_profile(ds, config)
 
-        result = process_profile(ds, config)
+        # Split into individual profiles
+        profile_count = 0
+        for profile_idx, profile_ds in split_into_profiles(ds, config):
+            profile_count += 1
+            # Generate output filename with profile index
+            output_file = output_dir / f"{stem}_p{profile_idx:04d}.nc"
 
-        # Keep only variables on time dimension (epsilon results)
-        vars_to_keep = [
-            v
-            for v in result.data_vars
-            if "time" in result[v].dims and len(result[v].dims) > 0
-        ]
-        result_filtered = result[vars_to_keep]
+            if output_file.exists() and not overwrite:
+                results.append(
+                    (input_file, output_file, profile_idx, "skipped (exists)")
+                )
+                continue
 
-        # Add coordinates (time coordinate and its attrs are preserved automatically)
-        result_filtered = result_filtered.assign_coords(
-            frequency=result.frequency,
-            k=result.k,
-        )
+            try:
+                result = process_profile(profile_ds, config)
 
-        # Ensure time coordinate has units attribute
-        if "time" in result.coords and "units" in result.time.attrs:
-            result_filtered.time.attrs["units"] = result.time.attrs["units"]
-        if "time" in result.coords and "long_name" in result.time.attrs:
-            result_filtered.time.attrs["long_name"] = result.time.attrs["long_name"]
+                # Keep only variables on time dimension (epsilon results)
+                vars_to_keep = [
+                    v
+                    for v in result.data_vars
+                    if "time" in result[v].dims and len(result[v].dims) > 0
+                ]
+                result_filtered = result[vars_to_keep]
 
-        result_filtered.to_netcdf(output_file)
+                # Add coordinates
+                result_filtered = result_filtered.assign_coords(
+                    frequency=result.frequency,
+                    k=result.k,
+                )
 
-        return (input_file, output_file, None)
+                # Ensure time coordinate has units attribute
+                if "time" in result.coords and "units" in result.time.attrs:
+                    result_filtered.time.attrs["units"] = result.time.attrs["units"]
+                if "time" in result.coords and "long_name" in result.time.attrs:
+                    result_filtered.time.attrs["long_name"] = result.time.attrs[
+                        "long_name"
+                    ]
+
+                # Add source file metadata
+                result_filtered.attrs["source_file"] = input_file.name
+                result_filtered.attrs["profile_index"] = profile_idx
+                result_filtered.attrs["profile_direction"] = config.profile_direction
+
+                result_filtered.to_netcdf(output_file)
+                results.append((input_file, output_file, profile_idx, None))
+
+            except Exception as e:
+                results.append((input_file, None, profile_idx, str(e)))
+
+        # If no profiles were found, try single-profile processing as fallback
+        if profile_count == 0:
+            output_file = output_dir / f"{stem}_p0000.nc"
+
+            if output_file.exists() and not overwrite:
+                return [(input_file, output_file, 0, "skipped (exists)")]
+
+            # Fall back to original single-profile processing
+            result = process_profile(ds, config)
+
+            vars_to_keep = [
+                v
+                for v in result.data_vars
+                if "time" in result[v].dims and len(result[v].dims) > 0
+            ]
+            result_filtered = result[vars_to_keep]
+            result_filtered = result_filtered.assign_coords(
+                frequency=result.frequency,
+                k=result.k,
+            )
+            if "time" in result.coords and "units" in result.time.attrs:
+                result_filtered.time.attrs["units"] = result.time.attrs["units"]
+            if "time" in result.coords and "long_name" in result.time.attrs:
+                result_filtered.time.attrs["long_name"] = result.time.attrs["long_name"]
+
+            result_filtered.attrs["source_file"] = input_file.name
+            result_filtered.attrs["profile_index"] = 0
+
+            result_filtered.to_netcdf(output_file)
+            results.append((input_file, output_file, 0, None))
 
     except Exception as e:
-        return (input_file, None, str(e))
+        results.append((input_file, None, -1, str(e)))
+
+    return results
 
 
-def _unpack_epsilon_args(args: tuple) -> tuple:
+def _unpack_epsilon_args(args: tuple) -> list[tuple]:
     """Unpack arguments for imap_unordered."""
     input_file, output_dir, config, overwrite, aux_ds = args
-    return _process_single_profile(input_file, output_dir, config, overwrite, aux_ds)
+    return _process_file(input_file, output_dir, config, overwrite, aux_ds)
 
 
 def batch_compute_epsilon(
@@ -104,11 +157,14 @@ def batch_compute_epsilon(
     diss_len_sec: float = 4.0,
     fft_len_sec: float = 1.0,
     min_speed: float = 0.2,
-    smoothing_period: float = 0.25,
+    pressure_smoothing_period: float = 0.25,
     temperature: str = "JAC_T",
     speed: str = "W",
     angle_of_attack: float = 3.0,
     use_pitch_correction: bool = False,
+    profile_direction: Literal["down", "up", "both"] = "down",
+    min_profile_pressure: float = 0.0,
+    peaks_kwargs: Optional[dict] = None,
     auxiliary_file: Optional[Union[str, Path]] = None,
     aux_latitude: str = "lat",
     aux_longitude: str = "lon",
@@ -123,9 +179,14 @@ def batch_compute_epsilon(
     Batch compute epsilon from converted NetCDF files.
 
     This function processes raw p2nc output by:
-    1. Smoothing speed and pressure data
-    2. Scaling shear probes by 1/U^2 and gradT probes by 1/U
-    3. Computing epsilon using the Nasmyth spectrum fit
+    1. Detecting multiple profiles within each file (for glider data)
+    2. Smoothing speed and pressure data
+    3. Scaling shear probes by 1/U^2 and gradT probes by 1/U
+    4. Computing epsilon using the Nasmyth spectrum fit
+
+    Each input file may produce multiple output files if it contains multiple
+    dive cycles. Output files are named {original_stem}_p{NNN}.nc where NNN
+    is the 0-indexed profile number.
 
     Parameters
     ----------
@@ -141,8 +202,8 @@ def batch_compute_epsilon(
         FFT window length in seconds. Default 1.0.
     min_speed : float, optional
         Minimum speed threshold for valid data. Default 0.2 m/s.
-    smoothing_period : float, optional
-        Low-pass filter cutoff period for speed/pressure smoothing. Default 0.25 s.
+    pressure_smoothing_period : float, optional
+        Low-pass filter cutoff period for pressure smoothing. Default 0.25 s.
     temperature : str, optional
         Name of temperature variable for viscosity calculation. Default 'JAC_T'.
     speed : str, optional
@@ -154,6 +215,13 @@ def batch_compute_epsilon(
     use_pitch_correction : bool, optional
         Whether to apply pitch correction when estimating speed from pressure.
         Default False.
+    profile_direction : {'down', 'up', 'both'}, optional
+        Which cast directions to process. Default 'down'.
+    min_profile_pressure : float, optional
+        Minimum pressure (dbar) for profile detection. Default 10.0.
+    peaks_kwargs : dict, optional
+        Keyword arguments for scipy.signal.find_peaks used in profile detection.
+        Default uses height=25, distance=200, width=200, prominence=25.
     auxiliary_file : str or Path, optional
         Path to auxiliary NetCDF file containing time series of latitude,
         longitude, temperature, salinity, and/or density. These are interpolated
@@ -168,15 +236,18 @@ def batch_compute_epsilon(
     Returns
     -------
     list of dict
-        Results for each file with keys: 'input', 'output', 'success', 'error'
+        Results for each profile with keys: 'input', 'output', 'profile_index',
+        'success', 'error'
 
     Examples
     --------
     >>> from pyturb.processing import batch_compute_epsilon
-    >>> # Using glob pattern
+    >>> # Using glob pattern - processes all profiles in each file
     >>> results = batch_compute_epsilon('/path/to/data/*.nc', output_dir='/path/to/output')
-    >>> # Using list of files
-    >>> results = batch_compute_epsilon([Path('file1.nc'), Path('file2.nc')])
+    >>> # Process only up casts
+    >>> results = batch_compute_epsilon('/path/to/data/*.nc', profile_direction='up')
+    >>> # Process both up and down casts
+    >>> results = batch_compute_epsilon('/path/to/data/*.nc', profile_direction='both')
     """
     # Handle different input types
     if isinstance(files, list):
@@ -208,39 +279,32 @@ def batch_compute_epsilon(
     else:
         output_dir = Path.cwd()
 
-    # Filter out files that already have output if not overwriting
-    if not overwrite:
-        files_to_process = []
-        skipped = []
-        for f in nc_files:
-            out_file = output_dir / f.name
-            if out_file.exists():
-                skipped.append(f)
-            else:
-                files_to_process.append(f)
-
-        if verbose and skipped:
-            print(f"Skipping {len(skipped)} files (output already exists)")
-
-        nc_files = files_to_process
-
-        if not nc_files:
-            if verbose:
-                print("No files to process (all outputs already exist)")
-            return []
+    # Note: Skip logic for existing files is now handled per-profile in _process_file
 
     if n_workers is None:
         n_workers = mp.cpu_count()
+
+    # Set default peaks_kwargs if not provided
+    if peaks_kwargs is None:
+        peaks_kwargs = {
+            "height": 25,
+            "distance": 200,
+            "width": 200,
+            "prominence": 25,
+        }
 
     config = ProfileConfig(
         diss_len_sec=diss_len_sec,
         fft_len_sec=fft_len_sec,
         min_speed=min_speed,
-        smoothing_period=smoothing_period,
+        pressure_smoothing_period=pressure_smoothing_period,
         temperature=temperature,
         speed=speed,
         angle_of_attack=angle_of_attack,
         use_pitch_correction=use_pitch_correction,
+        profile_direction=profile_direction,
+        min_profile_pressure=min_profile_pressure,
+        peaks_kwargs=peaks_kwargs,
         aux_latitude=aux_latitude,
         aux_longitude=aux_longitude,
         aux_temperature=aux_temperature,
@@ -282,51 +346,43 @@ def batch_compute_epsilon(
     args = [(f, output_dir, config, overwrite, aux_ds) for f in nc_files]
 
     results = []
+    total_profiles = 0
 
-    # Use serial processing for small batches
-    if len(nc_files) <= min(n_workers, 4):
-        if verbose:
-            print("Using serial processing for small batch")
-        for i, arg_tuple in enumerate(args):
-            input_path, output_path, error = _unpack_epsilon_args(arg_tuple)
-            success = error is None
-            results.append(
-                {
-                    "input": input_path,
-                    "output": output_path,
-                    "success": success,
-                    "error": error,
-                }
-            )
-            if verbose:
-                status = "successfully processed" if success else f"failed ({error})"
-                print(f"[{i + 1}/{len(nc_files)}] {status}: {input_path.name}")
-    else:
-        if verbose:
-            print(f"Using {n_workers} parallel workers")
-        with mp.Pool(processes=n_workers) as pool:
-            results_iter = pool.imap_unordered(_unpack_epsilon_args, args)
-            for i, (input_path, output_path, error) in enumerate(results_iter):
+    # Limit workers to number of files (no benefit having more workers than files)
+    effective_workers = min(n_workers, len(nc_files))
+
+    if verbose:
+        print(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
+
+    with mp.Pool(processes=effective_workers) as pool:
+        results_iter = pool.imap_unordered(_unpack_epsilon_args, args)
+        for i, file_results in enumerate(results_iter):
+            for input_path, output_path, profile_idx, error in file_results:
                 success = error is None
                 results.append(
                     {
                         "input": input_path,
                         "output": output_path,
+                        "profile_index": profile_idx,
                         "success": success,
                         "error": error,
                     }
                 )
+                total_profiles += 1
                 if verbose:
-                    status = (
-                        "successfully processed" if success else f"failed ({error})"
-                    )
-                    print(f"[{i + 1}/{len(nc_files)}] {status}: {input_path.name}")
+                    if success:
+                        status = f"profile {profile_idx} processed"
+                    else:
+                        status = f"profile {profile_idx} failed ({error})"
+                    print(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
 
     # Summary
     if verbose:
         n_success = sum(1 for r in results if r["success"])
         n_failed = len(results) - n_success
-        print(f"\nCompleted: {n_success} succeeded, {n_failed} failed")
+        print(
+            f"\nCompleted: {n_success} profiles succeeded, {n_failed} failed from {len(nc_files)} files"
+        )
 
     return results
 
@@ -595,6 +651,16 @@ def bin_profiles(
 
     # Concatenate along profile dimension
     combined = xr.concat(binned_datasets, dim="profile")
+
+    # Sort profiles by time (use minimum time per profile to handle NaT values)
+    if "time" in combined:
+        # Get representative time for each profile (min time, skipping NaT)
+        profile_times = combined.time.min(dim="depth", skipna=True)
+        # Sort by time
+        sort_order = np.argsort(profile_times.values)
+        combined = combined.isel(profile=sort_order)
+        if verbose:
+            print("Sorted profiles by time")
 
     # Save to file
     output_file = Path(output_file)

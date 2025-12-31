@@ -25,14 +25,24 @@ This reads the raw binary P-files from your glider, deconvolves the shear and te
 Estimate turbulent kinetic energy dissipation rate (epsilon) from converted NetCDF files:
 
 ```bash
-pyturb eps ./converted/*.nc -o ./eps_output/ --diss-len 4.0 --fft-len 1.0
+pyturb eps ./converted/*.nc -o ./eps_output/
 ```
+
+The `eps` command automatically detects multiple profiles (dive cycles) within each input file. Output files are named `{input_stem}_p{NNN}.nc` for each profile found.
 
 Options:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
+- `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
+- `--min-profile-pressure`: Minimum pressure for profile detection in dbar (default: 10.0)
+- `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
+
+Example processing both up and down casts:
+```bash
+pyturb eps ./converted/*.nc -o ./eps_output/ --direction both
+```
 
 ### 3. Bin Profiles (`bin`)
 

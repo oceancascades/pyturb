@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 from typing_extensions import Annotated
 
+from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf
 from .processing import batch_compute_epsilon, bin_profiles
 
@@ -131,11 +132,11 @@ def eps(
             "--min-speed", "-s", help="Minimum speed threshold (m/s)", show_default=True
         ),
     ] = 0.2,
-    smoothing_period: Annotated[
+    pressure_smoothing_period: Annotated[
         float,
         typer.Option(
-            "--smoothing",
-            help="Low-pass filter cutoff period for speed/pressure (s)",
+            "--pressure-smoothing",
+            help="Low-pass filter cutoff period for pressure (s)",
             show_default=True,
         ),
     ] = 0.25,
@@ -220,6 +221,46 @@ def eps(
             show_default=True,
         ),
     ] = "density",
+    profile_direction: Annotated[
+        str,
+        typer.Option(
+            "--direction",
+            help="Profile direction to process: down, up, or both",
+            show_default=True,
+        ),
+    ] = "down",
+    min_profile_pressure: Annotated[
+        float,
+        typer.Option(
+            "--min-profile-pressure",
+            help="Minimum pressure (dbar) for profile detection",
+            show_default=True,
+        ),
+    ] = 0.0,
+    peaks_height: Annotated[
+        float,
+        typer.Option(
+            "--peaks-height",
+            help="Minimum peak height for profile detection (dbar)",
+            show_default=True,
+        ),
+    ] = 25.0,
+    peaks_distance: Annotated[
+        int,
+        typer.Option(
+            "--peaks-distance",
+            help="Minimum samples between peaks for profile detection",
+            show_default=True,
+        ),
+    ] = 200,
+    peaks_prominence: Annotated[
+        float,
+        typer.Option(
+            "--peaks-prominence",
+            help="Minimum peak prominence for profile detection (dbar)",
+            show_default=True,
+        ),
+    ] = 25.0,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -245,13 +286,25 @@ def eps(
 ):
     """Compute epsilon TKE dissipation rate from converted NetCDF files.
 
+    Automatically detects multiple profiles (dive cycles) within each file.
+    Output files are named {input_stem}_p{NNN}.nc for each profile.
+
     Examples:
-        pyturb eps ./batch_test/*.nc -o ./output
-        pyturb eps file1.nc file2.nc file3.nc
+        pyturb eps ./converted/*.nc -o ./eps_output/
+        pyturb eps ./converted/*.nc --direction both
+        pyturb eps ./converted/*.nc --direction up --peaks-height 50
     """
     if not input_files:
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
+
+    # Build peaks_kwargs from individual options
+    peaks_kwargs = {
+        "height": peaks_height,
+        "distance": peaks_distance,
+        "width": peaks_distance,  # Use same as distance
+        "prominence": peaks_prominence,
+    }
 
     batch_compute_epsilon(
         files=input_files,
@@ -259,11 +312,14 @@ def eps(
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,
         min_speed=min_speed,
-        smoothing_period=smoothing_period,
+        pressure_smoothing_period=pressure_smoothing_period,
         temperature=temperature,
         speed=speed,
         angle_of_attack=angle_of_attack,
         use_pitch_correction=use_pitch_correction,
+        profile_direction=profile_direction,
+        min_profile_pressure=min_profile_pressure,
+        peaks_kwargs=peaks_kwargs,
         auxiliary_file=auxiliary_file,
         aux_latitude=aux_lat,
         aux_longitude=aux_lon,
@@ -386,3 +442,80 @@ def bin(
     if result is None:
         typer.echo("Error: No data was binned.", err=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def merge(
+    output_file: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output filename for merged NetCDF file",
+        ),
+    ],
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Overwrite output file if it exists",
+            show_default=True,
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show files that would be merged without merging",
+            show_default=True,
+        ),
+    ] = False,
+    input_files: Annotated[
+        list[Path],
+        typer.Argument(help="Input NetCDF files to merge (supports shell globs)"),
+    ] = None,
+):
+    """Merge multiple p2nc NetCDF files into a single file.
+
+    Concatenates files along t_fast and t_slow dimensions, converting
+    timestamps to POSIX time (seconds since 1970-01-01).
+
+    Examples:
+        pyturb merge ./converted/*.nc -o combined.nc
+        pyturb merge file1.nc file2.nc file3.nc -o merged.nc
+        pyturb merge ./converted/*.nc -o combined.nc --dry-run
+    """
+    if not input_files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+
+    # Sort files by name
+    file_list = sorted(input_files)
+
+    if dry_run:
+        typer.echo(f"Would merge {len(file_list)} files into '{output_file}':")
+        for f in file_list:
+            if f.exists():
+                size = f.stat().st_size / (1024 * 1024)
+                typer.echo(f"  {f} ({size:.2f} MB)")
+            else:
+                typer.echo(f"  {f} (not found)")
+        raise typer.Exit(0)
+
+    try:
+        merge_netcdf(
+            files=file_list,
+            output_file=output_file,
+            verbose=True,
+            overwrite=overwrite,
+        )
+    except FileExistsError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Use -w/--overwrite to replace existing file.", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Successfully merged {len(file_list)} files into '{output_file}'")

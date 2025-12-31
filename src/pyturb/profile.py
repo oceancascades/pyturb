@@ -1,13 +1,13 @@
 """Profile processing for microstructure data."""
 
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Generator, Literal, Optional
 
 import numpy as np
 import scipy.signal as sig
 import xarray as xr
-from profinder import find_segment
+from profinder import find_profiles, find_segment
 
 from .shear import estimate_epsilon
 from .signal import despike, window_mean, window_psd
@@ -45,11 +45,17 @@ class ProfileConfig:
     temperature_probes: tuple[str, ...] = ("gradT1", "gradT2")
 
     # === Preprocessing parameters ===
-    smoothing_period: float = 0.25  # Cutoff period for low-pass filter (seconds)
+    pressure_smoothing_period: float = (
+        0.25  # Cutoff period for pressure low-pass filter (seconds)
+    )
     speed_smoothing_period: float = (
         2.0  # Cutoff period for estimated speed smoothing (seconds)
     )
     filter_order: int = 4
+    gap_threshold: float = (
+        2.0  # Minimum gap duration to treat as discontinuity (seconds)
+    )
+    gap_factor: float = 4.0  # Gap detected if dt > gap_factor * median(dt)
 
     # === Thresholds ===
     min_speed: float = 0.2  # Minimum speed for valid profile segment
@@ -72,6 +78,18 @@ class ProfileConfig:
     verbose: bool = False
     scale_probes: bool = True
     single_pass_despike: bool = False  # Single-pass despiking is ~4x faster
+
+    # === Multi-profile detection settings ===
+    profile_direction: Literal["down", "up", "both"] = "down"  # Which casts to process
+    min_profile_pressure: float = 0.0  # Minimum pressure (dbar) for profile detection
+    peaks_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {
+            "height": 25,
+            "distance": 200,
+            "width": 200,
+            "prominence": 25,
+        }
+    )  # kwargs for scipy.signal.find_peaks
 
     @property
     def all_probes(self) -> tuple[str, ...]:
@@ -200,6 +218,95 @@ def estimate_speed_from_pressure(
     return speed
 
 
+def gap_aware_sosfiltfilt(
+    sos: np.ndarray,
+    data: np.ndarray,
+    time: np.ndarray,
+    gap_threshold: float = 5.0,
+    gap_factor: float = 10.0,
+    min_segment_length: int = 10,
+    verbose: bool = False,
+) -> np.ndarray:
+    """
+    Apply sosfiltfilt independently to contiguous time segments.
+
+    Detects gaps in the time series and applies the filter separately to each
+    segment to avoid filter artifacts at discontinuities.
+
+    Parameters
+    ----------
+    sos : ndarray
+        Second-order sections representation of the filter.
+    data : ndarray
+        Input data to filter.
+    time : ndarray
+        Time vector (same length as data).
+    gap_threshold : float, optional
+        Minimum gap duration in seconds to treat as discontinuity. Default 5.0.
+    gap_factor : float, optional
+        Gap detected if dt > gap_factor * median(dt). Default 10.0.
+    min_segment_length : int, optional
+        Minimum segment length to apply filter. Shorter segments are
+        returned unfiltered. Default 10.
+    verbose : bool, optional
+        Print diagnostic information about detected gaps. Default False.
+
+    Returns
+    -------
+    ndarray
+        Filtered data with same shape as input.
+    """
+    if len(data) < min_segment_length:
+        return data.copy()
+
+    # Compute time differences in seconds
+    dt = np.diff(time)
+
+    # Convert to float seconds if datetime64
+    if np.issubdtype(dt.dtype, np.timedelta64):
+        dt = dt.astype("timedelta64[ns]").astype(float) / 1e9
+    elif np.issubdtype(dt.dtype, np.datetime64):
+        # Shouldn't happen with diff, but handle just in case
+        dt = dt.astype("datetime64[ns]").astype(float) / 1e9
+
+    median_dt = np.median(dt)
+
+    # Detect gaps where time jump exceeds threshold
+    threshold = max(gap_threshold, gap_factor * median_dt)
+    gap_mask = dt > threshold
+    gap_indices = np.where(gap_mask)[0] + 1  # +1 because diff reduces length by 1
+
+    n_gaps = len(gap_indices)
+
+    if verbose and n_gaps > 0:
+        logger.info(
+            f"Detected {n_gaps} time gap(s) in data "
+            f"(threshold={threshold:.2f}s, median_dt={median_dt:.4f}s)"
+        )
+        for i, idx in enumerate(gap_indices):
+            gap_size = dt[idx - 1]  # -1 because gap_indices is offset by 1
+            logger.info(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
+
+    if n_gaps == 0:
+        # No gaps, filter entire array
+        return sig.sosfiltfilt(sos, data)
+
+    # Split data at gap boundaries
+    split_indices = gap_indices.tolist()
+    segments = np.split(data, split_indices)
+
+    # Filter each segment independently
+    filtered_segments = []
+    for seg in segments:
+        if len(seg) >= min_segment_length:
+            filtered_segments.append(sig.sosfiltfilt(sos, seg))
+        else:
+            # Segment too short for filtfilt, return unfiltered
+            filtered_segments.append(seg.copy())
+
+    return np.concatenate(filtered_segments)
+
+
 def prepare_profile(
     ds: xr.Dataset,
     config: Optional[ProfileConfig] = None,
@@ -245,24 +352,41 @@ def prepare_profile(
     # Get sampling rate for slow channels
     fs_slow = float(ds.fs_slow)
 
-    # Design low-pass filter
-    cutoff = 1 / (2 * config.smoothing_period)
+    # Design low-pass filter for pressure (and existing speed if present)
+    cutoff = 1 / (2 * config.pressure_smoothing_period)
     sos = sig.butter(config.filter_order, cutoff, btype="low", fs=fs_slow, output="sos")
 
-    # Smooth pressure
+    # Get time vector for gap detection
+    t_slow = ds.t_slow.values
+
+    # Smooth pressure with gap-aware filtering
     if config.pressure in ds:
         ds[config.pressure_smooth] = (
             "t_slow",
-            sig.sosfiltfilt(sos, ds[config.pressure].values),
+            gap_aware_sosfiltfilt(
+                sos,
+                ds[config.pressure].values,
+                t_slow,
+                gap_threshold=config.gap_threshold,
+                gap_factor=config.gap_factor,
+                verbose=config.verbose,
+            ),
         )
     else:
         raise ValueError(f"Pressure variable '{config.pressure}' not found in dataset")
 
     if config.speed in ds:
-        # Speed variable exists - smooth it
+        # Speed variable exists - smooth it with gap-aware filtering
         ds[config.speed_smooth] = (
             "t_slow",
-            sig.sosfiltfilt(sos, ds[config.speed].values),
+            gap_aware_sosfiltfilt(
+                sos,
+                ds[config.speed].values,
+                t_slow,
+                gap_threshold=config.gap_threshold,
+                gap_factor=config.gap_factor,
+                verbose=config.verbose,
+            ),
         )
     else:
         if config.verbose:
@@ -294,7 +418,17 @@ def prepare_profile(
             fs=fs_slow,
             output="sos",
         )
-        ds[config.speed_smooth] = ("t_slow", sig.sosfiltfilt(sos_speed, speed_est))
+        ds[config.speed_smooth] = (
+            "t_slow",
+            gap_aware_sosfiltfilt(
+                sos_speed,
+                speed_est,
+                t_slow,
+                gap_threshold=config.gap_threshold,
+                gap_factor=config.gap_factor,
+                verbose=config.verbose,
+            ),
+        )
 
     if not config.scale_probes:
         return ds
@@ -358,6 +492,138 @@ def find_valid_segment(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
 
     t0, t1 = ds.t_slow[idx_start], ds.t_slow[idx_end]
     return ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
+
+
+def find_all_profiles(
+    ds: xr.Dataset,
+    config: ProfileConfig,
+) -> list[tuple[int, int]]:
+    """
+    Find all profile segments in a dataset.
+
+    Uses profinder.find_profiles() to detect multiple dive cycles in the
+    pressure time series, then returns index bounds for the requested
+    cast direction(s).
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with smoothed pressure and speed variables (from prepare_profile).
+    config : ProfileConfig
+        Configuration specifying profile detection parameters.
+
+    Returns
+    -------
+    list of tuple[int, int]
+        List of (start_idx, end_idx) tuples for each detected profile segment
+        on the t_slow dimension. Returns empty list if no profiles found.
+    """
+    pressure_var = config.pressure_smooth
+    speed_var = config.speed_smooth
+
+    pressure = ds[pressure_var].values
+    velocity = ds[speed_var].values
+
+    try:
+        profiles = find_profiles(
+            pressure,
+            min_pressure=config.min_profile_pressure,
+            peaks_kwargs=config.peaks_kwargs,
+            apply_speed_threshold=True,
+            velocity=velocity,
+            min_speed=config.min_speed,
+            direction=config.profile_direction,
+        )
+    except Exception as e:
+        if config.verbose:
+            logger.warning(f"Profile detection failed: {e}")
+        return []
+
+    if not profiles:
+        if config.verbose:
+            logger.info("No profiles detected in dataset")
+        return []
+
+    # Extract segments based on direction
+    # profiles is list of (down_start, down_end, up_start, up_end)
+    segments = []
+    for down_start, down_end, up_start, up_end in profiles:
+        if config.profile_direction == "down":
+            # Clamp indices to valid range
+            start = max(0, down_start)
+            end = min(down_end, ds.t_slow.size - 1)
+            if end > start:
+                segments.append((start, end))
+        elif config.profile_direction == "up":
+            start = max(0, up_start)
+            end = min(up_end, ds.t_slow.size - 1)
+            if end > start:
+                segments.append((start, end))
+        else:  # "both"
+            # Add down cast
+            d_start = max(0, down_start)
+            d_end = min(down_end, ds.t_slow.size - 1)
+            if d_end > d_start:
+                segments.append((d_start, d_end))
+            # Add up cast
+            u_start = max(0, up_start)
+            u_end = min(up_end, ds.t_slow.size - 1)
+            if u_end > u_start:
+                segments.append((u_start, u_end))
+
+    if config.verbose:
+        logger.info(f"Found {len(segments)} profile segment(s)")
+
+    return segments
+
+
+def split_into_profiles(
+    ds: xr.Dataset,
+    config: ProfileConfig,
+) -> Generator[tuple[int, xr.Dataset], None, None]:
+    """
+    Split a dataset into individual profile segments.
+
+    This generator yields individual profile datasets suitable for processing
+    with process_profile(). Each yielded dataset is a subset of the original
+    containing data for one down or up cast.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with smoothed pressure and speed variables (from prepare_profile).
+    config : ProfileConfig
+        Configuration specifying profile detection parameters.
+
+    Yields
+    ------
+    tuple[int, xr.Dataset]
+        Tuple of (profile_index, profile_dataset) where profile_index is
+        0-based and profile_dataset is the subset for that profile.
+
+    Examples
+    --------
+    >>> ds = prepare_profile(raw_ds, config)
+    >>> for i, profile_ds in split_into_profiles(ds, config):
+    ...     result = process_profile(profile_ds, config)
+    ...     result.to_netcdf(f'profile_{i:03d}.nc')
+    """
+    segments = find_all_profiles(ds, config)
+
+    for i, (idx_start, idx_end) in enumerate(segments):
+        # Get time bounds for slicing
+        t0 = ds.t_slow.values[idx_start]
+        t1 = ds.t_slow.values[idx_end]
+
+        # Slice both time dimensions
+        profile_ds = ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
+
+        # Add profile metadata
+        profile_ds.attrs["profile_index"] = i
+        profile_ds.attrs["profile_start_idx"] = idx_start
+        profile_ds.attrs["profile_end_idx"] = idx_end
+
+        yield i, profile_ds
 
 
 def compute_window_parameters(ds: xr.Dataset, config: ProfileConfig) -> dict:
