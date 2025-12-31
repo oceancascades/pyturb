@@ -210,8 +210,8 @@ def prepare_profile(
     This function performs the preprocessing needed for data converted via p2nc:
     1. Low-pass filters the pressure data
     2. Estimates or smooths the speed variable
-    3. Scales shear probes by 1/U^2 to convert to du/dz
-    4. Scales temperature gradient probes by 1/U to convert to dT/dz
+    3. Scales shear by 1/U^2 to convert to du/dz
+    4. Scales temperature gradient by 1/U to convert to dT/dz
 
     If the speed variable (default 'W') is not present in the dataset, speed
     is estimated from pressure.
