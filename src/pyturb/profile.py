@@ -352,7 +352,9 @@ def prepare_profile(
     fs_slow = float(ds.fs_slow)
 
     # Design low-pass filter for pressure (and existing speed if present)
-    cutoff = 1 / (2 * config.pressure_smoothing_period)
+    # Cutoff is set based on diss_len to ensure W is smooth over dissipation windows.
+    # Any faster fluctuations are irrelevant since they get averaged out anyway.
+    cutoff = 1 / config.diss_len_sec
     sos = sig.butter(config.filter_order, cutoff, btype="low", fs=fs_slow, output="sos")
 
     # Get time vector for gap detection
@@ -500,7 +502,10 @@ def highpass_filter(
 
 
 def find_valid_segment(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Extract valid profile segment based on speed threshold.
+    """Extract valid profile segment based on pressure bounds.
+
+    Uses profinder.find_segment to identify the main profile segment,
+    then slices both slow and fast time coordinates accordingly.
 
     Expects smoothed variables from prepare_profile.
     """
@@ -508,6 +513,7 @@ def find_valid_segment(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
+    # Find profile segment with speed threshold
     idx = find_segment(
         ds[pressure_var],
         apply_speed_threshold=True,
