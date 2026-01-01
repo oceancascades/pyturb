@@ -174,6 +174,7 @@ def batch_compute_epsilon(
     aux_temperature: str = "temperature",
     aux_salinity: str = "salinity",
     aux_density: str = "density",
+    despike_max_passes: int = 6,
     n_workers: Optional[int] = None,
     verbose: bool = False,
     overwrite: bool = False,
@@ -313,6 +314,7 @@ def batch_compute_epsilon(
         aux_temperature=aux_temperature,
         aux_salinity=aux_salinity,
         aux_density=aux_density,
+        despike_max_passes=despike_max_passes,
         verbose=verbose,
     )
 

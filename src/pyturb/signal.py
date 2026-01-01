@@ -99,7 +99,7 @@ def despike(
     smooth: float = 0.5,
     fs: float = 512.0,
     n: int = None,
-    single_pass: bool = False,
+    max_passes: int = 6,
 ) -> tuple[NDArray, NDArray, int, float]:
     """
     Remove spikes from a signal using iterative filtering and replacement.
@@ -116,8 +116,9 @@ def despike(
         Sampling frequency (Hz).
     n : int
         Window size for spike replacement.
-    single_pass : bool, optional
-        If True, only one despike pass is performed.
+    max_passes : int, optional
+        Maximum number of despike iterations. Default 6. Use 1 for ~4x faster
+        processing with slightly less aggressive spike removal.
 
     Returns
     -------
@@ -134,8 +135,6 @@ def despike(
         raise ValueError("Input signal must be 1D.")
     if len(signal) < 5:
         raise ValueError("Signal too short for despiking.")
-
-    max_passes = 1 if single_pass else 10
     cleaned = np.asarray(signal)
     all_spikes = np.array([], dtype=int)
     pass_count = 0
@@ -163,7 +162,7 @@ def window_mean(y, n_fft, n_diss):
     return y_windowed.mean(axis=1)
 
 
-def window_psd(y, fs, n_fft, n_diss, window="cosine"):
+def window_psd(y, fs, n_fft, n_diss, window="hann"):
     """Compute windowed power spectral density averaged over dissipation windows.
 
     Assumes y has been pre-trimmed to fit an exact number of windows.

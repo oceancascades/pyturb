@@ -76,7 +76,7 @@ class ProfileConfig:
     chop_start: bool = True
     verbose: bool = False
     scale_probes: bool = True
-    single_pass_despike: bool = False  # Single-pass despiking is ~4x faster
+    despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
 
     # === Multi-profile detection settings ===
     profile_direction: Literal["down", "up", "both"] = "down"  # Which casts to process
@@ -438,7 +438,7 @@ def despike_variables(
     ds: xr.Dataset,
     variables: tuple[str, ...],
     suffix: str = "_clean",
-    single_pass: bool = False,
+    max_passes: int = 10,
 ) -> xr.Dataset:
     """Despike specified variables, creating new cleaned versions."""
     ds = ds.copy()
@@ -446,7 +446,7 @@ def despike_variables(
     for var in variables:
         if var not in ds:
             continue
-        cleaned, _, _, _ = despike(ds[var].values, single_pass=single_pass)
+        cleaned, _, _, _ = despike(ds[var].values, max_passes=max_passes)
         ds[var + suffix] = ("t_fast", cleaned)
 
     return ds
@@ -829,9 +829,7 @@ def process_profile(
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
-    ds = despike_variables(
-        ds, config.all_probes, single_pass=config.single_pass_despike
-    )
+    ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
 
     # High-pass filter shear probes to remove low-frequency contamination
     if config.hp_cutoff_hz > 0:

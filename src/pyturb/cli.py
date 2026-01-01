@@ -290,6 +290,14 @@ def eps(
             show_default=True,
         ),
     ] = 25.0,
+    despike_passes: Annotated[
+        int,
+        typer.Option(
+            "--despike-passes",
+            help="Max despike iterations (1 = fast, 10 = thorough)",
+            show_default=True,
+        ),
+    ] = 6,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -355,6 +363,7 @@ def eps(
         aux_temperature=aux_temp,
         aux_salinity=aux_sal,
         aux_density=aux_dens,
+        despike_max_passes=despike_passes,
         n_workers=n_workers,
         overwrite=overwrite,
         verbose=True,
