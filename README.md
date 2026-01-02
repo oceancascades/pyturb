@@ -8,19 +8,19 @@ Install using `pip`.
 
 ## Command Line Usage
 
-pyturb provides three main commands for processing microstructure data:
+The main pyturb commands are
 
-### 1. Convert P-files to NetCDF (`p2nc`)
+### `p2nc` - convert P files
 
-Convert raw Rockland P-files to NetCDF format:
+Convert Rockland binary P-files to NetCDF format:
 
 ```bash
 pyturb p2nc ./path/to/raw_data/*.p -o ./converted/
 ```
 
-This reads the raw binary P-files from your glider, deconvolves the shear and temperature gradient signals, and outputs self-describing NetCDF files.
+Note that unlike the ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. The units of these variables are different to their ODAS counterparts. The scaling is applied layer.
 
-### 2. Compute Dissipation Rate (`eps`)
+### `eps` - calculate the dissipation rate
 
 Estimate turbulent kinetic energy dissipation rate (epsilon) from converted NetCDF files:
 
@@ -28,23 +28,22 @@ Estimate turbulent kinetic energy dissipation rate (epsilon) from converted NetC
 pyturb eps ./converted/*.nc -o ./eps_output/
 ```
 
-The `eps` command automatically detects multiple profiles (dive cycles) within each input file. Output files are named `{input_stem}_p{NNN}.nc` for each profile found.
+The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNN}.nc` for each profile found.
 
 Options:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
-- `--min-profile-pressure`: Minimum pressure for profile detection in dbar (default: 10.0)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
 
 Example processing both up and down casts:
 ```bash
-pyturb eps ./converted/*.nc -o ./eps_output/ --direction both
+pyturb eps ./converted/*.nc -o ./eps_output/ --direction up
 ```
 
-### 3. Bin Profiles (`bin`)
+### `bin` - bin average the data
 
 Bin epsilon estimates by depth and concatenate into a single file:
 
@@ -95,8 +94,3 @@ batch_compute_epsilon('./converted/*.nc', output_dir='./eps/', diss_len_sec=4.0)
 # Bin profiles
 bin_profiles('./eps/*.nc', output_file='binned.nc', bin_width=2.0)
 ```
-
-## References
-
-- Lueck, R. G. (2016). RSI Technical Note 028: Calculating the Rate of Dissipation of Turbulent Kinetic Energy. Rockland Scientific International Inc.
-- Nasmyth, P. W. (1970). Oceanic turbulence. PhD thesis, University of British Columbia.
