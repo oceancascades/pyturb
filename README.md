@@ -30,15 +30,15 @@ pyturb eps ./converted/*.nc -o ./eps_output/
 
 The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNN}.nc` for each profile found.
 
-Options:
+A selection of the option used:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
-- `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0)
+- `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
 
-Example processing both up and down casts:
+Example processing just up casts:
 ```bash
 pyturb eps ./converted/*.nc -o ./eps_output/ --direction up
 ```
@@ -58,26 +58,22 @@ Options:
 
 ## Processing Methods
 
-### Shear Spectrum Processing
-
-The dissipation rate is estimated by fitting shear spectra to the Nasmyth universal spectrum:
-
-1. **Spectral estimation**: Shear probe signals are converted to wavenumber spectra using Welch's method with overlapping FFT windows
-2. **Probe response correction**: A single-pole transfer function correction is applied to account for the spatial averaging of the shear probe
-3. **Nasmyth fitting**: Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange
-4. **Variance correction**: Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum
-
 ### Preprocessing Pipeline
 
 Before computing epsilon, profiles undergo:
 
-1. **Speed smoothing**: Low-pass filtering of speed (or dP/dt-derived speed) to remove high-frequency noise
-2. **Probe scaling**: Shear signals are scaled by 1/U² and temperature gradients by 1/U to convert to physical units
-3. **Despiking**: Iterative removal of outliers from shear and temperature gradient signals
+1. Low-pass filtering of speed (or dP/dt-derived speed) to remove high-frequency noise
+2. Shear signals are scaled by 1/U² and temperature gradients by 1/U to convert to physical units
+3. Iterative removal of outliers from shear and temperature gradient signals
 
-### Viscosity
+### Shear Spectrum Processing
 
-Kinematic viscosity is calculated from in-situ temperature and salinity using standard seawater equations. When auxiliary CTD data is provided, viscosity varies with depth; otherwise a constant value is used based on profile-mean temperature.
+The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectrum:
+
+1. Shear probe signals are converted to wavenumber spectra using Welch's method with overlapping FFT windows
+2. A single-pole transfer function correction is applied to account for the spatial averaging of the shear probe
+3. Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange
+4. Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum
 
 ## Python API
 
