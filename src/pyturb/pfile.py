@@ -395,13 +395,11 @@ def batch_convert_to_netcdf(
         for pf in pfiles
     ]
 
-    # Use serial processing for small batches
     results = []
-    if len(pfiles) <= min(n_workers, 4):
-        if verbose:
-            logger.info("Using serial processing for small batch")
-        for i, arg_tuple in enumerate(args):
-            input_path, output_path, error = _unpack_worker_args(arg_tuple)
+    with mp.Pool(processes=n_workers) as pool:
+        # Use imap_unordered for streaming results as they complete
+        results_iter = pool.imap_unordered(_unpack_worker_args, args)
+        for i, (input_path, output_path, error) in enumerate(results_iter):
             success = error is None
             results.append(
                 {
@@ -416,27 +414,6 @@ def batch_convert_to_netcdf(
                 logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
                 if error:
                     logger.error(f"    Error: {error}")
-    else:
-        with mp.Pool(processes=n_workers) as pool:
-            # Use imap_unordered for streaming results as they complete
-            results_iter = pool.imap_unordered(_unpack_worker_args, args)
-            for i, (input_path, output_path, error) in enumerate(results_iter):
-                success = error is None
-                results.append(
-                    {
-                        "input": input_path,
-                        "output": output_path,
-                        "success": success,
-                        "error": error,
-                    }
-                )
-                if verbose:
-                    status = (
-                        "successfully converted" if success else "failed to convert"
-                    )
-                    logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
-                    if error:
-                        logger.error(f"    Error: {error}")
 
     # Summary
     if verbose:

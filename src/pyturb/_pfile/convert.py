@@ -148,14 +148,23 @@ def _jac_t(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
 
 
 def _jac_c(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
-    """JAC conductivity: split 32-bit into period ratio, apply polynomial."""
-    i = np.floor(data / 2**16).astype(int)
-    v = (data % 2**16).astype(int)
+    """JAC conductivity: split 32-bit into period ratio, apply polynomial.
+
+    The polynomial coefficients convert period ratio to conductivity in mS/cm.
+    Note: ODAS MATLAB incorrectly documents units as 's' but the calibration
+    polynomial outputs mS/cm per the sensor config file.
+    """
+    # Data comes as int64 but represents unsigned 32-bit values
+    # Mask to get unsigned interpretation
+    data_u32 = data.astype(np.int64) & 0xFFFFFFFF
+
+    i = (data_u32 >> 16).astype(np.int64)  # High 16 bits (odd channel)
+    v = (data_u32 & 0xFFFF).astype(np.int64)  # Low 16 bits (even channel)
     v[v == 0] = 1
     periods = i / v
 
     coeffs = [float(params["c"]), float(params["b"]), float(params["a"])]
-    return np.polyval(coeffs, periods), "s"
+    return np.polyval(coeffs, periods), "mS/cm"
 
 
 def _sbt(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:

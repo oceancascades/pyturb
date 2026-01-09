@@ -282,6 +282,7 @@ def _read_pfile_impl(
     data["time"] = data["filetime"].strftime("%H:%M:%S.%f")[:-3]
 
     # Combine even/odd pairs into 32-bit values
+    # Use int64 to avoid signed overflow when high bit is set
     for name in list(ch_data.keys()):
         if not name.endswith("_E"):
             continue
@@ -289,9 +290,9 @@ def _read_pfile_impl(
         if odd_name not in ch_data:
             continue
 
-        ch_even = ch_data[name].astype(np.int32)
+        ch_even = ch_data[name].astype(np.int64)
         ch_even[ch_even < 0] += 2**16
-        ch_odd = ch_data[odd_name].astype(np.int32)
+        ch_odd = ch_data[odd_name].astype(np.int64)
         ch_odd[ch_odd < 0] += 2**16
 
         base_name = name[:-2]

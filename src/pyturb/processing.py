@@ -105,6 +105,11 @@ def _process_file(
                 result_filtered.attrs["profile_index"] = profile_idx
                 result_filtered.attrs["profile_direction"] = config.profile_direction
 
+                # Copy instrument info from source dataset
+                for attr in ["instrument_vehicle", "instrument_model", "instrument_sn"]:
+                    if attr in ds.attrs:
+                        result_filtered.attrs[attr] = ds.attrs[attr]
+
                 result_filtered.to_netcdf(output_file)
                 results.append((input_file, output_file, profile_idx, None))
 
@@ -506,6 +511,12 @@ def _bin_single_profile(
         # Add source file as attribute
         ds_binned.attrs["source_file"] = file.name
 
+        # Add instrument serial number as a data variable (to be used as coordinate)
+        if "instrument_sn" in ds.attrs:
+            ds_binned["instrument_sn"] = ds.attrs["instrument_sn"]
+        if "instrument_vehicle" in ds.attrs:
+            ds_binned["instrument_vehicle"] = ds.attrs["instrument_vehicle"]
+
         return ds_binned
 
     except Exception as e:
@@ -587,6 +598,7 @@ def bin_profiles(
             "eps_2",
             "W",
             "temperature",
+            "conductivity",
             "salinity",
             "density",
             "nu",
