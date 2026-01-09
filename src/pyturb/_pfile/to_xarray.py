@@ -19,7 +19,7 @@ _CF_VARIABLE_METADATA = {
     "U_EM": (None, "EM current meter velocity", "m s-1"),
     # JAC CT sensor
     "JAC_T": ("sea_water_temperature", "JAC CT temperature", "degree_C"),
-    "JAC_C": ("sea_water_electrical_conductivity", "JAC CT conductivity", "S m-1"),
+    "JAC_C": ("sea_water_electrical_conductivity", "JAC CT conductivity", "mS cm-1"),
     # FP07 thermistors
     "T1": ("sea_water_temperature", "FP07 thermistor 1 temperature", "degree_C"),
     "T2": ("sea_water_temperature", "FP07 thermistor 2 temperature", "degree_C"),
@@ -189,6 +189,19 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
     # Add configuration string as global attribute
     if "setupfilestr" in data:
         global_attrs["pfile_configuration"] = data["setupfilestr"]
+
+    # Extract instrument info from config object
+    if "cfgobj" in data:
+        cfg = data["cfgobj"]
+        vehicle = cfg.get_value("instrument_info", "vehicle", default="")
+        model = cfg.get_value("instrument_info", "model", default="")
+        sn = cfg.get_value("instrument_info", "sn", default="")
+        if vehicle:
+            global_attrs["instrument_vehicle"] = vehicle
+        if model:
+            global_attrs["instrument_model"] = model
+        if sn:
+            global_attrs["instrument_sn"] = sn
 
     # Create Dataset
     ds = xr.Dataset(data_vars, coords=coords, attrs=global_attrs)

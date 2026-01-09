@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Generator, Literal, Optional
 
+import gsw
 import numpy as np
 import scipy.signal as sig
 import xarray as xr
@@ -864,7 +865,7 @@ def process_profile(
 
     means = compute_window_means(
         ds,
-        ["t_slow", pressure_var, speed_var, config.temperature],
+        ["t_slow", pressure_var, speed_var, config.temperature, "JAC_C"],
         params,
     )
 
@@ -888,7 +889,8 @@ def process_profile(
     else:
         T_mean = np.full(n_windows, config.default_temperature)
 
-    # Get salinity and density - prefer auxiliary data if available
+    # Get salinity - prefer auxiliary data, then calculate from JAC CT if available
+    salinity_from_jac = False
     if "aux_salinity" in ds:
         S_mean = window_mean(
             ds["aux_salinity"].values,
@@ -896,9 +898,28 @@ def process_profile(
             params["n_diss"] // params["sampling_ratio"],
         )
         ds["salinity"] = ("time", S_mean.astype("f4"))
+    elif "JAC_C" in means and config.temperature in means:
+        # Calculate salinity from JAC CT sensor data
+        # JAC_C is in mS/cm (matching MATLAB ODAS output)
+        # Only use if conductivity is in valid range for seawater (> 10 mS/cm)
+        C_mScm = means["JAC_C"]
+        if np.nanmedian(C_mScm) > 10.0:  # Valid seawater conductivity
+            T_insitu = means[config.temperature]
+            P_dbar = means.get(pressure_var, np.full(n_windows, 0.0))
+            S_mean = gsw.SP_from_C(C_mScm, T_insitu, P_dbar)
+            ds["salinity"] = ("time", S_mean.astype("f4"))
+            salinity_from_jac = True
+        else:
+            logger.warning(
+                f"JAC_C values too low (median={np.nanmedian(C_mScm):.3f} mS/cm), "
+                "skipping salinity calculation from CT sensor"
+            )
+            S_mean = np.full(n_windows, config.default_salinity)
     else:
         S_mean = np.full(n_windows, config.default_salinity)
+        # Don't add to dataset if just using default
 
+    # Get density - prefer auxiliary data, then calculate from JAC CT derived salinity
     if "aux_density" in ds:
         rho_mean = window_mean(
             ds["aux_density"].values,
@@ -906,8 +927,23 @@ def process_profile(
             params["n_diss"] // params["sampling_ratio"],
         )
         ds["density"] = ("time", rho_mean.astype("f4"))
+    elif salinity_from_jac:
+        # Calculate density from salinity and temperature using gsw
+        # First convert practical salinity to absolute salinity (need lon/lat)
+        # Use default lon/lat if not available
+        lon = 0.0  # Default longitude
+        lat = 45.0  # Default latitude
+        if "aux_longitude" in ds:
+            lon = np.nanmean(ds["aux_longitude"].values)
+        if "aux_latitude" in ds:
+            lat = np.nanmean(ds["aux_latitude"].values)
+        SA = gsw.SA_from_SP(S_mean, P_dbar, lon, lat)
+        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
+        rho_mean = gsw.rho(SA, CT, P_dbar)
+        ds["density"] = ("time", rho_mean.astype("f4"))
     else:
         rho_mean = np.full(n_windows, config.default_density)
+        # Don't add to dataset if just using default
 
     # Use auxiliary temperature if available, otherwise use MicroRider temp or default
     if "aux_temperature" in ds:
@@ -943,6 +979,14 @@ def process_profile(
             params["n_diss"] // params["sampling_ratio"],
         )
         ds["lon"] = ("time", lon_mean.astype("f4"))
+
+    # Add CT sensor data if available (as temperature and conductivity)
+    if config.temperature in means:
+        # Only add if not already set from auxiliary data
+        if "temperature" not in ds:
+            ds["temperature"] = ("time", means[config.temperature].astype("f4"))
+    if "JAC_C" in means:
+        ds["conductivity"] = ("time", means["JAC_C"].astype("f4"))
 
     freq, spectra = compute_spectra(
         ds,
