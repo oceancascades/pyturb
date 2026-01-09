@@ -12,6 +12,9 @@ _CF_VARIABLE_METADATA = {
     # Shear probes
     "sh1": (None, "Velocity time derivative from probe 1", "m2 s-3"),
     "sh2": (None, "Velocity time derivative from probe 2", "m2 s-3"),
+    # Preprocessed shear probes (despiked + high-pass filtered)
+    "sh1_hp": (None, "Despiked and high-pass filtered shear probe 1", "m2 s-3"),
+    "sh2_hp": (None, "Despiked and high-pass filtered shear probe 2", "m2 s-3"),
     # Temperature gradients
     "gradT1": (None, "Temperature time derivative from thermistor 1", "K s-1"),
     "gradT2": (None, "Temperature time derivative from thermistor 2", "K s-1"),
@@ -41,6 +44,8 @@ _DEFAULT_VARIABLES = [
     "P",
     "sh1",
     "sh2",
+    "sh1_hp",  # Preprocessed shear (if available)
+    "sh2_hp",  # Preprocessed shear (if available)
     "gradT1",
     "gradT2",
     "U_EM",
@@ -53,7 +58,7 @@ _DEFAULT_VARIABLES = [
     "Az",
     "Incl_X",
     "Incl_Y",
-    "Incl_T",
+    # "Incl_T",
 ]
 
 
@@ -189,6 +194,14 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
     # Add configuration string as global attribute
     if "setupfilestr" in data:
         global_attrs["pfile_configuration"] = data["setupfilestr"]
+
+    # Add preprocessing parameters if present
+    if "_preprocess_params" in data:
+        params = data["_preprocess_params"]
+        global_attrs["pyturb_preprocess_despike_passes"] = params.get(
+            "despike_passes", 0
+        )
+        global_attrs["pyturb_preprocess_hp_cutoff_hz"] = params.get("hp_cutoff_hz", 0.0)
 
     # Create Dataset
     ds = xr.Dataset(data_vars, coords=coords, attrs=global_attrs)

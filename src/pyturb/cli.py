@@ -102,6 +102,31 @@ def p2nc(
             show_default=True,
         ),
     ] = False,
+    preprocess: Annotated[
+        bool,
+        typer.Option(
+            "--preprocess/--no-preprocess",
+            "-p/-P",
+            help="Preprocess shear probes (despike + HP filter)",
+            show_default=True,
+        ),
+    ] = False,
+    despike_passes: Annotated[
+        int,
+        typer.Option(
+            "--despike-passes",
+            help="Max despike iterations for preprocessing",
+            show_default=True,
+        ),
+    ] = 6,
+    hp_cutoff: Annotated[
+        float,
+        typer.Option(
+            "--hp-cutoff",
+            help="High-pass cutoff frequency (Hz) for preprocessing",
+            show_default=True,
+        ),
+    ] = 0.5,
     input_files: Annotated[
         list[Path],
         typer.Argument(help="Input P-files (supports shell globs)"),
@@ -112,6 +137,7 @@ def p2nc(
     Examples:
         pyturb p2nc ./data/*.p -o ./output
         pyturb p2nc file1.p file2.p file3.p
+        pyturb p2nc --preprocess ./data/*.p  # With preprocessing
     """
     if not input_files:
         typer.echo("Error: No input files specified.", err=True)
@@ -125,7 +151,9 @@ def p2nc(
         n_workers=n_workers,
         min_file_size=min_file_size,
         overwrite=overwrite,
-        verbose=True,
+        preprocess=preprocess,
+        despike_passes=despike_passes,
+        hp_cutoff_hz=hp_cutoff,
     )
 
 

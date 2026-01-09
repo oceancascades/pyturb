@@ -173,7 +173,7 @@ def estimate_epsilon(
 
     Inputs
     f    : frequency vector (Hz), length N
-    P_f  : shear auto-spectrum (shear^2 / Hz), length N
+    P_f  : shear auto-spectrum (velocity^2 shear^2 / Hz), length N
     W    : mean speed (m/s)
     nu   : kinematic viscosity (m^2/s)
     f_AA : anti-alias cutoff (Hz)
@@ -186,7 +186,9 @@ def estimate_epsilon(
 
     # Converto to wavenumber domain
     k = f / W  # cpm
-    phi = P_f * W * single_pole_correction(k)
+    # Note that our conversion of the shear spectra are different from Rockland's ODAS
+    # because do not scale our shear signal by 1/W^2 before computing spectra.
+    phi = P_f * single_pole_correction(k) / W 
 
     # Make a first guess of epsilon from low-wavenumber variance by integrating
     # data to 10 cpm and applying a non-linear correction.

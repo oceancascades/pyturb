@@ -390,19 +390,17 @@ def prepare_profile(
             ),
         )
     else:
-        if config.verbose:
-            logger.info(
-                f"Speed variable '{config.speed}' not found, "
-                "estimating from pressure derivative"
-            )
+        logger.info(
+            f"Speed variable '{config.speed}' not found, "
+            "estimating from pressure derivative"
+        )
 
         pitch = None
         if config.use_pitch_correction and config.pitch in ds:
             pitch = ds[config.pitch].values
-            if config.verbose:
-                logger.info(
-                    f"Using pitch correction with AoA={config.angle_of_attack}°"
-                )
+            logger.info(
+                f"Using pitch correction with AoA={config.angle_of_attack}°"
+            )
         speed_est = estimate_speed_from_pressure(
             ds[config.pressure_smooth].values,
             fs_slow,
@@ -414,24 +412,24 @@ def prepare_profile(
         # Speed is already smoothed in estimate_speed_from_pressure
         ds[config.speed_smooth] = ("t_slow", speed_est)
 
-    if not config.scale_probes:
-        return ds
+    # if not config.scale_probes:
+    #     return ds
 
-    # Interpolate smoothed speed to fast time for scaling
-    interp_kwargs = dict(
-        t_slow=ds.t_fast,
-        method="linear",
-        kwargs={"fill_value": "extrapolate"},
-    )
-    U_fast = ds[config.speed_smooth].interp(**interp_kwargs)
+    # # Interpolate smoothed speed to fast time for scaling
+    # interp_kwargs = dict(
+    #     t_slow=ds.t_fast,
+    #     method="linear",
+    #     kwargs={"fill_value": "extrapolate"},
+    # )
+    # U_fast = ds[config.speed_smooth].interp(**interp_kwargs)
 
-    for probe in config.shear_probes:
-        if probe in ds:
-            ds[probe] = ds[probe] / U_fast**2
+    # for probe in config.shear_probes:
+    #     if probe in ds:
+    #         ds[probe] = ds[probe] / U_fast**2
 
-    for probe in config.temperature_probes:
-        if probe in ds:
-            ds[probe] = ds[probe] / U_fast
+    # for probe in config.temperature_probes:
+    #     if probe in ds:
+    #         ds[probe] = ds[probe] / U_fast
 
     return ds
 
@@ -462,11 +460,7 @@ def highpass_filter(
     suffix: str = "_clean",
 ) -> xr.Dataset:
     """
-    Apply high-pass filter to variables before spectral analysis.
-
-    This removes low-frequency contamination (profiler motion, etc.) that
-    would otherwise bias the spectral variance estimate. MATLAB ODAS recommends
-    HP filtering at ~0.5 / fft_length_seconds before computing dissipation.
+    Apply high-pass filter to specified variables in dataset.
 
     Parameters
     ----------
@@ -835,24 +829,48 @@ def process_profile(
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
-    ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
+    # Check if preprocessed shear variables exist (from p2nc --preprocess)
+    preprocessed_suffix = "_hp"
+    shear_preprocessed = all(
+        f"{probe}{preprocessed_suffix}" in ds for probe in config.shear_probes
+    )
 
-    # High-pass filter shear probes to remove low-frequency contamination
-    if config.hp_cutoff_hz > 0:
-        hp_cutoff = config.hp_cutoff_hz
-    elif config.hp_cutoff_hz == 0:
-        # Auto-compute from FFT length: 0.5 / fft_len_sec
-        hp_cutoff = 0.5 / config.fft_len_sec
+    if shear_preprocessed:
+        # Use preprocessed variables - skip despiking and HP filtering
+        if config.verbose:
+            logger.info("Using preprocessed *_hp shear variables")
+        for probe in config.shear_probes:
+            ds[f"{probe}_clean"] = ds[f"{probe}{preprocessed_suffix}"]
+        # Still need to despike/copy gradT probes (no HP filter needed)
+        for probe in config.temperature_probes:
+            if probe in ds:
+                ds[f"{probe}_clean"] = ds[probe]  # No despiking for gradT
     else:
-        hp_cutoff = None  # Negative value disables HP filter
-
-    if hp_cutoff is not None and hp_cutoff > 0:
-        ds = highpass_filter(
-            ds,
-            config.shear_probes,
-            float(ds.fs_fast),
-            hp_cutoff,
+        # Standard processing: despike shear only (not gradT, per ODAS)
+        ds = despike_variables(
+            ds, config.shear_probes, max_passes=config.despike_max_passes
         )
+        # Copy gradT probes without despiking (ODAS doesn't despike gradT)
+        for probe in config.temperature_probes:
+            if probe in ds:
+                ds[f"{probe}_clean"] = ds[probe]
+
+        # High-pass filter shear probes to remove low-frequency contamination
+        if config.hp_cutoff_hz > 0:
+            hp_cutoff = config.hp_cutoff_hz
+        elif config.hp_cutoff_hz == 0:
+            # Auto-compute from FFT length: 0.5 / fft_len_sec
+            hp_cutoff = 0.5 / config.fft_len_sec
+        else:
+            hp_cutoff = None  # Negative value disables HP filter
+
+        if hp_cutoff is not None and hp_cutoff > 0:
+            ds = highpass_filter(
+                ds,
+                config.shear_probes,
+                float(ds.fs_fast),
+                hp_cutoff,
+            )
 
     ds = find_valid_segment(ds, config)
 

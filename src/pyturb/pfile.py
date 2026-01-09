@@ -24,6 +24,7 @@ from ._pfile import (
     read_pfile,
     to_xarray,
 )
+from ._pfile.preprocess import preprocess_shear
 
 logger = logging.getLogger(__name__)
 
@@ -217,11 +218,28 @@ def _process_single_file(
     compression_level: int,
     exclude_types: Optional[list],
     overwrite: bool,
+    preprocess: bool = False,
+    despike_passes: int = 6,
+    hp_cutoff_hz: float = 0.5,
 ) -> tuple:
     """Worker function for parallel processing. Returns (input_path, output_path, error)."""
     try:
         output_file = output_dir / (pfile_path.stem + ".nc")
         data = load_pfile_phys(pfile_path, exclude_types=exclude_types)
+
+        # Log data dimensions
+        n_fast = len(data.get("t_fast", []))
+        n_slow = len(data.get("t_slow", []))
+        logger.info(f"Loaded {pfile_path.name}: t_fast={n_fast}, t_slow={n_slow}")
+
+        # Apply shear preprocessing if requested
+        if preprocess:
+            data = preprocess_shear(
+                data,
+                despike_passes=despike_passes,
+                hp_cutoff_hz=hp_cutoff_hz,
+            )
+
         save_netcdf(
             data,
             output_file,
@@ -235,6 +253,21 @@ def _process_single_file(
         return (pfile_path, None, str(e))
 
 
+# Global variable for worker log level (set by initializer)
+_worker_log_level = logging.INFO
+
+
+def _init_worker(log_level: int):
+    """Initialize logging in worker processes."""
+    global _worker_log_level
+    _worker_log_level = log_level
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s: %(message)s",
+        force=True,
+    )
+
+
 def _unpack_worker_args(args: tuple) -> tuple:
     """Unpack arguments for imap_unordered (needed because lambdas can't be pickled)."""
     (
@@ -245,6 +278,9 @@ def _unpack_worker_args(args: tuple) -> tuple:
         compression_level,
         exclude_types,
         overwrite,
+        preprocess,
+        despike_passes,
+        hp_cutoff_hz,
     ) = args
     return _process_single_file(
         pfile_path,
@@ -254,6 +290,9 @@ def _unpack_worker_args(args: tuple) -> tuple:
         compression_level,
         exclude_types,
         overwrite,
+        preprocess,
+        despike_passes,
+        hp_cutoff_hz,
     )
 
 
@@ -265,9 +304,11 @@ def batch_convert_to_netcdf(
     compression_level: int = 4,
     exclude_types: Optional[list] = None,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
     overwrite: bool = False,
     min_file_size: int = 100_000,
+    preprocess: bool = False,
+    despike_passes: int = 6,
+    hp_cutoff_hz: float = 0.5,
 ) -> None:
     """
     Batch convert multiple P-files to NetCDF using parallel processing.
@@ -290,13 +331,19 @@ def batch_convert_to_netcdf(
         Channel types to skip during conversion.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default True.
     overwrite : bool, optional
         Whether to overwrite existing files. Default False.
     min_file_size : int, optional
         Minimum file size in bytes. Files smaller than this are skipped.
         Default 100000 (100 kB). Set to 0 to process all files.
+    preprocess : bool, optional
+        Whether to preprocess shear probes (despike + HP filter). Default False.
+        When enabled, creates sh1_hp and sh2_hp variables that can be used
+        directly by epsilon processing, skipping redundant filtering.
+    despike_passes : int, optional
+        Maximum despike iterations for preprocessing. Default 6.
+    hp_cutoff_hz : float, optional
+        High-pass filter cutoff frequency in Hz for preprocessing. Default 0.5.
 
     Examples
     --------
@@ -312,8 +359,12 @@ def batch_convert_to_netcdf(
     ...     n_workers=4
     ... )
 
-    >>> # Using list of files
-    >>> results = pfile.batch_convert_to_netcdf([Path('file1.p'), Path('file2.p')])
+    >>> # Using list of files with preprocessing
+    >>> results = pfile.batch_convert_to_netcdf(
+    ...     [Path('file1.p'), Path('file2.p')],
+    ...     preprocess=True,
+    ...     despike_passes=6,
+    ... )
     """
     # Handle different input types
     if isinstance(files, list):
@@ -339,18 +390,16 @@ def batch_convert_to_netcdf(
         original_count = len(pfiles)
         pfiles = [pf for pf in pfiles if pf.stat().st_size >= min_file_size]
         skipped_small = original_count - len(pfiles)
-        if verbose and skipped_small:
+        if skipped_small:
             logger.info(
                 f"Skipping {skipped_small} files smaller than {min_file_size / 1000:.0f} kB"
             )
 
     if not pfiles:
-        if verbose:
-            logger.info("No files to process after size filtering")
+        logger.info("No files to process after size filtering")
         return
 
-    if verbose:
-        logger.info(f"Found {len(pfiles)} P-files to convert")
+    logger.info(f"Found {len(pfiles)} P-files to convert")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -369,14 +418,13 @@ def batch_convert_to_netcdf(
             else:
                 files_to_process.append(pf)
 
-        if verbose and skipped:
+        if skipped:
             logger.info(f"Skipping {len(skipped)} files (output already exists)")
 
         pfiles = files_to_process
 
         if not pfiles:
-            if verbose:
-                logger.info("No files to process (all outputs already exist)")
+            logger.info("No files to process (all outputs already exist)")
             return
 
     if n_workers is None:
@@ -391,17 +439,22 @@ def batch_convert_to_netcdf(
             compression_level,
             exclude_types,
             overwrite,
+            preprocess,
+            despike_passes,
+            hp_cutoff_hz,
         )
         for pf in pfiles
     ]
 
-    # Use serial processing for small batches
+    # Always use parallel processing
     results = []
-    if len(pfiles) <= min(n_workers, 4):
-        if verbose:
-            logger.info("Using serial processing for small batch")
-        for i, arg_tuple in enumerate(args):
-            input_path, output_path, error = _unpack_worker_args(arg_tuple)
+    log_level = logger.getEffectiveLevel()
+    with mp.Pool(
+        processes=n_workers, initializer=_init_worker, initargs=(log_level,)
+    ) as pool:
+        # Use imap_unordered for streaming results as they complete
+        results_iter = pool.imap_unordered(_unpack_worker_args, args)
+        for i, (input_path, output_path, error) in enumerate(results_iter):
             success = error is None
             results.append(
                 {
@@ -411,35 +464,12 @@ def batch_convert_to_netcdf(
                     "error": error,
                 }
             )
-            if verbose:
-                status = "successfully converted" if success else "failed to convert"
-                logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
-                if error:
-                    logger.error(f"    Error: {error}")
-    else:
-        with mp.Pool(processes=n_workers) as pool:
-            # Use imap_unordered for streaming results as they complete
-            results_iter = pool.imap_unordered(_unpack_worker_args, args)
-            for i, (input_path, output_path, error) in enumerate(results_iter):
-                success = error is None
-                results.append(
-                    {
-                        "input": input_path,
-                        "output": output_path,
-                        "success": success,
-                        "error": error,
-                    }
-                )
-                if verbose:
-                    status = (
-                        "successfully converted" if success else "failed to convert"
-                    )
-                    logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
-                    if error:
-                        logger.error(f"    Error: {error}")
+            status = "successfully converted" if success else "failed to convert"
+            logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+            if error:
+                logger.error(f"    Error: {error}")
 
     # Summary
-    if verbose:
-        n_success = sum(1 for r in results if r["success"])
-        n_failed = len(results) - n_success
-        logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")
+    n_success = sum(1 for r in results if r["success"])
+    n_failed = len(results) - n_success
+    logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")
