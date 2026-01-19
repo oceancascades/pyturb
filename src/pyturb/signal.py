@@ -180,8 +180,7 @@ def window_psd(y: ArrayLike, fs: float, n_fft: int, n_diss: int, window: str = "
 
     win = sig.windows.get_window(window, n_fft)
     y_windowed = (
-        sliding_window_view(y, n_fft, writeable=True)[:: n_fft - fft_overlap, :]
-        * win
+        sliding_window_view(y, n_fft, writeable=True)[:: n_fft - fft_overlap, :] * win
     )
     fft = np.fft.fft(y_windowed, axis=1)[:, : n_fft // 2 + 1]
     PSD = 2 * np.real(fft * fft.conj()) / (np.sum(win**2) * fs)

@@ -329,7 +329,7 @@ def batch_compute_epsilon(
         auxiliary_file = Path(auxiliary_file)
         if not auxiliary_file.exists():
             raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
-        
+
         logger.info(f"Loading auxiliary dataset from {auxiliary_file}")
 
         aux_ds = xr.open_dataset(auxiliary_file, decode_times=True)

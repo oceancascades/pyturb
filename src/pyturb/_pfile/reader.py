@@ -54,7 +54,9 @@ def _detect_endianness(filename: Path) -> Tuple[str, str]:
         raise ValueError(f"Invalid endian flag: {flag_big}")
 
 
-def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[BinaryIO, str, str]:
+def open_pfile(
+    filename: Union[str, Path], mode: str = "rb"
+) -> Tuple[BinaryIO, str, str]:
     """
     Open an RSI P-file with automatic endian detection.
 
@@ -86,7 +88,6 @@ def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[BinaryIO, 
 
 
 def read_pfile(filename: Union[str, Path]) -> Dict[str, Any]:
-
     """
     Read an RSI P-file and return demultiplexed channel data.
 

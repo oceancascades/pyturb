@@ -59,7 +59,9 @@ def _get_file_info(filepath: Path) -> tuple[dict, dict, dict, dict]:
         # Check required dimensions exist
         for required_dim in ["t_fast", "t_slow"]:
             if required_dim not in ds.dimensions:
-                raise ValueError(f"Required dimension '{required_dim}' not found in {filepath}")
+                raise ValueError(
+                    f"Required dimension '{required_dim}' not found in {filepath}"
+                )
 
         dims: dict[str, int | None] = {}
         concat_dims = {"t_fast", "t_slow"}
