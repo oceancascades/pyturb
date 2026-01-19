@@ -32,7 +32,7 @@ def deconvolve(
     """
     # Interpolate X to match X_dX length if needed
     if X is not None and len(X) > 1:
-        X = _interp1_if_required(X, X_dX, fs)
+        X = _interp_if_required(X, X_dX, fs)
 
     # Calculate filter parameters
     f_c = 1 / (2 * np.pi * diff_gain)  # Cut-off frequency
@@ -116,7 +116,7 @@ def _sosfilt_zi_from_values(sos: np.ndarray, y0: float, x0: float) -> np.ndarray
     return zi
 
 
-def _interp1_if_required(X: np.ndarray, X_dX: np.ndarray, fs: float) -> np.ndarray:
+def _interp_if_required(X: np.ndarray, X_dX: np.ndarray, fs: float) -> np.ndarray:
     """
     Interpolate X to match X_dX length if they differ.
 
