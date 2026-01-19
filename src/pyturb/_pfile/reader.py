@@ -127,9 +127,7 @@ def read_pfile(filename: Union[str, Path]) -> Tuple[list, Dict]:
     return data
 
 
-def _read_pfile_impl(
-    fid, endian: str, filename: Path
-) -> Tuple[list, Dict]:
+def _read_pfile_impl(fid, endian: str, filename: Path) -> Tuple[list, Dict]:
     """Implementation of P-file reading (called with open file handle)."""
     data = {"fullPath": str(filename.absolute())}
 
