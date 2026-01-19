@@ -125,7 +125,6 @@ def p2nc(
         n_workers=n_workers,
         min_file_size=min_file_size,
         overwrite=overwrite,
-        verbose=True,
     )
 
 

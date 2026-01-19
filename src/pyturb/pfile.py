@@ -72,7 +72,6 @@ def load_pfile(filename: Union[str, Path]) -> Dict:
 def load_pfile_phys(
     filename: Union[str, Path],
     exclude_types: Optional[list] = None,
-    verbose: bool = False,
 ) -> Dict:
     """
     Read a P-file and convert all channels to physical units.
@@ -86,8 +85,6 @@ def load_pfile_phys(
         Path to the P-file
     exclude_types : list, optional
         List of channel types to skip conversion (default: ['gnd', 'raw'])
-    verbose : bool, optional
-        If True, print the address matrix and other diagnostic info. Default False.
 
     Returns
     -------
@@ -127,7 +124,7 @@ def load_pfile_phys(
     automatically for all pre-emphasized thermistor channels.
     """
 
-    data = read_pfile(filename, verbose=verbose)
+    data = read_pfile(filename)
 
     data_phys = convert_all_channels(data, exclude_types=exclude_types)
 
@@ -265,12 +262,16 @@ def batch_convert_to_netcdf(
     compression_level: int = 4,
     exclude_types: Optional[list] = None,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
     overwrite: bool = False,
     min_file_size: int = 100_000,
 ) -> None:
     """
     Batch convert multiple P-files to NetCDF using parallel processing.
+
+    This function uses the Python `logging` module for progress and status
+    messages (e.g., `logger.info` and `logger.error`) instead of an explicit
+    `verbose` flag. Configure logging via the CLI `--log-level` option or
+    programmatically with `logging.getLogger('pyturb').setLevel(...)`.
 
     Parameters
     ----------
@@ -290,8 +291,6 @@ def batch_convert_to_netcdf(
         Channel types to skip during conversion.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default True.
     overwrite : bool, optional
         Whether to overwrite existing files. Default False.
     min_file_size : int, optional
@@ -339,18 +338,16 @@ def batch_convert_to_netcdf(
         original_count = len(pfiles)
         pfiles = [pf for pf in pfiles if pf.stat().st_size >= min_file_size]
         skipped_small = original_count - len(pfiles)
-        if verbose and skipped_small:
+        if skipped_small:
             logger.info(
                 f"Skipping {skipped_small} files smaller than {min_file_size / 1000:.0f} kB"
             )
 
     if not pfiles:
-        if verbose:
-            logger.info("No files to process after size filtering")
+        logger.info("No files to process after size filtering")
         return
 
-    if verbose:
-        logger.info(f"Found {len(pfiles)} P-files to convert")
+    logger.info(f"Found {len(pfiles)} P-files to convert")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -369,14 +366,13 @@ def batch_convert_to_netcdf(
             else:
                 files_to_process.append(pf)
 
-        if verbose and skipped:
+        if skipped:
             logger.info(f"Skipping {len(skipped)} files (output already exists)")
 
         pfiles = files_to_process
 
         if not pfiles:
-            if verbose:
-                logger.info("No files to process (all outputs already exist)")
+            logger.info("No files to process (all outputs already exist)")
             return
 
     if n_workers is None:
@@ -409,14 +405,12 @@ def batch_convert_to_netcdf(
                     "error": error,
                 }
             )
-            if verbose:
-                status = "successfully converted" if success else "failed to convert"
-                logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
-                if error:
-                    logger.error(f"    Error: {error}")
+            status = "successfully converted" if success else "failed to convert"
+            logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+            if error:
+                logger.error(f"    Error: {error}")
 
     # Summary
-    if verbose:
-        n_success = sum(1 for r in results if r["success"])
-        n_failed = len(results) - n_success
-        logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")
+    n_success = sum(1 for r in results if r["success"])
+    n_failed = len(results) - n_success
+    logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")
