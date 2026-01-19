@@ -6,9 +6,15 @@ A microstructure processing toolbox for Rockland Scientific microstructure instr
 
 Install using `pip`. 
 
-## Command Line Usage
+## Usage
 
-The main pyturb commands are
+Pyturb is primarily a CLI but can also be integrated into scripts or notebooks. The processing should be run in the following order:
+
+1. Convert p files to netCDF. Optionally, merge converted p files.
+2. Calculate turbulence estimates on a per-profile basis.
+3. Bin estimates onto a regular grid.
+
+The three steps summarized above are applied in the CLI using subcommands `p2nc`, `merge`, `eps`, and `bin`.
 
 ### `p2nc` - convert P files
 
@@ -18,7 +24,9 @@ Convert Rockland binary P-files to NetCDF format:
 pyturb p2nc ./path/to/raw_data/*.p -o ./converted/
 ```
 
-Note that unlike the ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. The units of these variables are different to their ODAS counterparts. The scaling is applied layer.
+Note that unlike the ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. The units of these variables are different to their ODAS counterparts. The scaling is applied later.
+
+The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where files prematurely end before instrument recovery. 
 
 ### `eps` - calculate the dissipation rate
 
@@ -40,7 +48,7 @@ A selection of the option used:
 
 Example processing just up casts:
 ```bash
-pyturb eps ./converted/*.nc -o ./eps_output/ --direction up
+pyturb eps -o ./eps_output/ --direction up ./converted/*.nc
 ```
 
 ### `bin` - bin average the data
@@ -48,7 +56,7 @@ pyturb eps ./converted/*.nc -o ./eps_output/ --direction up
 Bin epsilon estimates by depth and concatenate into a single file:
 
 ```bash
-pyturb bin ./eps_output/*.nc -o binned_profiles.nc --bin-width 2.0 --dmax 500
+pyturb bin -o binned_profiles.nc --bin-width 2.0 --dmax 500 ./eps_output/*.nc
 ```
 
 Options:
