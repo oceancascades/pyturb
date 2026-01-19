@@ -7,7 +7,7 @@ import re
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple, Union
+from typing import Any, Dict, Tuple, Union, BinaryIO
 
 import numpy as np
 
@@ -54,7 +54,7 @@ def _detect_endianness(filename: Path) -> Tuple[str, str]:
         raise ValueError(f"Invalid endian flag: {flag_big}")
 
 
-def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[object, str, str]:
+def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[BinaryIO, str, str]:
     """
     Open an RSI P-file with automatic endian detection.
 
@@ -85,7 +85,8 @@ def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[object, st
     return file_obj, endian, error_msg
 
 
-def read_pfile(filename: Union[str, Path]) -> Tuple[list, Dict]:
+def read_pfile(filename: Union[str, Path]) -> Dict[str, Any]:
+
     """
     Read an RSI P-file and return demultiplexed channel data.
 
@@ -127,9 +128,9 @@ def read_pfile(filename: Union[str, Path]) -> Tuple[list, Dict]:
     return data
 
 
-def _read_pfile_impl(fid, endian: str, filename: Path) -> Tuple[list, Dict]:
+def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, Any]:
     """Implementation of P-file reading (called with open file handle)."""
-    data = {"fullPath": str(filename.absolute())}
+    data: Dict[str, Any] = {"fullPath": str(filename.absolute())}
 
     # Read first header
     fid.seek(0)

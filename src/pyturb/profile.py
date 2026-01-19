@@ -4,11 +4,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Generator, Literal, Optional
 
-import gsw
+import gsw  # type: ignore[import]
 import numpy as np
 import scipy.signal as sig
 import xarray as xr
-from profinder import find_profiles, find_segment
+from profinder import find_profiles, find_segment  # type: ignore[import]
 
 from .shear import estimate_epsilon
 from .signal import despike, window_mean, window_psd
@@ -771,7 +771,7 @@ def compute_spectra(
     fs: float,
     n_fft: int,
     n_diss: int,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[Optional[np.ndarray], dict[str, np.ndarray]]:
     """Compute power spectra for cleaned variables."""
     spectra = {}
     freq = None

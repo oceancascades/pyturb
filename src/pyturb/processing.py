@@ -5,7 +5,7 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Literal, Optional, Union
 
-import gsw
+import gsw  # type: ignore[import]
 import numpy as np
 import xarray as xr
 
@@ -38,7 +38,7 @@ def _process_file(
 
     Returns list of (input_path, output_path, profile_index, error) tuples.
     """
-    results = []
+    results: list[tuple[Path, Optional[Path], int, Optional[str]]] = []
     stem = input_file.stem
 
     try:
@@ -329,6 +329,9 @@ def batch_compute_epsilon(
         auxiliary_file = Path(auxiliary_file)
         if not auxiliary_file.exists():
             raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
+        
+        logger.info(f"Loading auxiliary dataset from {auxiliary_file}")
+
         aux_ds = xr.open_dataset(auxiliary_file, decode_times=True)
 
         # Require a time coordinate named 'time' (CF time decoding is expected)
@@ -337,7 +340,7 @@ def batch_compute_epsilon(
                 "Auxiliary dataset must have a coordinate named 'time' for interpolation"
             )
 
-        # Ensure time coordinate decodes to datetime64 (xarray CF decoding should be used)
+        # Ensure time coordinate decodes to datetime64
         if not np.issubdtype(aux_ds["time"].dtype, np.datetime64):
             raise ValueError(
                 "Auxiliary dataset 'time' coordinate must be CF-decodable to datetimes (e.g., 'seconds since 1970-01-01')"
@@ -345,15 +348,6 @@ def batch_compute_epsilon(
 
         # Drop NaN times, sort by time, and remove duplicate times (keep first occurrence)
         aux_ds = aux_ds.dropna(dim="time", subset=["time"]).sortby("time")
-        times = aux_ds["time"].values
-        if len(times) > 1:
-            mask = np.concatenate(([True], times[1:] != times[:-1]))
-            if not np.all(mask):
-                n_dup = len(mask) - np.count_nonzero(mask)
-                logger.info(
-                    f"Found and removing {n_dup} duplicate times in auxiliary 'time' coordinate"
-                )
-                aux_ds = aux_ds.isel(time=mask)
 
         # Interpolate over NaN values in auxiliary variables (use configured names).
         # Latitude/longitude are always considered; temperature/salinity/density

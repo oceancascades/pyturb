@@ -10,7 +10,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 import netCDF4 as nc
 
@@ -57,11 +57,11 @@ def _get_file_info(filepath: Path) -> tuple[dict, dict, dict, dict]:
     """Extract dimension and variable information from a NetCDF file."""
     with nc.Dataset(filepath, "r") as ds:
         # Check required dimensions exist
-        for dim in ["t_fast", "t_slow"]:
-            if dim not in ds.dimensions:
-                raise ValueError(f"Required dimension '{dim}' not found in {filepath}")
+        for required_dim in ["t_fast", "t_slow"]:
+            if required_dim not in ds.dimensions:
+                raise ValueError(f"Required dimension '{required_dim}' not found in {filepath}")
 
-        dims = {}
+        dims: dict[str, int | None] = {}
         concat_dims = {"t_fast", "t_slow"}
         for name, dim in ds.dimensions.items():
             dims[name] = None if name in concat_dims else len(dim)
@@ -87,7 +87,6 @@ def _get_file_info(filepath: Path) -> tuple[dict, dict, dict, dict]:
 def merge_netcdf(
     files: Union[list[Path], list[str]],
     output_file: Union[str, Path],
-    verbose: bool = False,
     overwrite: bool = False,
 ) -> Path:
     """
@@ -136,16 +135,15 @@ def merge_netcdf(
             f"Output file '{output_file}' already exists. Use overwrite=True to replace."
         )
 
-    if verbose:
-        logger.info(f"Merging {len(file_list)} files")
-        logger.info(f"Output: {output_file}")
-        logger.debug("-" * 50)
+    logger.info(f"Merging {len(file_list)} files")
+    logger.info(f"Output: {output_file}")
+    logger.debug("-" * 50)
 
     # Get structure from first file
     dims, var_info, global_attrs, _ = _get_file_info(file_list[0])
 
     # Collect sizes and time offsets from all files
-    file_info = []
+    file_info: list[dict[str, Any]] = []
     for f in file_list:
         with nc.Dataset(f, "r") as ds:
             info = {
@@ -167,15 +165,14 @@ def merge_netcdf(
     total_t_fast = sum(f["t_fast_size"] for f in file_info)
     total_t_slow = sum(f["t_slow_size"] for f in file_info)
 
-    if verbose:
-        logger.info(f"Total t_fast: {total_t_fast}")
-        logger.info(f"Total t_slow: {total_t_slow}")
-        for info in file_info:
-            logger.debug(
-                f"  {info['path'].name}: "
-                f"t_fast={info['t_fast_size']}, t_slow={info['t_slow_size']}"
-            )
-        logger.debug("-" * 50)
+    logger.info(f"Total t_fast: {total_t_fast}")
+    logger.info(f"Total t_slow: {total_t_slow}")
+    for info in file_info:
+        logger.debug(
+            f"  {info['path'].name}: "
+            f"t_fast={info['t_fast_size']}, t_slow={info['t_slow_size']}"
+        )
+    logger.debug("-" * 50)
 
     # Create output directory if needed
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -237,9 +234,8 @@ def merge_netcdf(
             t_fast_size = info["t_fast_size"]
             t_slow_size = info["t_slow_size"]
 
-            if verbose:
-                progress = (idx + 1) / len(file_list) * 100
-                logger.info(f"[{progress:5.1f}%] Processing {f.name}...")
+            progress = (idx + 1) / len(file_list) * 100
+            logger.info(f"[{progress:5.1f}%] Processing {f.name}...")
 
             with nc.Dataset(f, "r") as src:
                 for name in src.variables:
@@ -289,9 +285,8 @@ def merge_netcdf(
             offset_t_fast += t_fast_size
             offset_t_slow += t_slow_size
 
-    if verbose:
-        output_size = os.path.getsize(output_file) / (1024 * 1024)
-        logger.debug("-" * 50)
-        logger.info(f"Done! Output file size: {output_size:.2f} MB")
+    output_size = os.path.getsize(output_file) / (1024 * 1024)
+    logger.debug("-" * 50)
+    logger.info(f"Done! Output file size: {output_size:.2f} MB")
 
     return output_file

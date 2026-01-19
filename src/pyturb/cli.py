@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 from typing_extensions import Annotated
+from typing import Literal
 
 from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf
@@ -103,7 +104,7 @@ def p2nc(
         ),
     ] = False,
     input_files: Annotated[
-        list[Path],
+        list[Path] | None,
         typer.Argument(help="Input P-files (supports shell globs)"),
     ] = None,
 ):
@@ -250,7 +251,7 @@ def eps(
         ),
     ] = None,
     profile_direction: Annotated[
-        str,
+        Literal["down", "up", "both"],
         typer.Option(
             "--direction",
             help="Profile direction to process: down, up, or both",
@@ -316,7 +317,7 @@ def eps(
         ),
     ] = False,
     input_files: Annotated[
-        list[Path],
+        list[Path] | None,
         typer.Argument(help="Input NetCDF files (supports shell globs)"),
     ] = None,
 ):
@@ -440,7 +441,7 @@ def bin(
         ),
     ] = None,
     input_files: Annotated[
-        list[Path],
+        list[Path] | None,
         typer.Argument(help="Input epsilon NetCDF files (supports shell globs)"),
     ] = None,
 ):

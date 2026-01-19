@@ -4,6 +4,7 @@ import numpy as np
 import scipy.signal as sig
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import ArrayLike, NDArray
+from typing import Optional
 
 
 def _despike_once(
@@ -11,7 +12,7 @@ def _despike_once(
     thresh: float = 8.0,
     smooth: float = 0.5,
     fs: float = 512.0,
-    n: int = None,
+    n: Optional[int] = None,
 ) -> tuple[NDArray, NDArray]:
     if n is None:
         n = int(0.04 * fs)  # 40 ms of data around each spike (matches MATLAB ODAS)
@@ -98,7 +99,7 @@ def despike(
     thresh: float = 8.0,
     smooth: float = 0.5,
     fs: float = 512.0,
-    n: int = None,
+    n: Optional[int] = None,
     max_passes: int = 6,
 ) -> tuple[NDArray, NDArray, int, float]:
     """
@@ -150,7 +151,7 @@ def despike(
     return cleaned, all_spikes, pass_count, despike_fraction
 
 
-def window_mean(y, n_fft, n_diss):
+def window_mean(y: ArrayLike, n_fft: int, n_diss: int):
     """Compute mean over dissipation windows.
 
     Assumes y has been pre-trimmed to fit an exact number of windows.
@@ -162,7 +163,7 @@ def window_mean(y, n_fft, n_diss):
     return y_windowed.mean(axis=1)
 
 
-def window_psd(y, fs, n_fft, n_diss, window="hann"):
+def window_psd(y: ArrayLike, fs: float, n_fft: int, n_diss: int, window: str = "hann"):
     """Compute windowed power spectral density averaged over dissipation windows.
 
     Assumes y has been pre-trimmed to fit an exact number of windows.
@@ -177,13 +178,13 @@ def window_psd(y, fs, n_fft, n_diss, window="hann"):
     if n_diss % n_fft != 0:
         raise ValueError("n_diss must be multiple of n_fft")
 
-    window = sig.windows.get_window(window, n_fft)
+    win = sig.windows.get_window(window, n_fft)
     y_windowed = (
         sliding_window_view(y, n_fft, writeable=True)[:: n_fft - fft_overlap, :]
-        * window
+        * win
     )
     fft = np.fft.fft(y_windowed, axis=1)[:, : n_fft // 2 + 1]
-    PSD = 2 * np.real(fft * fft.conj()) / (np.sum(window**2) * fs)
+    PSD = 2 * np.real(fft * fft.conj()) / (np.sum(win**2) * fs)
     freq = np.fft.fftfreq(n_fft, d=1 / fs)[: n_fft // 2 + 1]
 
     # Fix the Nyquist frequency and zero frequency, which should not be doubled

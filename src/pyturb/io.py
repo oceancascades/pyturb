@@ -1,8 +1,10 @@
 # Functions for reading and writing data
 
-import h5py
+import h5py  # type: ignore[import]
 import numpy as np
 import xarray as xr
+from pathlib import Path
+from typing import Any, Union
 from scipy.io import loadmat
 
 __all__ = ["load_rockland_mat", "load_profile_nc"]
@@ -20,7 +22,7 @@ _variable_map = dict(
 )
 
 
-def load_profile_nc(filename: str) -> xr.Dataset:
+def load_profile_nc(filename: Union[str, Path]) -> xr.Dataset:
     return xr.load_dataset(filename, decode_times=False)
 
 
@@ -28,7 +30,7 @@ def load_rockland_mat(filename: str) -> xr.Dataset:
     store = "mat"
 
     try:
-        dat = loadmat(filename, squeeze_me=True)
+        dat: Any = loadmat(filename, squeeze_me=True)
     except NotImplementedError:
         try:
             dat = h5py.File(filename, "r")

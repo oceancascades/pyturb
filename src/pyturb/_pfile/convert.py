@@ -6,7 +6,7 @@ Translated from MATLAB ODAS library v4.5.1 (convert_odas.m)
 
 import re
 import warnings
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -25,7 +25,7 @@ def _adc_to_voltage(data: np.ndarray, params: Dict) -> np.ndarray:
 
 def _poly(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
     """Polynomial conversion."""
-    coeffs = []
+    coeffs: list[float] = []
     for i in range(10):
         coef_name = f"coef{i}"
         if coef_name in params:
@@ -379,7 +379,7 @@ def convert_all_channels(
         exclude_types = ["gnd", "raw"]
     exclude_types = [t.lower() for t in exclude_types]
 
-    result = {"units": {}}
+    result: Dict[str, Any] = {"units": {}}
 
     # Preserve metadata
     metadata_keys = [
