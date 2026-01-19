@@ -226,29 +226,29 @@ def eps(
         ),
     ] = "lon",
     aux_temp: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--aux-temp",
-            help="Temperature variable name in auxiliary file",
+            help="Auxiliary temperature variable name (optional). If omitted, auxiliary temperature will NOT be applied.",
             show_default=True,
         ),
-    ] = "temperature",
+    ] = None,
     aux_sal: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--aux-sal",
-            help="Salinity variable name in auxiliary file",
+            help="Auxiliary salinity variable name (optional). If omitted, auxiliary salinity will NOT be applied.",
             show_default=True,
         ),
-    ] = "salinity",
+    ] = None,
     aux_dens: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--aux-dens",
-            help="Density variable name in auxiliary file",
+            help="Auxiliary density variable name (optional). If omitted, auxiliary density will NOT be applied.",
             show_default=True,
         ),
-    ] = "density",
+    ] = None,
     profile_direction: Annotated[
         str,
         typer.Option(

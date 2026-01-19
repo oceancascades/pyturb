@@ -69,9 +69,13 @@ class ProfileConfig:
     aux_time: str = "time"  # Time variable in auxiliary dataset
     aux_latitude: str = "lat"  # Latitude variable in auxiliary dataset
     aux_longitude: str = "lon"  # Longitude variable in auxiliary dataset
-    aux_temperature: str = "temperature"  # Temperature variable in auxiliary dataset
-    aux_salinity: str = "salinity"  # Salinity variable in auxiliary dataset
-    aux_density: str = "density"  # Density variable in auxiliary dataset
+    aux_temperature: Optional[str] = (
+        None  # Temperature variable in auxiliary dataset (opt-in)
+    )
+    aux_salinity: Optional[str] = (
+        None  # Salinity variable in auxiliary dataset (opt-in)
+    )
+    aux_density: Optional[str] = None  # Density variable in auxiliary dataset (opt-in)
 
     # === Processing options ===
     chop_start: bool = True
@@ -153,10 +157,14 @@ def merge_auxiliary_data(
     var_mappings = [
         (config.aux_latitude, "aux_latitude"),
         (config.aux_longitude, "aux_longitude"),
-        (config.aux_temperature, "aux_temperature"),
-        (config.aux_salinity, "aux_salinity"),
-        (config.aux_density, "aux_density"),
     ]
+    # Add optional variables only if explicitly configured
+    if config.aux_temperature is not None:
+        var_mappings.append((config.aux_temperature, "aux_temperature"))
+    if config.aux_salinity is not None:
+        var_mappings.append((config.aux_salinity, "aux_salinity"))
+    if config.aux_density is not None:
+        var_mappings.append((config.aux_density, "aux_density"))
 
     for aux_var, output_var in var_mappings:
         if aux_var in aux_ds:

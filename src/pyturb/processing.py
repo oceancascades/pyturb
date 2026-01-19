@@ -176,9 +176,9 @@ def batch_compute_epsilon(
     auxiliary_file: Optional[Union[str, Path]] = None,
     aux_latitude: str = "lat",
     aux_longitude: str = "lon",
-    aux_temperature: str = "temperature",
-    aux_salinity: str = "salinity",
-    aux_density: str = "density",
+    aux_temperature: Optional[str] = None,
+    aux_salinity: Optional[str] = None,
+    aux_density: Optional[str] = None,
     despike_max_passes: int = 6,
     n_workers: Optional[int] = None,
     verbose: bool = False,
@@ -329,31 +329,47 @@ def batch_compute_epsilon(
         auxiliary_file = Path(auxiliary_file)
         if not auxiliary_file.exists():
             raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
-        aux_ds = xr.open_dataset(auxiliary_file)
+        aux_ds = xr.open_dataset(auxiliary_file, decode_times=True)
 
-        # Interpolate over NaN values in auxiliary variables (use configured names)
-        aux_vars = [
-            config.aux_latitude,
-            config.aux_longitude,
-            config.aux_temperature,
-            config.aux_salinity,
-            config.aux_density,
-        ]
+        # Require a time coordinate named 'time' (CF time decoding is expected)
+        if "time" not in aux_ds.coords:
+            raise ValueError(
+                "Auxiliary dataset must have a coordinate named 'time' for interpolation"
+            )
+
+        # Ensure time coordinate decodes to datetime64 (xarray CF decoding should be used)
+        if not np.issubdtype(aux_ds["time"].dtype, np.datetime64):
+            raise ValueError(
+                "Auxiliary dataset 'time' coordinate must be CF-decodable to datetimes (e.g., 'seconds since 1970-01-01')"
+            )
+
+        # Drop NaN times, sort by time, and remove duplicate times (keep first occurrence)
+        aux_ds = aux_ds.dropna(dim="time", subset=["time"]).sortby("time")
+        times = aux_ds["time"].values
+        if len(times) > 1:
+            mask = np.concatenate(([True], times[1:] != times[:-1]))
+            if not np.all(mask):
+                n_dup = len(mask) - np.count_nonzero(mask)
+                logger.info(
+                    f"Found and removing {n_dup} duplicate times in auxiliary 'time' coordinate"
+                )
+                aux_ds = aux_ds.isel(time=mask)
+
+        # Interpolate over NaN values in auxiliary variables (use configured names).
+        # Latitude/longitude are always considered; temperature/salinity/density
+        # are only used if explicitly provided by the user (config value not None).
+        aux_vars = [config.aux_latitude, config.aux_longitude]
+        opt_vars = [config.aux_temperature, config.aux_salinity, config.aux_density]
+        aux_vars.extend([v for v in opt_vars if v is not None])
+
         for var in aux_vars:
             if var in aux_ds and aux_ds[var].isnull().any():
-                # Get the time dimension name
-                time_dim = aux_ds[var].dims[0] if aux_ds[var].dims else None
-                if time_dim is not None:
-                    aux_ds[var] = aux_ds[var].interpolate_na(
-                        dim=time_dim, method="linear", fill_value="extrapolate"
-                    )
-                    if verbose:
-                        logger.info(
-                            f"Interpolated NaN values in auxiliary variable '{var}'"
-                        )
+                aux_ds[var] = aux_ds[var].interpolate_na(
+                    dim="time", method="linear", fill_value="extrapolate"
+                )
+                logger.info(f"Interpolated NaN values in auxiliary variable '{var}'")
 
-        if verbose:
-            logger.info(f"Loaded auxiliary dataset from {auxiliary_file}")
+        logger.info(f"Loaded auxiliary dataset from {auxiliary_file}")
 
     args = [(f, output_dir, config, overwrite, aux_ds) for f in nc_files]
 
