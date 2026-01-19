@@ -85,16 +85,17 @@ def open_pfile(filename: Union[str, Path], mode: str = "rb") -> Tuple[object, st
     return file_obj, endian, error_msg
 
 
-def read_pfile(filename: Union[str, Path], verbose: bool = False) -> Tuple[list, Dict]:
+def read_pfile(filename: Union[str, Path]) -> Tuple[list, Dict]:
     """
     Read an RSI P-file and return demultiplexed channel data.
+
+    This function logs diagnostic information at the module logger's DEBUG
+    level instead of using an explicit `verbose` flag.
 
     Parameters
     ----------
     filename : str or Path
         Path to the P-file (with or without .p extension)
-    verbose : bool, optional
-        Print address matrix and channel mapping info.
 
     Returns
     -------
@@ -119,7 +120,7 @@ def read_pfile(filename: Union[str, Path], verbose: bool = False) -> Tuple[list,
         warnings.warn(error_message)
 
     try:
-        data = _read_pfile_impl(fid, endian, filename, verbose)
+        data = _read_pfile_impl(fid, endian, filename)
     finally:
         fid.close()
 
@@ -127,7 +128,7 @@ def read_pfile(filename: Union[str, Path], verbose: bool = False) -> Tuple[list,
 
 
 def _read_pfile_impl(
-    fid, endian: str, filename: Path, verbose: bool
+    fid, endian: str, filename: Path
 ) -> Tuple[list, Dict]:
     """Implementation of P-file reading (called with open file handle)."""
     data = {"fullPath": str(filename.absolute())}
@@ -201,10 +202,9 @@ def _read_pfile_impl(
                 ]
                 ch_matrix[i, : len(values)] = values
 
-    if verbose:
-        logger.debug("Address Matrix:")
-        for row in ch_matrix:
-            logger.debug("".join(f"{x:4d}" for x in row))
+    logger.debug("Address Matrix:")
+    for row in ch_matrix:
+        logger.debug("".join(f"{x:4d}" for x in row))
 
     # Build channel list from config
     ch_nums, ch_names = [], []
@@ -231,20 +231,17 @@ def _read_pfile_impl(
 
         if len(ids) == 1:
             if ids[0] in ch_matrix:
-                if verbose:
-                    logger.debug(f"     channel: {ids[0]:2d} = {ch_name}")
+                logger.debug(f"     channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(ch_name)
         elif len(ids) == 2:
             # Even/odd pair for 32-bit channels
             if ids[0] in ch_matrix:
-                if verbose:
-                    logger.debug(f"even channel: {ids[0]:2d} = {ch_name}")
+                logger.debug(f"even channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(f"{ch_name}_E")
             if ids[1] in ch_matrix:
-                if verbose:
-                    logger.debug(f" odd channel: {ids[1]:2d} = {ch_name}")
+                logger.debug(f" odd channel: {ids[1]:2d} = {ch_name}")
                 ch_nums.append(ids[1])
                 ch_names.append(f"{ch_name}_O")
 
