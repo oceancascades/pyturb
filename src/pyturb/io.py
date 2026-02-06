@@ -1,6 +1,5 @@
 # Functions for reading and writing data
 
-import h5py  # type: ignore[import]
 import numpy as np
 import xarray as xr
 from pathlib import Path
@@ -33,6 +32,8 @@ def load_rockland_mat(filename: str) -> xr.Dataset:
         dat: Any = loadmat(filename, squeeze_me=True)
     except NotImplementedError:
         try:
+            import h5py  # Lazy import - only when needed
+
             dat = h5py.File(filename, "r")
             store = "hdf5"
         except OSError:
