@@ -16,6 +16,7 @@ dependencies = [
     "scipy>=1.16.1",
     "typer-slim>=0.20.0",
     "xarray>=2025.10.1",
+    "typing_extensions>=4.0",
 ]
 
 [project.scripts]
