@@ -545,7 +545,6 @@ def merge(
         merge_netcdf(
             files=file_list,
             output_file=output_file,
-            verbose=True,
             overwrite=overwrite,
         )
     except FileExistsError as e:
