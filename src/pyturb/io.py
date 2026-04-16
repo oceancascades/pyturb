@@ -1,9 +1,10 @@
 # Functions for reading and writing data
 
-import numpy as np
-import xarray as xr
 from pathlib import Path
 from typing import Any, Union
+
+import numpy as np
+import xarray as xr
 from scipy.io import loadmat
 
 __all__ = ["load_rockland_mat", "load_profile_nc"]

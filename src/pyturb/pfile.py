@@ -32,7 +32,6 @@ __all__ = [
     "SetupConfig",
     "read_pfile",
     "open_pfile",
-    "load_pfile",
     "load_pfile_phys",
     "save_netcdf",
     "batch_convert_to_netcdf",
@@ -43,30 +42,6 @@ __all__ = [
     "adis_extract",
     "make_gradT",
 ]
-
-
-def load_pfile(filename: Union[str, Path]) -> Dict:
-    """
-    Convenience function to read a P-file and return only the data dictionary.
-
-    Parameters
-    ----------
-    filename : str or Path
-        Path to the P-file
-
-    Returns
-    -------
-    dict
-        Dictionary containing channel data and metadata
-
-    Examples
-    --------
-    >>> data = load_pfile('my_file.p')
-    >>> shear = data['sh1']
-    >>> pressure = data['P']
-    """
-    data = read_pfile(filename)
-    return data
 
 
 def load_pfile_phys(
@@ -232,28 +207,6 @@ def _process_single_file(
         return (pfile_path, None, str(e))
 
 
-def _unpack_worker_args(args: tuple) -> tuple:
-    """Unpack arguments for imap_unordered (needed because lambdas can't be pickled)."""
-    (
-        pfile_path,
-        output_dir,
-        variables,
-        compress,
-        compression_level,
-        exclude_types,
-        overwrite,
-    ) = args
-    return _process_single_file(
-        pfile_path,
-        output_dir,
-        variables,
-        compress,
-        compression_level,
-        exclude_types,
-        overwrite,
-    )
-
-
 def batch_convert_to_netcdf(
     files: Union[str, Path, list[Path]],
     output_dir: Optional[Union[str, Path]] = None,
@@ -391,24 +344,24 @@ def batch_convert_to_netcdf(
         for pf in pfiles
     ]
 
-    results = []
     with mp.Pool(processes=n_workers) as pool:
-        # Use imap_unordered for streaming results as they complete
-        results_iter = pool.imap_unordered(_unpack_worker_args, args)
-        for i, (input_path, output_path, error) in enumerate(results_iter):
-            success = error is None
-            results.append(
-                {
-                    "input": input_path,
-                    "output": output_path,
-                    "success": success,
-                    "error": error,
-                }
-            )
-            status = "successfully converted" if success else "failed to convert"
-            logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
-            if error:
-                logger.error(f"    Error: {error}")
+        results_raw = pool.starmap(_process_single_file, args)
+
+    results = []
+    for i, (input_path, output_path, error) in enumerate(results_raw):
+        success = error is None
+        results.append(
+            {
+                "input": input_path,
+                "output": output_path,
+                "success": success,
+                "error": error,
+            }
+        )
+        status = "successfully converted" if success else "failed to convert"
+        logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+        if error:
+            logger.error(f"    Error: {error}")
 
     # Summary
     n_success = sum(1 for r in results if r["success"])
