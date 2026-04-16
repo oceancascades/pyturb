@@ -5,11 +5,8 @@ Verifies that raw channel spectra from a bench test (instrument on a table,
 not in water) match the expected electronic noise models. This catches
 reader bugs (byte ordering, channel mapping, sign conventions) that would
 distort the spectral shape, as well as confirming that the noise models
-themselves are correctly ported from MATLAB.
-
-The test checks that measured spectral points fall within a tolerance band
-around the theoretical noise model — similar to the shaded acceptance
-region shown in Rockland's bench test GUI.
+themselves are correctly ported from MATLAB. The test checks that measured spectral points fall within a tolerance band
+around the theoretical noise model.
 """
 
 import numpy as np
@@ -20,13 +17,9 @@ from pyturb.noise import noise_shearchannel, noise_thermchannel
 
 # Tolerance band: measured spectrum must be within this factor of the model.
 # A factor of 3 means the acceptance region spans model/3 to model*3.
-# This is generous enough to accommodate component tolerances and probe
-# capacitance variation, but tight enough to catch real problems.
 TOLERANCE_FACTOR = 3.0
 
 # Fraction of spectral points that must fall within the tolerance band.
-# We allow some outliers (spectral leakage at band edges, low-frequency
-# variance) but require the vast majority to be in-band.
 MIN_FRACTION_IN_BAND = 0.90
 
 # Frequency range for comparison. Below ~1 Hz there are too few FFT
@@ -35,7 +28,7 @@ MIN_FRACTION_IN_BAND = 0.90
 F_MIN = 1.0
 F_MAX = 200.0
 
-# FFT length in seconds (matches quick_bench.m default)
+
 FFT_LENGTH_SEC = 2.0
 
 
