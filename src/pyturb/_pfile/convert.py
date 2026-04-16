@@ -44,12 +44,7 @@ def _poly(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
 
 
 def _shear(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
-    """Shear probe conversion to m^2 s^-3.
-
-    Matches MATLAB odas_shear_internal: the raw ADC counts are scaled
-    directly without adding adc_zero/sig_zero offsets, consistent with
-    how the shear probe signal chain is calibrated.
-    """
+    """Shear probe conversion to m^2 s^-3."""
     adc_fs = float(params["adc_fs"])
     adc_bits = int(params["adc_bits"])
     diff_gain = float(params["diff_gain"])

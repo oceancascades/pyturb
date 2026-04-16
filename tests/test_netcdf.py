@@ -51,9 +51,7 @@ class TestSaveNetcdf:
         ds = xr.open_dataset(out, decode_times=False)
         assert len(ds.t_fast) == len(phys_data["t_fast"])
         assert len(ds.t_slow) == len(phys_data["t_slow"])
-        np.testing.assert_allclose(
-            ds.t_fast.values, phys_data["t_fast"], atol=1e-4
-        )
+        np.testing.assert_allclose(ds.t_fast.values, phys_data["t_fast"], atol=1e-4)
         ds.close()
 
     def test_data_values_preserved(self, phys_data, tmp_path):

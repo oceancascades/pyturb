@@ -332,7 +332,15 @@ def batch_convert_to_netcdf(
         n_workers = mp.cpu_count()
 
     args = [
-        (pf, output_dir, variables, compress, compression_level, exclude_types, overwrite)
+        (
+            pf,
+            output_dir,
+            variables,
+            compress,
+            compression_level,
+            exclude_types,
+            overwrite,
+        )
         for pf in pfiles
     ]
 

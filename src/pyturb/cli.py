@@ -3,10 +3,10 @@
 import logging
 from importlib.metadata import version
 from pathlib import Path
+from typing import Literal
 
 import typer
 from typing_extensions import Annotated
-from typing import Literal
 
 from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf

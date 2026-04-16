@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from pyturb._pfile import convert_all_channels, deconvolve
+from pyturb._pfile import deconvolve
 from pyturb._pfile.gradT import make_gradT
 
 

@@ -1,10 +1,11 @@
 # Methods for signal processing, including despiking, power spectra and windowed means
 
+from typing import Optional
+
 import numpy as np
 import scipy.signal as sig
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import ArrayLike, NDArray
-from typing import Optional
 
 
 def _despike_once(

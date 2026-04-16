@@ -7,7 +7,7 @@ import re
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union, BinaryIO
+from typing import Any, BinaryIO, Dict, Tuple, Union
 
 import numpy as np
 

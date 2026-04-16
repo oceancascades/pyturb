@@ -42,9 +42,24 @@ class TestReadPfile:
 
     def test_expected_channels_present(self, raw_data):
         expected = [
-            "Ax", "Ay", "T1", "T1_dT1", "T2", "T2_dT2",
-            "sh1", "sh2", "P", "P_dP", "Incl_X", "Incl_Y",
-            "Incl_T", "JAC_T", "JAC_C", "V_Bat", "PV", "Gnd",
+            "Ax",
+            "Ay",
+            "T1",
+            "T1_dT1",
+            "T2",
+            "T2_dT2",
+            "sh1",
+            "sh2",
+            "P",
+            "P_dP",
+            "Incl_X",
+            "Incl_Y",
+            "Incl_T",
+            "JAC_T",
+            "JAC_C",
+            "V_Bat",
+            "PV",
+            "Gnd",
         ]
         for ch in expected:
             assert ch in raw_data, f"Missing channel: {ch}"

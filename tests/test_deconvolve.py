@@ -1,7 +1,6 @@
 """Tests for deconvolution (deconvolve.py)."""
 
 import numpy as np
-import pytest
 
 from pyturb._pfile import deconvolve
 
