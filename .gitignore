@@ -8,6 +8,7 @@ wheels/
 .venv
 .ruff_cache
 .mypy_cache
+.pytest_cache
 odas*
 *.ipynb*
 
