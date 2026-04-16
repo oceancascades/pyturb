@@ -44,16 +44,18 @@ def _poly(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
 
 
 def _shear(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
-    """Shear probe conversion to m^2 s^-3."""
-    adc_zero = float(params.get("adc_zero", 0))
-    sig_zero = float(params.get("sig_zero", 0))
+    """Shear probe conversion to m^2 s^-3.
+
+    Matches MATLAB odas_shear_internal: the raw ADC counts are scaled
+    directly without adding adc_zero/sig_zero offsets, consistent with
+    how the shear probe signal chain is calibrated.
+    """
     adc_fs = float(params["adc_fs"])
     adc_bits = int(params["adc_bits"])
     diff_gain = float(params["diff_gain"])
     sens = float(params["sens"])
 
-    voltage = (adc_fs / 2**adc_bits) * data + (adc_zero - sig_zero)
-    physical = voltage / (2 * np.sqrt(2) * diff_gain * sens)
+    physical = (adc_fs / 2**adc_bits) * data / (2 * np.sqrt(2) * diff_gain * sens)
 
     return physical, "m^2 s^-3"
 
@@ -335,7 +337,7 @@ def convert_channel(data: np.ndarray, channel_name: str, cfg) -> Tuple[np.ndarra
     if converter is None:
         raise ValueError(f"Unknown channel type: '{ch_type}'")
 
-    data = data.astype(np.float64)
+    data = np.asarray(data, dtype=np.float64)
     return converter(data, params)
 
 
@@ -403,7 +405,9 @@ def convert_all_channels(
     channel_sections = cfg.get_section_dicts("channel")
 
     # First pass: deconvolve pre-emphasized channels (except shear)
+    # Store raw deconvolved results (in counts) keyed by pre-emphasis channel name
     deconvolved = {}
+    deconvolved_raw = {}
     for section in channel_sections:
         params = section["params"]
         ch_name = params.get("name")
@@ -424,6 +428,7 @@ def convert_all_channels(
                         data.get(base_name),
                     )
                     deconvolved[f"{base_name}_hires"] = X_hires
+                    deconvolved_raw[ch_name] = X_hires
                 except Exception as e:
                     warnings.warn(f"Failed to deconvolve '{ch_name}': {e}")
 
@@ -500,7 +505,13 @@ def convert_all_channels(
             grad_name = f"grad{ch_name}"
 
         try:
-            gradT_result = make_gradT(data[ch_name], params, fs_fast, gradT_method)
+            gradT_result = make_gradT(
+                data[ch_name],
+                params,
+                fs_fast,
+                gradT_method,
+                T_deconvolved=deconvolved_raw.get(ch_name),
+            )
             result[grad_name] = gradT_result
             result["units"][grad_name] = "K/s"
         except Exception as e:

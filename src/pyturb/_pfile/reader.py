@@ -258,11 +258,11 @@ def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, An
 
     # Demultiplex channels from data portion
     file_data = file_data[:, 64:]
+    reshaped_data = file_data.reshape(-1, n_rows * n_cols)
     ch_data = {}
     for i, name in enumerate(ch_names):
-        indices = ch_matrix == ch_nums[i]
-        reshaped_data = file_data.reshape(-1, n_rows * n_cols)
-        ch_data[name] = reshaped_data[:, indices.ravel()].ravel()
+        col_indices = np.where(ch_matrix.ravel() == ch_nums[i])[0]
+        ch_data[name] = reshaped_data[:, col_indices].ravel()
 
     # Extract timestamp from header
     second = float(HD[8]) + float(HD[9]) / 1000.0

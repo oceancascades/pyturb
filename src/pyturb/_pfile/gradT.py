@@ -4,8 +4,6 @@ Compute temperature gradient from pre-emphasized thermistor signals.
 Implements the algorithm from ODAS library v4.5.1 (make_gradT_odas.m)
 """
 
-import re
-import warnings
 from typing import Dict
 
 import numpy as np
@@ -19,6 +17,7 @@ def make_gradT(
     params: Dict,
     fs: float,
     method: str = "high_pass",
+    T_deconvolved: np.ndarray = None,
 ) -> np.ndarray:
     """
     Compute temperature time-derivative from pre-emphasized thermistor signal.
@@ -33,6 +32,9 @@ def make_gradT(
         Sampling rate in Hz
     method : str
         'high_pass' (recommended) or 'first_difference'
+    T_deconvolved : ndarray, optional
+        Already-deconvolved temperature signal (in counts). If provided,
+        skips the internal deconvolution step to avoid redundant work.
 
     Returns
     -------
@@ -87,8 +89,11 @@ def make_gradT(
         beta_2 = float(params["beta_2"]) if "beta_2" in params else np.inf
         beta_3 = float(params["beta_3"]) if "beta_3" in params else np.inf
 
-    # Deconvolve to get temperature
-    T = deconvolve(T_dT, fs, diff_gain)
+    # Deconvolve to get temperature (skip if already provided)
+    if T_deconvolved is not None:
+        T = T_deconvolved
+    else:
+        T = deconvolve(T_dT, fs, diff_gain)
 
     # High-pass filter to get time derivative
     fc = 1 / (2 * np.pi * diff_gain)
@@ -111,7 +116,7 @@ def make_gradT(
         Z = ((T - a) / b) * (adc_fs / 2**adc_bits) * 2 / (g * e_b)
 
     R = (1 - Z) / (1 + Z)
-    R = np.clip(R, 0.1, None)  # Prevent log of negative/zero for broken thermistor
+    R[R < 0.1] = 1.0  # Broken thermistor: force R=1 so log(R)=0 (matches MATLAB)
     log_R = np.log(R)
 
     # Compute absolute temperature using Steinhart-Hart equation
@@ -139,80 +144,3 @@ def make_gradT(
         )
 
     return gradT
-
-
-def compute_gradT_channels(data: Dict, method: str = "high_pass") -> Dict:
-    """
-    Compute dT/dt for all pre-emphasized thermistor channels (T1_dT1, T2_dT2, etc.).
-
-    Adds gradT1, gradT2, etc. to the data dictionary.
-
-    Parameters
-    ----------
-    data : dict
-        Data from load_pfile_phys() with 'cfgobj' and 'fs_fast'
-    method : str
-        'high_pass' (default) or 'first_difference'
-
-    Returns
-    -------
-    dict
-        Input dict with added gradT channels (dT/dt in K/s)
-
-    Notes
-    -----
-    To convert to spatial gradient dT/dz, divide by fall speed in the
-    processing pipeline (platform-dependent calculation).
-    """
-    cfg = data["cfgobj"]
-    fs_fast = data["fs_fast"]
-
-    # Find all thermistor channels with diff_gain (pre-emphasized)
-    therm_types = ["therm", "t_ms", "xmp_therm"]
-
-    for section in cfg.sections:
-        if section["section"] != "channel":
-            continue
-
-        params = section["params"].copy()  # Copy to avoid modifying original
-        ch_type = params.get("type", "").lower()
-
-        # Only process thermistor types
-        if ch_type not in therm_types:
-            continue
-
-        # Only process channels with diff_gain (pre-emphasized)
-        if "diff_gain" not in params:
-            continue
-
-        ch_name = params.get("name", "")
-        if not ch_name or ch_name not in data:
-            continue
-
-        # Determine output name and base name: gradT1 from T1_dT1
-        # Pattern: (word)_d\1 -> extracts base name
-        match = re.match(r"(\w+)_d\1", ch_name, re.IGNORECASE)
-        if match:
-            base_name = match.group(1)
-            grad_name = f"grad{base_name}"
-
-            # Get parameters from base channel and merge
-            # (base channel has calibration coefficients)
-            base_params = cfg.get_channel_params(base_name)
-            if base_params:
-                # Merge: base params first, then pre-emphasis params override
-                merged_params = base_params.copy()
-                merged_params.update(params)
-                params = merged_params
-        else:
-            grad_name = f"grad{ch_name}"
-
-        try:
-            gradT_result = make_gradT(data[ch_name], params, fs_fast, method)
-            data[grad_name] = gradT_result
-            if "units" in data:
-                data["units"][grad_name] = "K/s"
-        except Exception as e:
-            warnings.warn(f"Could not compute {grad_name} from {ch_name}: {e}")
-
-    return data
