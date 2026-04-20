@@ -1,7 +1,12 @@
 # Functions for estimating turbulent dissipation rate from shear microstructure
 
+import logging
 
 import numpy as np
+import scipy.signal as sig
+from numpy.lib.stride_tricks import sliding_window_view
+
+logger = logging.getLogger(__name__)
 
 
 def nasmyth_spectrum(k: np.ndarray, eps: float, nu: float = 1e-6) -> np.ndarray:
@@ -17,7 +22,7 @@ def nasmyth_spectrum(k: np.ndarray, eps: float, nu: float = 1e-6) -> np.ndarray:
 
 
 def integrated_nasmyth(k_max: float, eps: float, nu: float = 1e-6) -> float:
-    """
+    r"""
     Integrated Nasmyth spectrum [W / kg]
     k_max   : wavenumber (cpm, cycles per metre)
     eps : dissipation (W/kg)
@@ -264,3 +269,173 @@ def estimate_epsilon(
             eps_adj = eps_low
 
     return eps_adj, k_range[-1]
+
+
+def clean_shear_spec(
+    shear: np.ndarray,
+    accel: np.ndarray,
+    n_fft: int,
+    fs: float,
+    n_diss: int,
+    window: str = "hann",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Remove acceleration-coherent contamination from shear spectra (Goodman method).
+
+    Uses the Goodman coherent-noise removal algorithm to subtract vibration
+    signals (measured by accelerometers) that are coherent with the shear
+    probe signals.  Operates entirely in the spectral domain.
+
+    Parameters
+    ----------
+    shear : ndarray, shape (N,) or (N, n_probes)
+        Shear probe time series.  Each column is one probe.
+    accel : ndarray, shape (N, n_accel)
+        Accelerometer time series.  Each column is one component (e.g. Ax, Ay, Az).
+    n_fft : int
+        FFT segment length (must be even).
+    fs : float
+        Sampling rate (Hz).
+    n_diss : int
+        Dissipation-window length in samples (must be a multiple of n_fft).
+    window : str, optional
+        Window function name (default ``"hann"``).
+
+    Returns
+    -------
+    freq : ndarray, shape (n_fft//2 + 1,)
+        Frequency vector (Hz).
+    clean_psd : ndarray, shape (n_windows, n_probes, n_fft//2 + 1)
+        Cleaned shear auto-spectra averaged over dissipation windows.
+        If there is only one shear probe the probe axis is squeezed out.
+    """
+    shear = np.asarray(shear, dtype=np.float64)
+    accel = np.asarray(accel, dtype=np.float64)
+
+    if shear.ndim == 1:
+        shear = shear[:, np.newaxis]
+    if accel.ndim == 1:
+        accel = accel[:, np.newaxis]
+    if shear.shape[0] != accel.shape[0]:
+        raise ValueError("shear and accel must have the same number of rows")
+
+    n_probes = shear.shape[1]
+    n_accel = accel.shape[1]
+    fft_overlap = n_fft // 2
+    n_freq = n_fft // 2 + 1
+    step = n_fft - fft_overlap
+
+    # Build window and normalisation factor
+    win = sig.windows.get_window(window, n_fft).astype(np.float64)
+    norm = np.sum(win**2) * fs  # power-spectrum normalisation
+
+    # ------------------------------------------------------------------
+    # Segment all channels using sliding_window_view
+    # sliding_window_view with axis=0 on (N, n_ch) gives (n_seg, n_ch, n_fft)
+    # We transpose to (n_seg, n_fft, n_ch) for consistent downstream use.
+    # ------------------------------------------------------------------
+    shear_segs = np.array(
+        sliding_window_view(shear, n_fft, axis=0)[::step], dtype=np.float64
+    ).transpose(0, 2, 1)
+    accel_segs = np.array(
+        sliding_window_view(accel, n_fft, axis=0)[::step], dtype=np.float64
+    ).transpose(0, 2, 1)
+
+    # Apply window: (n_seg, n_fft, n_ch) * (n_fft,)
+    shear_segs *= win[np.newaxis, :, np.newaxis]
+    accel_segs *= win[np.newaxis, :, np.newaxis]
+
+    # Linear detrend each segment (matches MATLAB 'linear' method)
+    x = np.linspace(0.0, 1.0, n_fft, dtype=np.float64)
+    xm = x - x.mean()
+    xm_ss = np.dot(xm, xm)  # sum of squares
+    for segs in (shear_segs, accel_segs):
+        # segs: (n_seg, n_fft, n_ch)
+        mean_y = segs.mean(axis=1, keepdims=True)
+        slope = np.einsum("stc,t->sc", segs, xm) / xm_ss
+        segs -= mean_y + slope[:, np.newaxis, :] * xm[np.newaxis, :, np.newaxis]
+
+    # One-sided FFT: (n_seg, n_freq, n_ch)
+    U = np.fft.rfft(shear_segs, axis=1)
+    A = np.fft.rfft(accel_segs, axis=1)
+
+    # ------------------------------------------------------------------
+    # Group FFT segments into dissipation windows and build ensemble-
+    # averaged cross-spectral matrices.
+    # ------------------------------------------------------------------
+    ffts_per_diss = (n_diss - fft_overlap) // step
+    n_seg_total = U.shape[0]
+    n_windows = n_seg_total // ffts_per_diss
+
+    # Trim to exact number of complete dissipation windows
+    n_seg_used = n_windows * ffts_per_diss
+    U = U[:n_seg_used].reshape(n_windows, ffts_per_diss, n_freq, n_probes)
+    A = A[:n_seg_used].reshape(n_windows, ffts_per_diss, n_freq, n_accel)
+
+    # Scale factor for one-sided spectrum (×2), then halve DC and Nyquist
+    scale = 2.0 / norm
+
+    # Cross-spectral matrices averaged over segments within each window
+    # Axes: w=window, s=segment, f=freq, i/j=channel
+    # UU: (n_windows, n_freq, n_probes, n_probes)
+    UU = scale * np.einsum("wsfi,wsfj->wfij", U, U.conj()) / ffts_per_diss
+    AA = scale * np.einsum("wsfi,wsfj->wfij", A, A.conj()) / ffts_per_diss
+    UA = scale * np.einsum("wsfi,wsfj->wfij", U, A.conj()) / ffts_per_diss
+
+    # Fix DC and Nyquist (should not be doubled)
+    for M in (UU, AA, UA):
+        M[:, 0, :, :] *= 0.5
+        M[:, -1, :, :] *= 0.5
+
+    # ------------------------------------------------------------------
+    # Goodman cleaning: clean_UU = UU - UA @ inv(AA) @ UA^H
+    # Solve via np.linalg.solve for numerical stability.
+    # AA @ X = UA^H  =>  X = inv(AA) @ UA^H
+    # Then  clean_UU = UU - UA @ X
+    # ------------------------------------------------------------------
+    # UA^H: (w, f, n_accel, n_probes) — conjugate transpose of last two axes
+    UA_H = np.conj(np.swapaxes(UA, -2, -1))
+
+    # Solve AA @ X = UA_H for X: (w, f, n_accel, n_probes)
+    # In low-signal or perfectly coherent synthetic cases, AA can be singular
+    # at some (window, frequency) bins. Fall back to pseudo-inverse so the
+    # cleaner remains numerically robust across platforms/LAPACK builds.
+    try:
+        X = np.linalg.solve(AA, UA_H)
+    except np.linalg.LinAlgError:
+        logger.debug("Goodman solve encountered singular AA; using pinv fallback")
+        AA_pinv = np.linalg.pinv(AA)
+        X = np.einsum("wfij,wfjk->wfik", AA_pinv, UA_H)
+
+    # Correction: UA @ X  -> (w, f, n_probes, n_probes)
+    correction = np.einsum("wfij,wfjk->wfik", UA, X)
+
+    clean_UU = UU - correction
+
+    # Take real part of the diagonal (auto-spectra)
+    # clean_UU[..., i, i] for each probe
+    clean_psd = np.real(
+        np.diagonal(clean_UU, axis1=-2, axis2=-1)
+    ).copy()  # (n_windows, n_freq, n_probes)
+
+    # ------------------------------------------------------------------
+    # Bias correction (RSI Technical Note 61)
+    # R = 1 / (1 - 1.02 * n_vibration_signals / n_fft_segments)
+    # ------------------------------------------------------------------
+    n_segments = ffts_per_diss
+    R = 1.0 / (1.0 - 1.02 * n_accel / n_segments)
+    clean_psd *= R
+
+    # Ensure non-negative (numerical noise can cause tiny negatives)
+    np.maximum(clean_psd, 0.0, out=clean_psd)
+
+    # Frequency vector
+    freq = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+
+    # Transpose to (n_windows, n_probes, n_freq) for consistency with
+    # how process_profile stores spectra per probe.
+    clean_psd = np.moveaxis(clean_psd, -1, 1)
+
+    if n_probes == 1:
+        clean_psd = clean_psd[:, 0, :]  # squeeze probe axis
+
+    return freq, clean_psd
