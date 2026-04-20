@@ -396,7 +396,15 @@ def clean_shear_spec(
     UA_H = np.conj(np.swapaxes(UA, -2, -1))
 
     # Solve AA @ X = UA_H for X: (w, f, n_accel, n_probes)
-    X = np.linalg.solve(AA, UA_H)
+    # In low-signal or perfectly coherent synthetic cases, AA can be singular
+    # at some (window, frequency) bins. Fall back to pseudo-inverse so the
+    # cleaner remains numerically robust across platforms/LAPACK builds.
+    try:
+        X = np.linalg.solve(AA, UA_H)
+    except np.linalg.LinAlgError:
+        logger.debug("Goodman solve encountered singular AA; using pinv fallback")
+        AA_pinv = np.linalg.pinv(AA)
+        X = np.einsum("wfij,wfjk->wfik", AA_pinv, UA_H)
 
     # Correction: UA @ X  -> (w, f, n_probes, n_probes)
     correction = np.einsum("wfij,wfjk->wfik", UA, X)
