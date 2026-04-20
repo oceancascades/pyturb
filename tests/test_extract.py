@@ -53,7 +53,6 @@ class TestExtractPfileSegment:
         """Extracted file should have all the same channels."""
         out = tmp_path / "segment.p"
         extract_pfile_segment(PFILE, out, start_record=0, n_records=5)
-        orig = read_pfile(PFILE)
         seg = read_pfile(out)
         for ch in ["sh1", "sh2", "Ax", "Ay", "T1", "T2", "P"]:
             assert ch in seg, f"Missing channel: {ch}"
