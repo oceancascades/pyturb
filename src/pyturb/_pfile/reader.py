@@ -29,29 +29,48 @@ _SLOW_COLS_I = 29
 _ROWS_I = 30
 
 
-def _detect_endianness(filename: Path) -> Tuple[str, str]:
-    """Detect file endianness from header flag."""
-    FLAG_BIG, FLAG_LITTLE = 2, 1
-    FLAG_POS = 63
+_FLAG_BIG = 2
+_FLAG_LITTLE = 1
+_FLAG_POS = 63
 
-    with open(filename, "rb") as f:
-        header_bytes = f.read(128)
 
-    flag_big = np.frombuffer(header_bytes, dtype=">u2")[FLAG_POS]
-    flag_little = np.frombuffer(header_bytes, dtype="<u2")[FLAG_POS]
+def _detect_endianness_from_header(header_bytes: bytes) -> Tuple[str, str]:
+    """Detect file endianness from raw 128-byte header.
+
+    Parameters
+    ----------
+    header_bytes : bytes
+        The first 128 bytes of a p-file (64 unsigned 16-bit words).
+
+    Returns
+    -------
+    endian : str
+        ``'<'`` for little-endian, ``'>'`` for big-endian.
+    error_msg : str
+        Non-empty warning message if the flag is ambiguous.
+    """
+    flag_big = np.frombuffer(header_bytes, dtype=">u2")[_FLAG_POS]
+    flag_little = np.frombuffer(header_bytes, dtype="<u2")[_FLAG_POS]
 
     if flag_big == flag_little == 0:
         return "<", "Endian flag not found, assuming little endian"
-    elif flag_big == FLAG_BIG:
+    elif flag_big == _FLAG_BIG:
         return ">", ""
-    elif flag_little == FLAG_LITTLE:
+    elif flag_little == _FLAG_LITTLE:
         return "<", ""
-    elif flag_little == FLAG_BIG:
+    elif flag_little == _FLAG_BIG:
         return "<", "Endian flag mismatch, assuming little endian"
-    elif flag_big == FLAG_LITTLE:
+    elif flag_big == _FLAG_LITTLE:
         return ">", "Endian flag mismatch, assuming big endian"
     else:
         raise ValueError(f"Invalid endian flag: {flag_big}")
+
+
+def _detect_endianness(filename: Path) -> Tuple[str, str]:
+    """Detect file endianness from header flag."""
+    with open(filename, "rb") as f:
+        header_bytes = f.read(128)
+    return _detect_endianness_from_header(header_bytes)
 
 
 def open_pfile(
@@ -320,3 +339,95 @@ def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, An
     data.update(ch_data)
 
     return data
+
+
+def extract_pfile_segment(
+    input_file: Union[str, Path],
+    output_file: Union[str, Path],
+    start_record: int = 0,
+    n_records: int = 60,
+) -> Path:
+    """Extract a contiguous segment of data records from a p-file.
+
+    Copies the first record (header + setup string) verbatim, then copies
+    *n_records* data records starting at *start_record*.  The output file is
+    a valid p-file that preserves all calibration coefficients and metadata.
+
+    Parameters
+    ----------
+    input_file : str or Path
+        Path to the source p-file.
+    output_file : str or Path
+        Path for the trimmed output p-file.
+    start_record : int
+        0-based index of the first data record to copy (after the config record).
+    n_records : int
+        Number of data records to copy (~1 record per second for recsize=1).
+
+    Returns
+    -------
+    Path
+        Path to the written output file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *input_file* does not exist.
+    ValueError
+        If the requested range exceeds the available data records.
+    """
+    input_file = Path(input_file).expanduser()
+    output_file = Path(output_file)
+
+    if not input_file.exists():
+        raise FileNotFoundError(f"File not found: {input_file}")
+
+    with open(input_file, "rb") as f:
+        hdr_bytes = f.read(_HEADER_SIZE_0 * _BYTES_PER_WORD)
+        endian, msg = _detect_endianness_from_header(hdr_bytes)
+        if msg:
+            logger.warning(msg)
+        hd = np.frombuffer(hdr_bytes, dtype=f"{endian}u2")
+
+        header_size = int(hd[_HEADER_SIZE_I])  # bytes
+        setupfile_size = int(hd[_SETUPFILE_SIZE_I])  # bytes
+        block_size = int(hd[_BLOCK_SIZE_I])  # bytes per data record
+
+        first_record_size = header_size + setupfile_size
+
+        f.seek(0, 2)
+        file_size = f.tell()
+        total_records = (file_size - first_record_size) // block_size
+
+        if start_record < 0 or start_record >= total_records:
+            raise ValueError(
+                f"start_record={start_record} out of range "
+                f"(file has {total_records} data records)"
+            )
+        available = total_records - start_record
+        if n_records > available:
+            raise ValueError(
+                f"Requested {n_records} records starting at {start_record}, "
+                f"but only {available} are available"
+            )
+
+        f.seek(0)
+        first_record = f.read(first_record_size)
+
+        f.seek(first_record_size + start_record * block_size)
+        data_records = f.read(n_records * block_size)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "wb") as f:
+        f.write(first_record)
+        f.write(data_records)
+
+    logger.info(
+        "Extracted %d records (%d–%d) from %s -> %s",
+        n_records,
+        start_record,
+        start_record + n_records - 1,
+        input_file.name,
+        output_file,
+    )
+    return output_file

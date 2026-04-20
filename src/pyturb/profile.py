@@ -10,7 +10,7 @@ import scipy.signal as sig
 import xarray as xr
 from profinder import find_profiles, find_segment  # type: ignore[import]
 
-from .shear import estimate_epsilon
+from .shear import clean_shear_spec, estimate_epsilon
 from .signal import despike, window_mean, window_psd
 from .viscosity import viscosity
 
@@ -47,7 +47,7 @@ class ProfileConfig:
 
     # === Preprocessing parameters ===
     pressure_smoothing_period: float = (
-        0.25  # Cutoff period for pressure low-pass filter (seconds)
+        0.5  # Cutoff period for pressure low-pass filter (seconds)
     )
     filter_order: int = 4
     gap_threshold: float = (
@@ -82,6 +82,8 @@ class ProfileConfig:
     verbose: bool = False
     scale_probes: bool = True
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
+    goodman_clean: bool = False  # Goodman coherent-noise removal using accelerometers
+    accel_channels: tuple[str, ...] = ("Ax", "Ay", "Az")
 
     # === Multi-profile detection settings ===
     profile_direction: Literal["down", "up", "both"] = "down"  # Which casts to process
@@ -361,9 +363,8 @@ def prepare_profile(
     fs_slow = float(ds.fs_slow)
 
     # Design low-pass filter for pressure (and existing speed if present)
-    # Cutoff is set based on diss_len to ensure W is smooth over dissipation windows.
-    # Any faster fluctuations are irrelevant since they get averaged out anyway.
-    cutoff = 1 / config.diss_len_sec
+    # using a configurable cutoff period.
+    cutoff = 1 / config.pressure_smoothing_period
     sos = sig.butter(config.filter_order, cutoff, btype="low", fs=fs_slow, output="sos")
 
     # Get time vector for gap detection
@@ -1003,6 +1004,42 @@ def process_profile(
         params["n_fft"],
         params["n_diss"],
     )
+
+    # Goodman coherent-noise removal: replace shear spectra with cleaned versions
+    if config.goodman_clean:
+        avail_accel = [ch for ch in config.accel_channels if ch in ds]
+        if avail_accel:
+            accel_data = np.column_stack([ds[ch].values for ch in avail_accel])
+            avail_shear = [p for p in config.shear_probes if f"{p}_clean" in ds]
+            if avail_shear:
+                shear_data = np.column_stack(
+                    [ds[f"{p}_clean"].values for p in avail_shear]
+                )
+                freq_clean, clean_psd = clean_shear_spec(
+                    shear_data,
+                    accel_data,
+                    params["n_fft"],
+                    float(ds.fs_fast),
+                    params["n_diss"],
+                )
+                # clean_psd shape: (n_windows, n_probes, n_freq) or (n_windows, n_freq)
+                if clean_psd.ndim == 2:
+                    # Single probe
+                    spectra[avail_shear[0]] = clean_psd
+                else:
+                    for i, p in enumerate(avail_shear):
+                        spectra[p] = clean_psd[:, i, :]
+                freq = freq_clean
+                logger.info(
+                    "Applied Goodman cleaning using %s",
+                    ", ".join(avail_accel),
+                )
+        else:
+            logger.warning(
+                "Goodman cleaning requested but no accelerometer channels "
+                "(%s) found in dataset",
+                ", ".join(config.accel_channels),
+            )
 
     ds = ds.assign_coords(frequency=("frequency", freq))
     for name, psd in spectra.items():

@@ -9,7 +9,7 @@ import typer
 from typing_extensions import Annotated
 
 from .merge import merge_netcdf
-from .pfile import batch_convert_to_netcdf
+from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
 
 app = typer.Typer()
@@ -130,6 +130,67 @@ def p2nc(
 
 
 @app.command()
+def cutp(
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output p-file path",
+        ),
+    ],
+    start: Annotated[
+        int,
+        typer.Option(
+            "--start",
+            "-s",
+            help="First data record to copy (0-based, after config record)",
+            show_default=True,
+        ),
+    ] = 0,
+    n_records: Annotated[
+        int,
+        typer.Option(
+            "--n-records",
+            "-n",
+            help="Number of data records to copy (~1 per second)",
+            show_default=True,
+        ),
+    ] = 60,
+    input_file: Annotated[
+        Path,
+        typer.Argument(help="Input p-file"),
+    ] = None,
+):
+    """Extract a segment from a p-file.
+
+    Copies the header/config record verbatim, then copies N contiguous data
+    records.  The output is a valid p-file that can be processed normally.
+
+    Each record is approximately 1 second of data (~60 records ≈ 1 minute).
+
+    Examples:
+        pyturb cutp deployment.p -o segment.p --start 300 --n-records 60
+        pyturb cutp deployment.p -o segment.p -s 300 -n 120
+    """
+    if input_file is None:
+        typer.echo("Error: No input file specified.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        result = extract_pfile_segment(
+            input_file=input_file,
+            output_file=output,
+            start_record=start,
+            n_records=n_records,
+        )
+        typer.echo(f"Wrote {n_records} records to {result}")
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def eps(
     output_dir: Annotated[
         Path | None,
@@ -168,7 +229,7 @@ def eps(
             help="Low-pass filter cutoff period for pressure (s)",
             show_default=True,
         ),
-    ] = 0.25,
+    ] = 0.5,
     temperature: Annotated[
         str,
         typer.Option(
@@ -298,6 +359,14 @@ def eps(
             show_default=True,
         ),
     ] = 6,
+    goodman_clean: Annotated[
+        bool,
+        typer.Option(
+            "--goodman/--no-goodman",
+            help="Apply Goodman coherent-noise removal using accelerometers",
+            show_default=True,
+        ),
+    ] = False,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -364,6 +433,7 @@ def eps(
         aux_salinity=aux_sal,
         aux_density=aux_dens,
         despike_max_passes=despike_passes,
+        goodman_clean=goodman_clean,
         n_workers=n_workers,
         overwrite=overwrite,
         verbose=True,
