@@ -272,7 +272,7 @@ class TestGoodmanRealDataIntegration:
             # "Most windows": at least 75% of windows in expected bands.
             frac_raw_band = np.mean((eps_raw >= 4e-9) & (eps_raw <= 3e-8))
             frac_clean_band = np.mean((eps_clean >= 1e-9) & (eps_clean <= 8e-9))
-            assert frac_raw_band >= 0.4
+            assert frac_raw_band >= 0.75
             assert frac_clean_band >= 0.75
 
             # Median should shift downward substantially after Goodman cleaning.

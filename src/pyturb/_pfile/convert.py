@@ -384,6 +384,8 @@ def convert_all_channels(
         "fs_slow",
         "t_fast",
         "t_slow",
+        "ch_matrix",
+        "n_rows",
         "filetime",
         "date",
         "time",
@@ -416,9 +418,19 @@ def convert_all_channels(
             if match:
                 base_name = match.group(1)
                 try:
+                    # Determine this channel's actual sampling rate using fs_fast * count(id in matrix) / n_rows
+                    ch_id = int(params.get("id", -1))
+                    ch_matrix = data.get("ch_matrix")
+                    n_rows_val = data.get("n_rows", 1)
+                    if ch_matrix is not None and ch_id >= 0:
+                        ch_fs = (
+                            data["fs_fast"] * np.sum(ch_matrix == ch_id) / n_rows_val
+                        )
+                    else:
+                        ch_fs = data["fs_fast"]
                     X_hires = deconvolve(
                         data[ch_name],
-                        data["fs_fast"],
+                        ch_fs,
                         float(params["diff_gain"]),
                         data.get(base_name),
                     )

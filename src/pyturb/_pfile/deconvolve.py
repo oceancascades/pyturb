@@ -30,20 +30,18 @@ def deconvolve(
     ndarray
         Deconvolved high-resolution signal
     """
-    # Interpolate X to match X_dX length if needed
+
     if X is not None and len(X) > 1:
         X = _interp_if_required(X, X_dX, fs)
 
-    # Calculate filter parameters
     f_c = 1 / (2 * np.pi * diff_gain)  # Cut-off frequency
     sos = signal.butter(1, f_c / (fs / 2), output="sos")
 
     # Calculate initial conditions for the filter
     if X is not None and len(X) > 1:
-        # Use both signals to determine initial conditions
-        # Check if X_dX is inverted relative to X
+        # Check if X_dX is inverted relative to X.
         with np.errstate(all="ignore"):
-            p = np.polyfit(X[: min(100, len(X))], X_dX[: min(100, len(X_dX))], 1)
+            p = np.polyfit(X, X_dX, 1)
         if p[0] < -0.5:
             X_dX = -X_dX
 

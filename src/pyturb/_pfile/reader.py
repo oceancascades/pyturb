@@ -225,7 +225,10 @@ def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, An
     for row in ch_matrix:
         logger.debug("".join(f"{x:4d}" for x in row))
 
-    # Build channel list from config
+    # Save matrix and n_rows for per-channel rate computation in convert.py
+    data["ch_matrix"] = ch_matrix
+    data["n_rows"] = n_rows
+
     ch_nums, ch_names = [], []
 
     if 255 in ch_matrix:
