@@ -289,3 +289,67 @@ class TestContinuousVMPDownProfiles:
         ds_abs = _make_ds(ds["t_slow"].values, p, speed_positive)
         segs = find_all_profiles(ds_abs, _base_config(profile_direction="down"))
         assert len(segs) == self.N_CYCLES
+
+
+# ---------------------------------------------------------------------------
+# 5. Two merged VMP files (gap-based + peak-based fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestMergedVMPFiles:
+    """Two VMP recordings (each with multiple dive/ascent cycles) joined into one
+    dataset with a large time gap between them.
+
+    This exercises the combined gap-based + peak-based fallback path: the time
+    gap separates the dataset into two segments, but each segment is itself a
+    multi-cycle VMP recording (dp ≈ 0 at segment level), so the gap-based
+    path must detect that the segment is non-monotonic and fall back to
+    peak-based detection within it.
+    """
+
+    N_FILES = 2
+    N_CYCLES_PER_FILE = 3
+    CYCLE_DURATION_S = 2000.0
+    MAX_DEPTH_DBAR = 760.0
+    GAP_S = 6000.0
+
+    @pytest.fixture
+    def ds(self):
+        n_per_file = int(self.N_CYCLES_PER_FILE * self.CYCLE_DURATION_S * FS)
+        t_off = 0.0
+        t_parts, p_parts = [], []
+        for _ in range(self.N_FILES):
+            t_file = np.arange(n_per_file) * DT + t_off
+            p_file = (self.MAX_DEPTH_DBAR / 2) * (
+                1 - np.cos(2 * np.pi * t_file / self.CYCLE_DURATION_S)
+            )
+            # Shift t_file so it starts at 0 within the file, then offset
+            t_file = np.arange(n_per_file) * DT + t_off
+            t_parts.append(t_file)
+            p_parts.append(p_file)
+            t_off = t_file[-1] + self.GAP_S
+        t = np.concatenate(t_parts)
+        pressure = np.concatenate(p_parts)
+        return _make_ds(t, pressure, _abs_speed(pressure))
+
+    def test_down_direction_finds_all_descents(self, ds):
+        """Profiles from both VMP files should be found even though they are
+        separated by a large time gap."""
+        segs = find_all_profiles(ds, _base_config(profile_direction="down"))
+        assert len(segs) == self.N_FILES * self.N_CYCLES_PER_FILE
+
+    def test_up_direction_finds_all_ascents(self, ds):
+        segs = find_all_profiles(ds, _base_config(profile_direction="up"))
+        assert len(segs) == self.N_FILES * self.N_CYCLES_PER_FILE
+
+    def test_both_direction_finds_all_profiles(self, ds):
+        segs = find_all_profiles(ds, _base_config(profile_direction="both"))
+        assert len(segs) == 2 * self.N_FILES * self.N_CYCLES_PER_FILE
+
+    def test_down_segments_have_increasing_pressure(self, ds):
+        segs = find_all_profiles(ds, _base_config(profile_direction="down"))
+        p = ds["P_smooth"].values
+        for s, e in segs:
+            assert p[e] > p[s], (
+                f"down segment [{s},{e}]: pressure must increase from start to end"
+            )

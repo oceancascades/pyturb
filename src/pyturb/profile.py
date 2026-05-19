@@ -580,10 +580,8 @@ def find_all_profiles(
     velocity = ds[speed_var].values  # absolute speed, always >= 0
     t_slow = ds.t_slow.values
     n = len(pressure)
+    fs_slow = float(ds.fs_slow)
 
-    # ------------------------------------------------------------------
-    # Detect time gaps (same logic as gap_aware_sosfiltfilt)
-    # ------------------------------------------------------------------
     dt = np.diff(t_slow)
     if np.issubdtype(dt.dtype, np.timedelta64):
         dt = dt.astype("timedelta64[ns]").astype(float) / 1e9
@@ -595,9 +593,6 @@ def find_all_profiles(
     gap_indices = (np.where(dt > threshold)[0] + 1).tolist()
 
     if gap_indices:
-        # ------------------------------------------------------------------
-        # Gap-based detection: each gap-separated segment is one profile.
-        # ------------------------------------------------------------------
         min_height = config.peaks_kwargs.get(
             "height", max(config.min_profile_pressure, 1.0)
         )
@@ -617,29 +612,73 @@ def find_all_profiles(
             if seg_p.max() < min_height:
                 continue
 
-            # Infer cast direction from overall pressure change
-            win = max(1, min(20, seg_n // 4))
-            p_head = float(np.median(seg_p[:win]))
-            p_tail = float(np.median(seg_p[-win:]))
-            dp = p_tail - p_head
+            # Determine if this segment is monotonic (single profile)/ For a
+            # single glider cast, most pressure steps will be in one direction.
+            # For a VMP segment cycling between surface and depth the fraction
+            # will be close to 0.5.
+            seg_dp_steps = np.diff(seg_p)
+            n_pos = int(np.sum(seg_dp_steps > 0))  # steps toward deeper
+            n_neg = int(np.sum(seg_dp_steps < 0))  # steps toward shallower
+            n_total = n_pos + n_neg
+            dominant_frac = max(n_pos, n_neg) / n_total if n_total > 0 else 1.0
+            monotonic = dominant_frac >= 0.8
+            mostly_down = n_pos >= n_neg
 
-            if config.profile_direction == "down" and dp <= 0:
-                continue  # pressure did not increase → not a down-cast
-            if config.profile_direction == "up" and dp >= 0:
-                continue  # pressure did not decrease → not an up-cast
+            is_single = (
+                (config.profile_direction == "down" and monotonic and mostly_down)
+                or (config.profile_direction == "up" and monotonic and not mostly_down)
+                or (config.profile_direction == "both" and monotonic)
+            )
 
-            # Trim edges where absolute speed is below threshold
-            seg_v = velocity[seg_start : seg_end + 1]
-            valid_mask = seg_v >= config.min_speed
-            if not valid_mask.any():
-                continue
-
-            valid_idx = np.where(valid_mask)[0]
-            start = seg_start + int(valid_idx[0])
-            end = seg_start + int(valid_idx[-1])
-
-            if end > start:
-                segments.append((start, end))
+            if is_single:
+                # Single monotonic profile: trim edges by speed threshold
+                seg_v = velocity[seg_start : seg_end + 1]
+                valid_mask = seg_v >= config.min_speed
+                if not valid_mask.any():
+                    continue
+                valid_idx = np.where(valid_mask)[0]
+                start = seg_start + int(valid_idx[0])
+                end = seg_start + int(valid_idx[-1])
+                if end > start:
+                    segments.append((start, end))
+            else:
+                # Non-monotonic (multi-cycle) segment, e.g. a VMP file within a
+                # merged dataset: fall back to peak-based detection within this
+                # sub-segment and map results back to global indices.
+                seg_dp_dt = np.gradient(seg_p, 1.0 / fs_slow)
+                seg_vel_signed = seg_dp_dt * config.dbar_to_m
+                try:
+                    sub_profiles = find_profiles(
+                        seg_p,
+                        min_pressure=config.min_profile_pressure,
+                        peaks_kwargs=config.peaks_kwargs,
+                        apply_speed_threshold=True,
+                        velocity=seg_vel_signed,
+                        min_speed=config.min_speed,
+                        direction=config.profile_direction,
+                    )
+                except Exception:
+                    continue
+                for down_start, down_end, up_start, up_end in sub_profiles:
+                    if config.profile_direction == "down":
+                        s = seg_start + max(0, down_start)
+                        e = seg_start + min(down_end, seg_n - 1)
+                        if e > s:
+                            segments.append((s, e))
+                    elif config.profile_direction == "up":
+                        s = seg_start + max(0, up_start)
+                        e = seg_start + min(up_end, seg_n - 1)
+                        if e > s:
+                            segments.append((s, e))
+                    else:  # "both"
+                        d_s = seg_start + max(0, down_start)
+                        d_e = seg_start + min(down_end, seg_n - 1)
+                        if d_e > d_s:
+                            segments.append((d_s, d_e))
+                        u_s = seg_start + max(0, up_start)
+                        u_e = seg_start + min(up_end, seg_n - 1)
+                        if u_e > u_s:
+                            segments.append((u_s, u_e))
 
         if config.verbose:
             logger.info(
@@ -652,7 +691,6 @@ def find_all_profiles(
     # profinder expects signed velocity: negative = ascending.
     # Derive it from the smoothed pressure so up-cast detection works.
     # ------------------------------------------------------------------
-    fs_slow = float(ds.fs_slow)
     dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
     vel_signed = dp_dt * config.dbar_to_m  # ~m/s, sign preserved
 
