@@ -92,8 +92,12 @@ class TestConvertAllChannels:
             assert phys_data["units"][ch] == "C"
 
     def test_hires_channels_created(self, phys_data):
-        for ch in ["T1_hires", "T2_hires", "P_hires"]:
+        for ch in ["T1_hires", "T2_hires"]:
             assert ch in phys_data
+        # P_hires is promoted to P; original raw pressure saved as P_raw
+        assert "P" in phys_data
+        assert "P_raw" in phys_data
+        assert "P_hires" not in phys_data
 
     def test_gradT_channels_created(self, phys_data):
         for ch in ["gradT1", "gradT2"]:

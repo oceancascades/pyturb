@@ -9,6 +9,7 @@ import xarray as xr
 _CF_VARIABLE_METADATA = {
     # Pressure
     "P": ("sea_water_pressure", "Pressure", "dbar"),
+    "P_raw": ("sea_water_pressure", "Raw pressure (without pre-emphasis)", "dbar"),
     # Shear probes
     "sh1": (None, "Velocity time derivative from probe 1", "m2 s-3"),
     "sh2": (None, "Velocity time derivative from probe 2", "m2 s-3"),
@@ -39,6 +40,7 @@ _CF_VARIABLE_METADATA = {
 # Default variables to save (in order of priority)
 _DEFAULT_VARIABLES = [
     "P",
+    "P_raw",
     "sh1",
     "sh2",
     "gradT1",

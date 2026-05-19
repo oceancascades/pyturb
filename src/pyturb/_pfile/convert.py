@@ -512,4 +512,13 @@ def convert_all_channels(
         except Exception as e:
             warnings.warn(f"Could not compute {grad_name} from {ch_name}: {e}")
 
+    # Promote P_hires (deconvolved, smooth) to P; save the original
+    # slow-channel raw pressure as P_raw.
+    if "P_hires" in result:
+        if "P" in result:
+            result["P_raw"] = result.pop("P")
+            result["units"]["P_raw"] = result["units"].pop("P", "dbar")
+        result["P"] = result.pop("P_hires")
+        result["units"]["P"] = result["units"].pop("P_hires", "dbar")
+
     return result
