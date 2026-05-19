@@ -2,14 +2,12 @@
 Sensor-specific data extraction utilities.
 """
 
-from typing import Tuple
-
 import numpy as np
 
 
 def adis_extract(
     data: np.ndarray, data_type: str = "xy"
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract data from ADIS16209 inclinometer packed words.
 
