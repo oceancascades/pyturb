@@ -546,9 +546,19 @@ def find_all_profiles(
     """
     Find all profile segments in a dataset.
 
-    Uses profinder.find_profiles() to detect multiple dive cycles in the
-    pressure time series, then returns index bounds for the requested
-    cast direction(s).
+    Two complementary strategies are used:
+
+    1. **Gap-based detection** (merged / pre-segmented datasets): When the
+       time series contains breaks larger than ``gap_threshold`` seconds (or
+       ``gap_factor × median_dt``), each contiguous segment is treated as one
+       profile.  Cast direction is inferred from the overall pressure change
+       and edges where speed falls below ``min_speed`` are trimmed.
+
+    2. **Peak-based detection** (continuous recordings, e.g. VMP): When no
+       gaps are found, ``profinder.find_profiles`` identifies dive/ascent
+       cycles from pressure peaks and troughs.  Signed velocity (negative =
+       ascending) is derived from the smoothed pressure so that up-cast
+       detection works correctly.
 
     Parameters
     ----------
@@ -567,7 +577,84 @@ def find_all_profiles(
     speed_var = config.speed_smooth
 
     pressure = ds[pressure_var].values
-    velocity = ds[speed_var].values
+    velocity = ds[speed_var].values  # absolute speed, always >= 0
+    t_slow = ds.t_slow.values
+    n = len(pressure)
+
+    # ------------------------------------------------------------------
+    # Detect time gaps (same logic as gap_aware_sosfiltfilt)
+    # ------------------------------------------------------------------
+    dt = np.diff(t_slow)
+    if np.issubdtype(dt.dtype, np.timedelta64):
+        dt = dt.astype("timedelta64[ns]").astype(float) / 1e9
+    else:
+        dt = dt.astype(float)
+
+    median_dt = np.median(dt)
+    threshold = max(config.gap_threshold, config.gap_factor * median_dt)
+    gap_indices = (np.where(dt > threshold)[0] + 1).tolist()
+
+    if gap_indices:
+        # ------------------------------------------------------------------
+        # Gap-based detection: each gap-separated segment is one profile.
+        # ------------------------------------------------------------------
+        min_height = config.peaks_kwargs.get(
+            "height", max(config.min_profile_pressure, 1.0)
+        )
+        boundaries = [0] + gap_indices + [n]
+        segments: list[tuple[int, int]] = []
+
+        for i in range(len(boundaries) - 1):
+            seg_start = boundaries[i]
+            seg_end = boundaries[i + 1] - 1  # inclusive
+
+            seg_p = pressure[seg_start : seg_end + 1]
+            seg_n = len(seg_p)
+            if seg_n < 2:
+                continue
+
+            # Skip segments that never reach the minimum depth
+            if seg_p.max() < min_height:
+                continue
+
+            # Infer cast direction from overall pressure change
+            win = max(1, min(20, seg_n // 4))
+            p_head = float(np.median(seg_p[:win]))
+            p_tail = float(np.median(seg_p[-win:]))
+            dp = p_tail - p_head
+
+            if config.profile_direction == "down" and dp <= 0:
+                continue  # pressure did not increase → not a down-cast
+            if config.profile_direction == "up" and dp >= 0:
+                continue  # pressure did not decrease → not an up-cast
+
+            # Trim edges where absolute speed is below threshold
+            seg_v = velocity[seg_start : seg_end + 1]
+            valid_mask = seg_v >= config.min_speed
+            if not valid_mask.any():
+                continue
+
+            valid_idx = np.where(valid_mask)[0]
+            start = seg_start + int(valid_idx[0])
+            end = seg_start + int(valid_idx[-1])
+
+            if end > start:
+                segments.append((start, end))
+
+        if config.verbose:
+            logger.info(
+                f"Found {len(segments)} profile segment(s) via gap-based detection"
+            )
+        return segments
+
+    # ------------------------------------------------------------------
+    # Peak-based detection for continuous recordings (e.g. VMP).
+    # profinder expects signed velocity: negative = ascending.
+    # Derive it from the smoothed pressure so up-cast detection works.
+    # ------------------------------------------------------------------
+    fs_slow = float(ds.fs_slow)
+    dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
+    vel_signed = dp_dt * config.dbar_to_m  # ~m/s, sign preserved
 
     try:
         profiles = find_profiles(
@@ -575,7 +662,7 @@ def find_all_profiles(
             min_pressure=config.min_profile_pressure,
             peaks_kwargs=config.peaks_kwargs,
             apply_speed_threshold=True,
-            velocity=velocity,
+            velocity=vel_signed,
             min_speed=config.min_speed,
             direction=config.profile_direction,
         )
@@ -594,25 +681,22 @@ def find_all_profiles(
     segments = []
     for down_start, down_end, up_start, up_end in profiles:
         if config.profile_direction == "down":
-            # Clamp indices to valid range
             start = max(0, down_start)
-            end = min(down_end, ds.t_slow.size - 1)
+            end = min(down_end, n - 1)
             if end > start:
                 segments.append((start, end))
         elif config.profile_direction == "up":
             start = max(0, up_start)
-            end = min(up_end, ds.t_slow.size - 1)
+            end = min(up_end, n - 1)
             if end > start:
                 segments.append((start, end))
         else:  # "both"
-            # Add down cast
             d_start = max(0, down_start)
-            d_end = min(down_end, ds.t_slow.size - 1)
+            d_end = min(down_end, n - 1)
             if d_end > d_start:
                 segments.append((d_start, d_end))
-            # Add up cast
             u_start = max(0, up_start)
-            u_end = min(up_end, ds.t_slow.size - 1)
+            u_end = min(up_end, n - 1)
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
