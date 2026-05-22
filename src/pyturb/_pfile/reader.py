@@ -110,7 +110,7 @@ def read_pfile(filename: Union[str, Path]) -> Dict[str, Any]:
     """
     Read an RSI P-file and return demultiplexed channel data.
 
-    This function logs diagnostic information at the module _log's DEBUG
+    This function logs diagnostic information at the module logger's DEBUG
     level instead of using an explicit `verbose` flag.
 
     Parameters

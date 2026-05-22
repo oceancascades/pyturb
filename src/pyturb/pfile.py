@@ -224,7 +224,7 @@ def batch_convert_to_netcdf(
     Batch convert multiple P-files to NetCDF using parallel processing.
 
     This function uses the Python `logging` module for progress and status
-    messages (e.g., `_log.info` and `_log.error`) instead of an explicit
+    messages (e.g., `logger.info` and `logger.error`) instead of an explicit
     `verbose` flag. Configure logging via the CLI `--log-level` option or
     programmatically with `logging.getLogger('pyturb').setLevel(...)`.
 
