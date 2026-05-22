@@ -180,7 +180,8 @@ def batch_compute_epsilon(
     aux_salinity: Optional[str] = None,
     aux_density: Optional[str] = None,
     despike_max_passes: int = 6,
-    goodman_clean: bool = False,
+    accel_clean: bool = False,
+    emc_clean: bool = True,
     n_workers: Optional[int] = None,
     verbose: bool = False,
     overwrite: bool = False,
@@ -319,7 +320,8 @@ def batch_compute_epsilon(
         aux_salinity=aux_salinity,
         aux_density=aux_density,
         despike_max_passes=despike_max_passes,
-        goodman_clean=goodman_clean,
+        accel_clean=accel_clean,
+        emc_clean=emc_clean,
         verbose=verbose,
     )
 
