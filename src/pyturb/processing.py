@@ -276,12 +276,10 @@ def batch_compute_epsilon(
             nc_files = sorted(Path.cwd().glob(str(pattern)))
 
     if not nc_files:
-        if verbose:
-            logger.info("No NetCDF files found.")
+        logger.info("No NetCDF files found.")
         return []
 
-    if verbose:
-        logger.info(f"Found {len(nc_files)} NetCDF files to process")
+    logger.info(f"Found {len(nc_files)} NetCDF files to process")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -372,13 +370,9 @@ def batch_compute_epsilon(
     results = []
     total_profiles = 0
 
-    # Limit workers to number of files (no benefit having more workers than files)
     effective_workers = min(n_workers, len(nc_files))
 
-    if verbose:
-        logger.info(
-            f"Using {effective_workers} parallel workers for {len(nc_files)} files"
-        )
+    logger.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
 
     with mp.Pool(processes=effective_workers) as pool:
         results_iter = pool.imap_unordered(_unpack_epsilon_args, args)

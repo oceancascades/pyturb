@@ -546,19 +546,17 @@ def find_all_profiles(
     """
     Find all profile segments in a dataset.
 
-    Two complementary strategies are used:
+    A combination of strategies are used:
 
-    1. **Gap-based detection** (merged / pre-segmented datasets): When the
+    1. Gap-based (merged / pre-segmented datasets): When the
        time series contains breaks larger than ``gap_threshold`` seconds (or
-       ``gap_factor × median_dt``), each contiguous segment is treated as one
-       profile.  Cast direction is inferred from the overall pressure change
-       and edges where speed falls below ``min_speed`` are trimmed.
+       ``gap_factor x median_dt``), and the pressure differences at each step
+       are mostly in one direction then the data are treated as a single profile.
 
-    2. **Peak-based detection** (continuous recordings, e.g. VMP): When no
+    2. Peak-based (multi-profile): When no
        gaps are found, ``profinder.find_profiles`` identifies dive/ascent
        cycles from pressure peaks and troughs.  Signed velocity (negative =
-       ascending) is derived from the smoothed pressure so that up-cast
-       detection works correctly.
+       ascending) is derived from the smoothed pressure.
 
     Parameters
     ----------
@@ -612,7 +610,7 @@ def find_all_profiles(
             if seg_p.max() < min_height:
                 continue
 
-            # Determine if this segment is monotonic (single profile)/ For a
+            # Determine if this segment is monotonic. For a
             # single glider cast, most pressure steps will be in one direction.
             # For a VMP segment cycling between surface and depth the fraction
             # will be close to 0.5.
@@ -642,9 +640,6 @@ def find_all_profiles(
                 if end > start:
                     segments.append((start, end))
             else:
-                # Non-monotonic (multi-cycle) segment, e.g. a VMP file within a
-                # merged dataset: fall back to peak-based detection within this
-                # sub-segment and map results back to global indices.
                 seg_dp_dt = np.gradient(seg_p, 1.0 / fs_slow)
                 seg_vel_signed = seg_dp_dt * config.dbar_to_m
                 try:
@@ -686,11 +681,6 @@ def find_all_profiles(
             )
         return segments
 
-    # ------------------------------------------------------------------
-    # Peak-based detection for continuous recordings (e.g. VMP).
-    # profinder expects signed velocity: negative = ascending.
-    # Derive it from the smoothed pressure so up-cast detection works.
-    # ------------------------------------------------------------------
     dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
     vel_signed = dp_dt * config.dbar_to_m  # ~m/s, sign preserved
 

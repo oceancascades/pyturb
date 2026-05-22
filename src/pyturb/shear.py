@@ -172,6 +172,8 @@ def estimate_epsilon(
     f_AA: float = 98.0,
     e_isr_threshold: float = 1.5e-5,
     fit_order: int = 3,
+    is_wavenumber: bool = False,
+    apply_single_pole_correction: bool = True,
 ) -> tuple[float, float]:
     """
     Estimate epsilon from one shear spectrum.
@@ -184,14 +186,25 @@ def estimate_epsilon(
     f_AA : anti-alias cutoff (Hz)
     e_isr_threshold : threshold to switch to inertial-subrange fitting
     fit_order : polynomial order (3–8) for spectral-min search
+    is_wavenumber : if True, input f is already in wavenumber domain (cpm) and
+        spectra are in wavenumber too (corrected by a velocity).
+    apply_single_pole_correction : if True, apply single pole correction to spectrum
+
 
     Returns
     epsilon, K_max_used
     """
 
-    # Converto to wavenumber domain
-    k = f / W  # cpm
-    phi = P_f * W * single_pole_correction(k)
+    # Convert to wavenumber domain
+    if is_wavenumber:
+        k = f
+        phi = P_f
+    else:
+        k = f / W  # cpm
+        phi = P_f * W
+
+    if apply_single_pole_correction:
+        phi = single_pole_correction(k) * phi
 
     # Make a first guess of epsilon from low-wavenumber variance by integrating
     # data to 10 cpm and applying a non-linear correction.
