@@ -359,14 +359,22 @@ def eps(
             show_default=True,
         ),
     ] = 6,
-    goodman_clean: Annotated[
+    accel_clean: Annotated[
         bool,
         typer.Option(
-            "--goodman/--no-goodman",
+            "--accel-clean/--no-accel-clean",
             help="Apply Goodman coherent-noise removal using accelerometers",
             show_default=True,
         ),
     ] = False,
+    emc_clean: Annotated[
+        bool,
+        typer.Option(
+            "--emc-clean/--no-emc-clean",
+            help="Apply Goodman coherent-noise removal using EM current meter driving current",
+            show_default=True,
+        ),
+    ] = True,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -433,7 +441,8 @@ def eps(
         aux_salinity=aux_sal,
         aux_density=aux_dens,
         despike_max_passes=despike_passes,
-        goodman_clean=goodman_clean,
+        accel_clean=accel_clean,
+        emc_clean=emc_clean,
         n_workers=n_workers,
         overwrite=overwrite,
         verbose=True,

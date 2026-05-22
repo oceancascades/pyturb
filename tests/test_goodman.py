@@ -247,10 +247,10 @@ class TestGoodmanRealDataIntegration:
             despike_max_passes=6,
         )
         ds_raw = process_profile(
-            ds.copy(deep=True), ProfileConfig(goodman_clean=False, **cfg_base)
+            ds.copy(deep=True), ProfileConfig(accel_clean=False, **cfg_base)
         )
         ds_clean = process_profile(
-            ds.copy(deep=True), ProfileConfig(goodman_clean=True, **cfg_base)
+            ds.copy(deep=True), ProfileConfig(accel_clean=True, **cfg_base)
         )
 
         eps1_raw = np.asarray(ds_raw["eps_1"].values, dtype=float)

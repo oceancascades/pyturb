@@ -18,6 +18,9 @@ _CF_VARIABLE_METADATA = {
     "gradT2": (None, "Temperature time derivative from thermistor 2", "K s-1"),
     # EM current meter
     "U_EM": (None, "EM current meter velocity", "m s-1"),
+    # EM current meter driving current (fast channel, used as Goodman noise reference)
+    "EMC_Cur": (None, "EM current meter driving current", "counts"),
+    "EM_Cur": (None, "EM current meter driving current", "counts"),
     # JAC CT sensor
     "JAC_T": ("sea_water_temperature", "JAC CT temperature", "degree_C"),
     "JAC_C": ("sea_water_electrical_conductivity", "JAC CT conductivity", "mS cm-1"),
@@ -46,6 +49,8 @@ _DEFAULT_VARIABLES = [
     "gradT1",
     "gradT2",
     "U_EM",
+    "EMC_Cur",
+    "EM_Cur",
     "JAC_T",
     "JAC_C",
     "T1",

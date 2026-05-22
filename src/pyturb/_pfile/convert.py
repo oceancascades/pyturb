@@ -533,4 +533,16 @@ def convert_all_channels(
         result["P"] = result.pop("P_hires")
         result["units"]["P"] = result["units"].pop("P_hires", "dbar")
 
+    # Always include EM current meter driving-current channels as raw counts.
+    # These channels are typically type 'raw' (excluded above) but are needed
+    # as coherent noise references for Goodman cleaning of shear spectra,
+    # mirroring the MATLAB ODAS quick_look.m behaviour.
+    _EMC_NAMES = {"EMC_Cur", "EM_Cur"}
+    for section in channel_sections:
+        params = section["params"]
+        ch_name = params.get("name")
+        if ch_name in _EMC_NAMES and ch_name in data and ch_name not in result:
+            result[ch_name] = data[ch_name].astype(float)
+            result["units"][ch_name] = "counts"
+
     return result

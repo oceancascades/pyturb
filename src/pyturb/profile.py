@@ -82,8 +82,15 @@ class ProfileConfig:
     verbose: bool = False
     scale_probes: bool = True
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
-    goodman_clean: bool = False  # Goodman coherent-noise removal using accelerometers
+    accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
+    emc_clean: bool = (
+        True  # Goodman coherent-noise removal using EM current meter channels
+    )
     accel_channels: tuple[str, ...] = ("Ax", "Ay", "Az")
+    emc_channels: tuple[str, ...] = (
+        "EMC_Cur",
+        "EM_Cur",
+    )  # EM current channels used as noise references
 
     # === Multi-profile detection settings ===
     profile_direction: Literal["down", "up", "both"] = "down"  # Which casts to process
@@ -1118,10 +1125,18 @@ def process_profile(
     )
 
     # Goodman coherent-noise removal: replace shear spectra with cleaned versions
-    if config.goodman_clean:
-        avail_accel = [ch for ch in config.accel_channels if ch in ds]
-        if avail_accel:
-            accel_data = np.column_stack([ds[ch].values for ch in avail_accel])
+    if config.accel_clean or config.emc_clean:
+        avail_accel = (
+            [ch for ch in config.accel_channels if ch in ds]
+            if config.accel_clean
+            else []
+        )
+        avail_emc = (
+            [ch for ch in config.emc_channels if ch in ds] if config.emc_clean else []
+        )
+        all_noise_refs = avail_accel + avail_emc
+        if all_noise_refs:
+            accel_data = np.column_stack([ds[ch].values for ch in all_noise_refs])
             avail_shear = [p for p in config.shear_probes if f"{p}_clean" in ds]
             if avail_shear:
                 shear_data = np.column_stack(
@@ -1144,13 +1159,16 @@ def process_profile(
                 freq = freq_clean
                 logger.info(
                     "Applied Goodman cleaning using %s",
-                    ", ".join(avail_accel),
+                    ", ".join(all_noise_refs),
                 )
         else:
             logger.warning(
-                "Goodman cleaning requested but no accelerometer channels "
+                "Goodman cleaning requested but no noise reference channels "
                 "(%s) found in dataset",
-                ", ".join(config.accel_channels),
+                ", ".join(
+                    (list(config.accel_channels) if config.accel_clean else [])
+                    + (list(config.emc_channels) if config.emc_clean else [])
+                ),
             )
 
     ds = ds.assign_coords(frequency=("frequency", freq))
