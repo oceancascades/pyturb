@@ -8,7 +8,7 @@ import gsw  # type: ignore[import]
 import numpy as np
 import scipy.signal as sig
 import xarray as xr
-from profinder import find_profiles, find_segment  # type: ignore[import]
+from profinder import find_profiles  # type: ignore[import]
 
 from .shear import clean_shear_spec, estimate_epsilon
 from .signal import despike, window_mean, window_psd
@@ -58,7 +58,9 @@ class ProfileConfig:
     # 0 = auto (0.5/fft_len_sec), >0 = explicit value, <0 = disabled
 
     # === Thresholds ===
-    min_speed: float = 0.2  # Minimum speed for valid profile segment
+    min_speed: float = (
+        0.2  # Speed below which a window's epsilon is QC-flagged questionable
+    )
 
     # === Default values for missing data ===
     default_temperature: float = 10.0
@@ -436,34 +438,6 @@ def highpass_filter(
     return ds
 
 
-def find_valid_segment(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Extract valid profile segment based on pressure bounds.
-
-    Uses profinder.find_segment to identify the main profile segment,
-    then slices both slow and fast time coordinates accordingly.
-
-    Expects smoothed variables from prepare_profile.
-    """
-
-    pressure_var = config.pressure_smooth
-    speed_var = config.speed_smooth
-
-    # Find profile segment with speed threshold
-    idx = find_segment(
-        ds[pressure_var],
-        apply_speed_threshold=True,
-        min_speed=config.min_speed,
-        velocity=ds[speed_var],
-    )
-
-    # Clamp end index to valid range
-    idx_start = idx[0]
-    idx_end = min(idx[1], ds.t_slow.size - 1)
-
-    t0, t1 = ds.t_slow[idx_start], ds.t_slow[idx_end]
-    return ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
-
-
 def find_all_profiles(
     ds: xr.Dataset,
     config: ProfileConfig,
@@ -497,13 +471,10 @@ def find_all_profiles(
         on the t_slow dimension. Returns empty list if no profiles found.
     """
     pressure_var = config.pressure_smooth
-    speed_var = config.speed_smooth
 
     pressure = ds[pressure_var].values
-    velocity = ds[speed_var].values  # absolute speed, always >= 0
     t_slow = ds.t_slow.values
     n = len(pressure)
-    fs_slow = float(ds.fs_slow)
 
     dt = np.diff(t_slow)
     if np.issubdtype(dt.dtype, np.timedelta64):
@@ -554,27 +525,17 @@ def find_all_profiles(
             )
 
             if is_single:
-                # Single monotonic profile: trim edges by speed threshold
-                seg_v = velocity[seg_start : seg_end + 1]
-                valid_mask = seg_v >= config.min_speed
-                if not valid_mask.any():
-                    continue
-                valid_idx = np.where(valid_mask)[0]
-                start = seg_start + int(valid_idx[0])
-                end = seg_start + int(valid_idx[-1])
-                if end > start:
-                    segments.append((start, end))
+                # Single monotonic profile: keep the entire segment; speed is
+                # only used to QC-flag individual dissipation windows later.
+                if seg_end > seg_start:
+                    segments.append((seg_start, seg_end))
             else:
-                seg_dp_dt = np.gradient(seg_p, 1.0 / fs_slow)
-                seg_vel_signed = seg_dp_dt * config.dbar_to_m
                 try:
                     sub_profiles = find_profiles(
                         seg_p,
                         min_pressure=config.min_profile_pressure,
                         peaks_kwargs=config.peaks_kwargs,
-                        apply_speed_threshold=True,
-                        velocity=seg_vel_signed,
-                        min_speed=config.min_speed,
+                        apply_speed_threshold=False,
                         direction=config.profile_direction,
                     )
                 except Exception:
@@ -603,17 +564,12 @@ def find_all_profiles(
         _log.info(f"Found {len(segments)} profile segment(s) via gap-based detection")
         return segments
 
-    dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
-    vel_signed = dp_dt * config.dbar_to_m  # ~m/s, sign preserved
-
     try:
         profiles = find_profiles(
             pressure,
             min_pressure=config.min_profile_pressure,
             peaks_kwargs=config.peaks_kwargs,
-            apply_speed_threshold=True,
-            velocity=vel_signed,
-            min_speed=config.min_speed,
+            apply_speed_threshold=False,
             direction=config.profile_direction,
         )
     except Exception as e:
@@ -878,8 +834,6 @@ def _preprocess_for_spectra(
     if hp_cutoff is not None and hp_cutoff > 0:
         ds = highpass_filter(ds, config.shear_probes, float(ds.fs_fast), hp_cutoff)
 
-    ds = find_valid_segment(ds, config)
-
     params = compute_window_parameters(ds, config)
     ds = trim_to_complete_windows(ds, params, config.chop_start)
     for key, val in params.items():
@@ -1092,15 +1046,41 @@ def _compute_shear_spectra_with_cleaning(
     return ds, freq, spectra
 
 
+_QC_FLAG_VALUES = np.array([0, 1, 2, 4, 9], dtype="i1")
+_QC_FLAG_MEANINGS = "unknown good questionable bad missing"
+
+
 def _attach_epsilon(
-    ds: xr.Dataset, freq: np.ndarray, spectra: dict[str, np.ndarray]
+    ds: xr.Dataset,
+    freq: np.ndarray,
+    spectra: dict[str, np.ndarray],
+    config: ProfileConfig,
 ) -> xr.Dataset:
-    """Attach per-probe epsilon, k_max, and the wavenumber coordinate ``k``."""
+    """Attach per-probe epsilon, k_max, wavenumber ``k``, and QC flags.
+
+    QC convention (IODE): 0=unknown, 1=good, 2=questionable, 4=bad, 9=missing.
+    Flags start at 0 and are raised to 2 where the window-mean speed ``W``
+    falls below ``config.min_speed`` — epsilon is still computed in those
+    windows, but at speeds below the probe's normal operating range.
+    """
     epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
+    qc_base = np.zeros(ds["W"].size, dtype="i1")
+    qc_base[ds["W"].values < config.min_speed] = 2
+
     for name, (eps, k_max) in epsilon_results.items():
         probe_num = name[-1]
         ds[f"eps_{probe_num}"] = ("time", eps.astype("f4"))
         ds[f"k_max_{probe_num}"] = ("time", k_max.astype("f4"))
+        qc_var = f"eps_{probe_num}_qc"
+        ds[qc_var] = ("time", qc_base.copy())
+        ds[qc_var].attrs = {
+            "long_name": f"QC flag for eps_{probe_num}",
+            "flag_values": _QC_FLAG_VALUES,
+            "flag_meanings": _QC_FLAG_MEANINGS,
+            "valid_min": np.int8(0),
+            "valid_max": np.int8(9),
+        }
+
     ds["k"] = ds.frequency / ds.W
     return ds
 
@@ -1133,4 +1113,4 @@ def process_profile(
     ds, params = _preprocess_for_spectra(ds, config)
     ds = _attach_window_scalars(ds, params, config)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
-    return _attach_epsilon(ds, freq, spectra)
+    return _attach_epsilon(ds, freq, spectra, config)

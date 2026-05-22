@@ -219,7 +219,10 @@ def eps(
     min_speed: Annotated[
         float,
         typer.Option(
-            "--min-speed", "-s", help="Minimum speed threshold (m/s)", show_default=True
+            "--min-speed",
+            "-s",
+            help="Speed below which a window's epsilon is QC-flagged questionable (m/s)",
+            show_default=True,
         ),
     ] = 0.2,
     pressure_smoothing_period: Annotated[

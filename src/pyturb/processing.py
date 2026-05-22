@@ -228,7 +228,8 @@ def batch_compute_epsilon(
     fft_len_sec : float, optional
         FFT window length in seconds. Default 1.0.
     min_speed : float, optional
-        Minimum speed threshold for valid data. Default 0.2 m/s.
+        Speed below which a window's epsilon is QC-flagged as
+        questionable (eps_N_qc = 2). Default 0.2 m/s.
     pressure_smoothing_period : float, optional
         Low-pass filter cutoff period for pressure smoothing. Default 0.25 s.
     temperature : str, optional
@@ -401,8 +402,16 @@ def _bin_single_profile(
             bin_name = "_depth_for_binning_bins"
             coord_name = "depth"
 
-        # Group by bins and compute mean
-        ds_binned = ds_subset.groupby_bins(bin_var, bins=depth_bins).mean()
+        # Group by bins. QC vars (suffix "_qc") take the worst (max) flag in
+        # the bin; everything else is mean-averaged.
+        qc_vars = [v for v in vars_to_bin_with_time if v.endswith("_qc")]
+        mean_vars = [v for v in vars_to_bin_with_time if v not in qc_vars]
+
+        grouped_mean = ds_subset[mean_vars].groupby_bins(bin_var, bins=depth_bins)
+        ds_binned = grouped_mean.mean()
+        if qc_vars:
+            grouped_max = ds_subset[qc_vars].groupby_bins(bin_var, bins=depth_bins)
+            ds_binned = xr.merge([ds_binned, grouped_max.max()])
 
         # Convert bin intervals to midpoints
         ds_binned[bin_name] = np.array(
@@ -501,11 +510,14 @@ def bin_profiles(
     >>> # Bin by pressure instead of depth
     >>> ds = bin_profiles('/path/to/eps_output/*.nc', bin_by_pressure=True)
     """
-    # Default variables to bin
+    # Default variables to bin. Names ending in "_qc" are aggregated with
+    # max (worst flag wins per bin); others with mean.
     if variables is None:
         variables = [
             "eps_1",
             "eps_2",
+            "eps_1_qc",
+            "eps_2_qc",
             "W",
             "temperature",
             "conductivity",
