@@ -19,7 +19,7 @@ import xarray as xr
 if TYPE_CHECKING:
     from .profile import ProfileConfig
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "AUX_VARS",
@@ -52,7 +52,7 @@ def load_auxiliary(
     if not auxiliary_file.exists():
         raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
 
-    logger.info(f"Loading auxiliary dataset from {auxiliary_file}")
+    _log.info(f"Loading auxiliary dataset from {auxiliary_file}")
 
     aux_ds = xr.open_dataset(auxiliary_file, decode_times=True)
 
@@ -77,7 +77,7 @@ def load_auxiliary(
             aux_ds[var] = aux_ds[var].interpolate_na(
                 dim="time", method="linear", fill_value="extrapolate"
             )
-            logger.info(f"Interpolated NaN values in auxiliary variable '{var}'")
+            _log.info(f"Interpolated NaN values in auxiliary variable '{var}'")
 
     return aux_ds
 
@@ -126,9 +126,9 @@ def merge_auxiliary_data(
                 kwargs={"fill_value": "extrapolate"},
             )
             ds[output_var] = ("t_slow", interp_data.values)
-            logger.debug(f"Interpolated {aux_var} -> {output_var}")
+            _log.debug(f"Interpolated {aux_var} -> {output_var}")
         else:
-            logger.debug(f"Auxiliary variable '{aux_var}' not found, skipping")
+            _log.debug(f"Auxiliary variable '{aux_var}' not found, skipping")
 
     return ds
 

@@ -13,7 +13,7 @@ import numpy as np
 
 from .config import SetupConfig
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 # Header field indices (0-based)
 _BYTES_PER_WORD = 2
@@ -110,7 +110,7 @@ def read_pfile(filename: Union[str, Path]) -> Dict[str, Any]:
     """
     Read an RSI P-file and return demultiplexed channel data.
 
-    This function logs diagnostic information at the module logger's DEBUG
+    This function logs diagnostic information at the module _log's DEBUG
     level instead of using an explicit `verbose` flag.
 
     Parameters
@@ -221,9 +221,9 @@ def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, An
                 ]
                 ch_matrix[i, : len(values)] = values
 
-    logger.debug("Address Matrix:")
+    _log.debug("Address Matrix:")
     for row in ch_matrix:
-        logger.debug("".join(f"{x:4d}" for x in row))
+        _log.debug("".join(f"{x:4d}" for x in row))
 
     # Save matrix and n_rows for per-channel rate computation in convert.py
     data["ch_matrix"] = ch_matrix
@@ -253,17 +253,17 @@ def _read_pfile_impl(fid: BinaryIO, endian: str, filename: Path) -> Dict[str, An
 
         if len(ids) == 1:
             if ids[0] in ch_matrix:
-                logger.debug(f"     channel: {ids[0]:2d} = {ch_name}")
+                _log.debug(f"     channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(ch_name)
         elif len(ids) == 2:
             # Even/odd pair for 32-bit channels
             if ids[0] in ch_matrix:
-                logger.debug(f"even channel: {ids[0]:2d} = {ch_name}")
+                _log.debug(f"even channel: {ids[0]:2d} = {ch_name}")
                 ch_nums.append(ids[0])
                 ch_names.append(f"{ch_name}_E")
             if ids[1] in ch_matrix:
-                logger.debug(f" odd channel: {ids[1]:2d} = {ch_name}")
+                _log.debug(f" odd channel: {ids[1]:2d} = {ch_name}")
                 ch_nums.append(ids[1])
                 ch_names.append(f"{ch_name}_O")
 
@@ -389,7 +389,7 @@ def extract_pfile_segment(
         hdr_bytes = f.read(_HEADER_SIZE_0 * _BYTES_PER_WORD)
         endian, msg = _detect_endianness_from_header(hdr_bytes)
         if msg:
-            logger.warning(msg)
+            _log.warning(msg)
         hd = np.frombuffer(hdr_bytes, dtype=f"{endian}u2")
 
         header_size = int(hd[_HEADER_SIZE_I])  # bytes
@@ -425,7 +425,7 @@ def extract_pfile_segment(
         f.write(first_record)
         f.write(data_records)
 
-    logger.info(
+    _log.info(
         "Extracted %d records (%d–%d) from %s -> %s",
         n_records,
         start_record,

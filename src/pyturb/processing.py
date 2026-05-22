@@ -19,7 +19,7 @@ from .profile import (
     split_into_profiles,
 )
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "batch_compute_epsilon",
@@ -144,7 +144,7 @@ def _run_epsilon_pool(
         aux_ds=aux_ds,
     )
     effective_workers = min(n_workers, len(nc_files))
-    logger.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
+    _log.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
 
     results: list[dict] = []
     with mp.Pool(processes=effective_workers) as pool:
@@ -165,11 +165,11 @@ def _run_epsilon_pool(
                     if success
                     else f"profile {profile_idx} failed ({error})"
                 )
-                logger.info(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
+                _log.info(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
 
     n_success = sum(1 for r in results if r["success"])
     n_failed = len(results) - n_success
-    logger.info(
+    _log.info(
         f"Completed: {n_success} profiles succeeded, {n_failed} failed "
         f"from {len(nc_files)} files"
     )
@@ -276,9 +276,9 @@ def batch_compute_epsilon(
     """
     nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
-        logger.info("No NetCDF files found.")
+        _log.info("No NetCDF files found.")
         return []
-    logger.info(f"Found {len(nc_files)} NetCDF files to process")
+    _log.info(f"Found {len(nc_files)} NetCDF files to process")
 
     output_dir = _ensure_output_dir(output_dir)
 
@@ -433,7 +433,7 @@ def _bin_single_profile(
         return ds_binned
 
     except Exception as e:
-        logger.error(f"Error binning {file}: {e}")
+        _log.error(f"Error binning {file}: {e}")
         return None
 
 
@@ -518,12 +518,12 @@ def bin_profiles(
 
     nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
-        logger.info("No NetCDF files found.")
+        _log.info("No NetCDF files found.")
         return None
 
-    logger.info(f"Found {len(nc_files)} NetCDF files to bin")
+    _log.info(f"Found {len(nc_files)} NetCDF files to bin")
     coord_type = "pressure" if bin_by_pressure else "depth"
-    logger.info(
+    _log.info(
         f"Binning by {coord_type} from {depth_min} to {depth_max} m "
         f"with {bin_width} m bins"
     )
@@ -542,27 +542,27 @@ def bin_profiles(
 
     # Use serial processing for small batches
     if len(nc_files) <= min(n_workers, 4):
-        logger.info("Using serial processing for small batch")
+        _log.info("Using serial processing for small batch")
         for i, arg_tuple in enumerate(args):
             result = _unpack_bin_args(arg_tuple)
             if result is not None:
                 binned_datasets.append(result)
             status = "binned" if result is not None else "skipped"
-            logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+            _log.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
     else:
-        logger.info(f"Using {n_workers} parallel workers")
+        _log.info(f"Using {n_workers} parallel workers")
         with mp.Pool(processes=n_workers) as pool:
             for i, result in enumerate(pool.imap(_unpack_bin_args, args)):
                 if result is not None:
                     binned_datasets.append(result)
                 status = "binned" if result is not None else "skipped"
-                logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+                _log.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
 
     if not binned_datasets:
-        logger.info("No datasets were successfully binned.")
+        _log.info("No datasets were successfully binned.")
         return None
 
-    logger.info(f"Concatenating {len(binned_datasets)} binned profiles...")
+    _log.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
     # Concatenate along profile dimension
     combined = xr.concat(binned_datasets, dim="profile")
@@ -574,13 +574,13 @@ def bin_profiles(
         # Sort by time
         sort_order = np.argsort(profile_times.values)
         combined = combined.isel(profile=sort_order)
-        logger.info("Sorted profiles by time")
+        _log.info("Sorted profiles by time")
 
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_netcdf(output_file)
 
-    logger.info(f"Saved binned data to {output_file}")
+    _log.info(f"Saved binned data to {output_file}")
 
     return combined

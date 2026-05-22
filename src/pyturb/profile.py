@@ -14,7 +14,7 @@ from .shear import clean_shear_spec, estimate_epsilon
 from .signal import despike, window_mean, window_psd
 from .viscosity import viscosity
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -220,13 +220,13 @@ def gap_aware_sosfiltfilt(
     n_gaps = len(gap_indices)
 
     if n_gaps > 0:
-        logger.debug(
+        _log.debug(
             f"Detected {n_gaps} time gap(s) in data "
             f"(threshold={threshold:.2f}s, median_dt={median_dt:.4f}s)"
         )
         for i, idx in enumerate(gap_indices):
             gap_size = dt[idx - 1]  # -1 because gap_indices is offset by 1
-            logger.debug(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
+            _log.debug(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
 
     if n_gaps == 0:
         # No gaps, filter entire array
@@ -329,7 +329,7 @@ def prepare_profile(
             ),
         )
     else:
-        logger.info(
+        _log.info(
             f"Speed variable '{config.speed}' not found, "
             "estimating from pressure derivative"
         )
@@ -337,7 +337,7 @@ def prepare_profile(
         pitch = None
         if config.use_pitch_correction and config.pitch in ds:
             pitch = ds[config.pitch].values
-            logger.info(f"Using pitch correction with AoA={config.angle_of_attack}°")
+            _log.info(f"Using pitch correction with AoA={config.angle_of_attack}°")
         speed_est = estimate_speed_from_pressure(
             ds[config.pressure_smooth].values,
             fs_slow,
@@ -600,7 +600,7 @@ def find_all_profiles(
                         if u_e > u_s:
                             segments.append((u_s, u_e))
 
-        logger.info(f"Found {len(segments)} profile segment(s) via gap-based detection")
+        _log.info(f"Found {len(segments)} profile segment(s) via gap-based detection")
         return segments
 
     dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
@@ -617,11 +617,11 @@ def find_all_profiles(
             direction=config.profile_direction,
         )
     except Exception as e:
-        logger.warning(f"Profile detection failed: {e}")
+        _log.warning(f"Profile detection failed: {e}")
         return []
 
     if not profiles:
-        logger.info("No profiles detected in dataset")
+        _log.info("No profiles detected in dataset")
         return []
 
     # Extract segments based on direction
@@ -648,7 +648,7 @@ def find_all_profiles(
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
-    logger.info(f"Found {len(segments)} profile segment(s)")
+    _log.info(f"Found {len(segments)} profile segment(s)")
 
     return segments
 
@@ -869,7 +869,7 @@ def _preprocess_for_spectra(
     Returns the trimmed dataset and the window-parameter dict.
     """
     if config.speed_smooth not in ds:
-        logger.debug("Smoothed speed not found, running prepare_profile")
+        _log.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
 
     ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
@@ -924,7 +924,7 @@ def _derive_thermo(
             S_mean = gsw.SP_from_C(C_mScm, T_insitu, P_dbar)
             salinity_from_jac = True
         else:
-            logger.warning(
+            _log.warning(
                 f"JAC_C values too low (median={np.nanmedian(C_mScm):.3f} mS/cm), "
                 "skipping salinity calculation from CT sensor"
             )
@@ -1073,14 +1073,14 @@ def _compute_shear_spectra_with_cleaning(
                     for i, p in enumerate(avail_shear):
                         spectra[p] = clean_psd[:, i, :]
                 freq = freq_clean
-                logger.info(
+                _log.info(
                     "Applied Goodman cleaning using %s", ", ".join(all_noise_refs)
                 )
         else:
             requested = (list(config.accel_channels) if config.accel_clean else []) + (
                 list(config.emc_channels) if config.emc_clean else []
             )
-            logger.warning(
+            _log.warning(
                 "Goodman cleaning requested but no noise reference channels (%s) "
                 "found in dataset",
                 ", ".join(requested),
