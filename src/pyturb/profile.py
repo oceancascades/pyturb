@@ -14,7 +14,7 @@ from .shear import clean_shear_spec, estimate_epsilon
 from .signal import despike, window_mean, window_psd
 from .viscosity import viscosity
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,7 +79,6 @@ class ProfileConfig:
 
     # === Processing options ===
     chop_start: bool = True
-    verbose: bool = False
     scale_probes: bool = True
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
     accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
@@ -118,78 +117,6 @@ class ProfileConfig:
     def pressure_smooth(self) -> str:
         """Name of smoothed pressure variable."""
         return f"{self.pressure}_smooth"
-
-
-def merge_auxiliary_data(
-    ds: xr.Dataset,
-    aux_ds: xr.Dataset,
-    config: Optional["ProfileConfig"] = None,
-) -> xr.Dataset:
-    """
-    Merge auxiliary data (lat, lon, T, S, density) into profile dataset.
-
-    Interpolates auxiliary time series data onto the profile's slow time coordinate.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Profile dataset with t_slow coordinate (should have decoded times)
-    aux_ds : xr.Dataset
-        Auxiliary dataset with time series of latitude, longitude, temperature,
-        salinity, and/or density
-    config : ProfileConfig, optional
-        Configuration specifying variable names. If None, uses defaults.
-
-    Returns
-    -------
-    xr.Dataset
-        Profile dataset with interpolated auxiliary variables added:
-        - aux_latitude, aux_longitude: position
-        - aux_temperature, aux_salinity, aux_density: for viscosity calculation
-    """
-    if config is None:
-        config = ProfileConfig()
-
-    ds = ds.copy()
-
-    # Get profile time coordinate
-    profile_time = ds.t_slow
-
-    # Get auxiliary time coordinate
-    aux_time_var = config.aux_time
-    if aux_time_var not in aux_ds.dims and aux_time_var not in aux_ds.coords:
-        raise ValueError(
-            f"Auxiliary time variable '{aux_time_var}' not found in auxiliary dataset"
-        )
-
-    # Variables to interpolate: (aux_name, output_name)
-    var_mappings = [
-        (config.aux_latitude, "aux_latitude"),
-        (config.aux_longitude, "aux_longitude"),
-    ]
-    # Add optional variables only if explicitly configured
-    if config.aux_temperature is not None:
-        var_mappings.append((config.aux_temperature, "aux_temperature"))
-    if config.aux_salinity is not None:
-        var_mappings.append((config.aux_salinity, "aux_salinity"))
-    if config.aux_density is not None:
-        var_mappings.append((config.aux_density, "aux_density"))
-
-    for aux_var, output_var in var_mappings:
-        if aux_var in aux_ds:
-            # Interpolate onto profile time
-            interp_data = aux_ds[aux_var].interp(
-                {aux_time_var: profile_time},
-                method="linear",
-                kwargs={"fill_value": "extrapolate"},
-            )
-            ds[output_var] = ("t_slow", interp_data.values)
-            if config.verbose:
-                logger.info(f"Interpolated {aux_var} -> {output_var}")
-        elif config.verbose:
-            logger.info(f"Auxiliary variable '{aux_var}' not found, skipping")
-
-    return ds
 
 
 def estimate_speed_from_pressure(
@@ -242,7 +169,6 @@ def gap_aware_sosfiltfilt(
     gap_threshold: float = 5.0,
     gap_factor: float = 10.0,
     min_segment_length: int = 10,
-    verbose: bool = False,
 ) -> np.ndarray:
     """
     Apply sosfiltfilt independently to contiguous time segments.
@@ -265,8 +191,6 @@ def gap_aware_sosfiltfilt(
     min_segment_length : int, optional
         Minimum segment length to apply filter. Shorter segments are
         returned unfiltered. Default 10.
-    verbose : bool, optional
-        Print diagnostic information about detected gaps. Default False.
 
     Returns
     -------
@@ -295,14 +219,14 @@ def gap_aware_sosfiltfilt(
 
     n_gaps = len(gap_indices)
 
-    if verbose and n_gaps > 0:
-        logger.info(
+    if n_gaps > 0:
+        _log.debug(
             f"Detected {n_gaps} time gap(s) in data "
             f"(threshold={threshold:.2f}s, median_dt={median_dt:.4f}s)"
         )
         for i, idx in enumerate(gap_indices):
             gap_size = dt[idx - 1]  # -1 because gap_indices is offset by 1
-            logger.info(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
+            _log.debug(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
 
     if n_gaps == 0:
         # No gaps, filter entire array
@@ -387,7 +311,6 @@ def prepare_profile(
                 t_slow,
                 gap_threshold=config.gap_threshold,
                 gap_factor=config.gap_factor,
-                verbose=config.verbose,
             ),
         )
     else:
@@ -403,23 +326,18 @@ def prepare_profile(
                 t_slow,
                 gap_threshold=config.gap_threshold,
                 gap_factor=config.gap_factor,
-                verbose=config.verbose,
             ),
         )
     else:
-        if config.verbose:
-            logger.info(
-                f"Speed variable '{config.speed}' not found, "
-                "estimating from pressure derivative"
-            )
+        _log.info(
+            f"Speed variable '{config.speed}' not found, "
+            "estimating from pressure derivative"
+        )
 
         pitch = None
         if config.use_pitch_correction and config.pitch in ds:
             pitch = ds[config.pitch].values
-            if config.verbose:
-                logger.info(
-                    f"Using pitch correction with AoA={config.angle_of_attack}°"
-                )
+            _log.info(f"Using pitch correction with AoA={config.angle_of_attack}°")
         speed_est = estimate_speed_from_pressure(
             ds[config.pressure_smooth].values,
             fs_slow,
@@ -682,10 +600,7 @@ def find_all_profiles(
                         if u_e > u_s:
                             segments.append((u_s, u_e))
 
-        if config.verbose:
-            logger.info(
-                f"Found {len(segments)} profile segment(s) via gap-based detection"
-            )
+        _log.info(f"Found {len(segments)} profile segment(s) via gap-based detection")
         return segments
 
     dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
@@ -702,13 +617,11 @@ def find_all_profiles(
             direction=config.profile_direction,
         )
     except Exception as e:
-        if config.verbose:
-            logger.warning(f"Profile detection failed: {e}")
+        _log.warning(f"Profile detection failed: {e}")
         return []
 
     if not profiles:
-        if config.verbose:
-            logger.info("No profiles detected in dataset")
+        _log.info("No profiles detected in dataset")
         return []
 
     # Extract segments based on direction
@@ -735,8 +648,7 @@ def find_all_profiles(
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
-    if config.verbose:
-        logger.info(f"Found {len(segments)} profile segment(s)")
+    _log.info(f"Found {len(segments)} profile segment(s)")
 
     return segments
 
@@ -931,65 +843,135 @@ def compute_epsilon(
     return results
 
 
-def process_profile(
-    ds: xr.Dataset,
-    config: Optional[ProfileConfig] = None,
-) -> xr.Dataset:
-    """Process a microstructure profile to compute dissipation rates.
+def _resolve_hp_cutoff(config: ProfileConfig) -> Optional[float]:
+    """Resolve the shear high-pass cutoff (positive value, 0 = auto, <0 = off)."""
+    if config.hp_cutoff_hz > 0:
+        return config.hp_cutoff_hz
+    if config.hp_cutoff_hz == 0:
+        return 0.5 / config.fft_len_sec
+    return None
 
-    If the dataset hasn't been prepared (no smoothed speed variable),
-    prepare_profile will be called automatically.
 
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Dataset from p2nc conversion or after prepare_profile
-    config : ProfileConfig, optional
-        Configuration for processing. If None, uses defaults.
+def _window_mean_slow(x: np.ndarray, params: dict) -> np.ndarray:
+    """Window-mean a slow-channel array using params from compute_window_parameters."""
+    return window_mean(
+        x,
+        params["n_fft"] // params["sampling_ratio"],
+        params["n_diss"] // params["sampling_ratio"],
+    )
 
-    Returns
-    -------
-    xr.Dataset
-        Dataset with epsilon estimates and spectra
+
+def _preprocess_for_spectra(
+    ds: xr.Dataset, config: ProfileConfig
+) -> tuple[xr.Dataset, dict]:
+    """Despike, high-pass, segment, and window-align the profile.
+
+    Returns the trimmed dataset and the window-parameter dict.
     """
-    if config is None:
-        config = ProfileConfig()
-
-    # Auto-prepare if smoothed speed doesn't exist
     if config.speed_smooth not in ds:
-        if config.verbose:
-            logger.info("Smoothed speed not found, running prepare_profile")
+        _log.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
-
-    pressure_var = config.pressure_smooth
-    speed_var = config.speed_smooth
 
     ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
 
-    # High-pass filter shear probes to remove low-frequency contamination
-    if config.hp_cutoff_hz > 0:
-        hp_cutoff = config.hp_cutoff_hz
-    elif config.hp_cutoff_hz == 0:
-        # Auto-compute from FFT length: 0.5 / fft_len_sec
-        hp_cutoff = 0.5 / config.fft_len_sec
-    else:
-        hp_cutoff = None  # Negative value disables HP filter
-
+    hp_cutoff = _resolve_hp_cutoff(config)
     if hp_cutoff is not None and hp_cutoff > 0:
-        ds = highpass_filter(
-            ds,
-            config.shear_probes,
-            float(ds.fs_fast),
-            hp_cutoff,
-        )
+        ds = highpass_filter(ds, config.shear_probes, float(ds.fs_fast), hp_cutoff)
 
     ds = find_valid_segment(ds, config)
 
     params = compute_window_parameters(ds, config)
     ds = trim_to_complete_windows(ds, params, config.chop_start)
-
     for key, val in params.items():
         ds.attrs[key] = val
+    return ds, params
+
+
+def _derive_thermo(
+    ds: xr.Dataset,
+    means: dict,
+    params: dict,
+    config: ProfileConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+    """Resolve window-mean T, S, density, and the temperature used for viscosity.
+
+    Priority cascade:
+      - temperature:  aux_temperature  > CT sensor (config.temperature) > default
+      - salinity:     aux_salinity     > derived from JAC_C if valid     > default
+      - density:      aux_density      > derived from JAC-derived S + T  > default
+      - T for nu:     aux_temperature if present, else CT/default ``T_mean``
+
+    Returns (T_mean, S_mean, rho_mean, T_visc, salinity_from_jac).
+    """
+    n_windows = len(means["t_slow"])
+    pressure_var = config.pressure_smooth
+
+    if config.temperature in means:
+        T_mean = means[config.temperature]
+    else:
+        T_mean = np.full(n_windows, config.default_temperature)
+
+    salinity_from_jac = False
+    if "aux_salinity" in ds:
+        S_mean = _window_mean_slow(ds["aux_salinity"].values, params)
+    elif "JAC_C" in means and config.temperature in means:
+        # JAC_C is in mS/cm (matching MATLAB ODAS output). Only trust values
+        # in the seawater range.
+        C_mScm = means["JAC_C"]
+        if np.nanmedian(C_mScm) > 10.0:
+            T_insitu = means[config.temperature]
+            P_dbar = means.get(pressure_var, np.full(n_windows, 0.0))
+            S_mean = gsw.SP_from_C(C_mScm, T_insitu, P_dbar)
+            salinity_from_jac = True
+        else:
+            _log.warning(
+                f"JAC_C values too low (median={np.nanmedian(C_mScm):.3f} mS/cm), "
+                "skipping salinity calculation from CT sensor"
+            )
+            S_mean = np.full(n_windows, config.default_salinity)
+    else:
+        S_mean = np.full(n_windows, config.default_salinity)
+
+    if "aux_density" in ds:
+        rho_mean = _window_mean_slow(ds["aux_density"].values, params)
+    elif salinity_from_jac:
+        lon = (
+            float(np.nanmean(ds["aux_longitude"].values))
+            if "aux_longitude" in ds
+            else 0.0
+        )
+        lat = (
+            float(np.nanmean(ds["aux_latitude"].values))
+            if "aux_latitude" in ds
+            else 45.0
+        )
+        P_dbar = means.get(pressure_var, np.full(n_windows, 0.0))
+        T_insitu = means[config.temperature]
+        SA = gsw.SA_from_SP(S_mean, P_dbar, lon, lat)
+        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
+        rho_mean = gsw.rho(SA, CT, P_dbar)
+    else:
+        rho_mean = np.full(n_windows, config.default_density)
+
+    if "aux_temperature" in ds:
+        T_visc = _window_mean_slow(ds["aux_temperature"].values, params)
+    else:
+        T_visc = T_mean
+
+    return T_mean, S_mean, rho_mean, T_visc, salinity_from_jac
+
+
+def _attach_window_scalars(
+    ds: xr.Dataset, params: dict, config: ProfileConfig
+) -> xr.Dataset:
+    """Compute window-mean scalars and attach them on the output ``time`` axis.
+
+    Adds: ``time`` coord, ``pressure``, ``W``, ``temperature``, ``nu``;
+    plus ``salinity``, ``density``, ``lat``, ``lon``, ``conductivity`` when
+    the relevant inputs are available.
+    """
+    pressure_var = config.pressure_smooth
+    speed_var = config.speed_smooth
 
     means = compute_window_means(
         ds,
@@ -999,8 +981,6 @@ def process_profile(
 
     n_windows = len(means["t_slow"])
     ds = ds.assign_coords(time=("time", means["t_slow"]))
-
-    # Copy time units from t_slow if available
     if "units" in ds.t_slow.attrs:
         ds.time.attrs["units"] = ds.t_slow.attrs["units"]
     if "long_name" in ds.t_slow.attrs:
@@ -1012,110 +992,48 @@ def process_profile(
     )
     ds["W"] = ("time", means.get(speed_var, np.full(n_windows, np.nan)).astype("f4"))
 
-    if config.temperature in means:
-        T_mean = means[config.temperature]
-    else:
-        T_mean = np.full(n_windows, config.default_temperature)
-
-    # Get salinity - prefer auxiliary data, then calculate from JAC CT if available
-    salinity_from_jac = False
-    if "aux_salinity" in ds:
-        S_mean = window_mean(
-            ds["aux_salinity"].values,
-            params["n_fft"] // params["sampling_ratio"],
-            params["n_diss"] // params["sampling_ratio"],
-        )
-        ds["salinity"] = ("time", S_mean.astype("f4"))
-    elif "JAC_C" in means and config.temperature in means:
-        # Calculate salinity from JAC CT sensor data
-        # JAC_C is in mS/cm (matching MATLAB ODAS output)
-        # Only use if conductivity is in valid range for seawater (> 10 mS/cm)
-        C_mScm = means["JAC_C"]
-        if np.nanmedian(C_mScm) > 10.0:  # Valid seawater conductivity
-            T_insitu = means[config.temperature]
-            P_dbar = means.get(pressure_var, np.full(n_windows, 0.0))
-            S_mean = gsw.SP_from_C(C_mScm, T_insitu, P_dbar)
-            ds["salinity"] = ("time", S_mean.astype("f4"))
-            salinity_from_jac = True
-        else:
-            logger.warning(
-                f"JAC_C values too low (median={np.nanmedian(C_mScm):.3f} mS/cm), "
-                "skipping salinity calculation from CT sensor"
-            )
-            S_mean = np.full(n_windows, config.default_salinity)
-    else:
-        S_mean = np.full(n_windows, config.default_salinity)
-        # Don't add to dataset if just using default
-
-    # Get density - prefer auxiliary data, then calculate from JAC CT derived salinity
-    if "aux_density" in ds:
-        rho_mean = window_mean(
-            ds["aux_density"].values,
-            params["n_fft"] // params["sampling_ratio"],
-            params["n_diss"] // params["sampling_ratio"],
-        )
-        ds["density"] = ("time", rho_mean.astype("f4"))
-    elif salinity_from_jac:
-        # Calculate density from salinity and temperature using gsw
-        # First convert practical salinity to absolute salinity (need lon/lat)
-        # Use default lon/lat if not available
-        lon = 0.0  # Default longitude
-        lat = 45.0  # Default latitude
-        if "aux_longitude" in ds:
-            lon = np.nanmean(ds["aux_longitude"].values)
-        if "aux_latitude" in ds:
-            lat = np.nanmean(ds["aux_latitude"].values)
-        SA = gsw.SA_from_SP(S_mean, P_dbar, lon, lat)
-        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
-        rho_mean = gsw.rho(SA, CT, P_dbar)
-        ds["density"] = ("time", rho_mean.astype("f4"))
-    else:
-        rho_mean = np.full(n_windows, config.default_density)
-        # Don't add to dataset if just using default
-
-    # Use auxiliary temperature if available, otherwise use MicroRider temp or default
-    if "aux_temperature" in ds:
-        T_visc = window_mean(
-            ds["aux_temperature"].values,
-            params["n_fft"] // params["sampling_ratio"],
-            params["n_diss"] // params["sampling_ratio"],
-        )
-        ds["temperature"] = ("time", T_visc.astype("f4"))
-    else:
-        T_visc = T_mean
-        ds["temperature"] = ("time", T_mean.astype("f4"))
-
-    # Compute viscosity using best available T, S, rho
-    ds["nu"] = (
-        "time",
-        compute_viscosity(T_visc, S_mean, rho_mean).astype("f4"),
+    T_mean, S_mean, rho_mean, T_visc, salinity_from_jac = _derive_thermo(
+        ds, means, params, config
     )
 
-    # Add latitude/longitude if available
+    # Only attach S and rho if they come from a real source (not the default).
+    if "aux_salinity" in ds or salinity_from_jac:
+        ds["salinity"] = ("time", S_mean.astype("f4"))
+    if "aux_density" in ds or salinity_from_jac:
+        ds["density"] = ("time", rho_mean.astype("f4"))
+
+    if "aux_temperature" in ds:
+        ds["temperature"] = ("time", T_visc.astype("f4"))
+    else:
+        ds["temperature"] = ("time", T_mean.astype("f4"))
+
+    ds["nu"] = ("time", compute_viscosity(T_visc, S_mean, rho_mean).astype("f4"))
+
     if "aux_latitude" in ds:
-        lat_mean = window_mean(
-            ds["aux_latitude"].values,
-            params["n_fft"] // params["sampling_ratio"],
-            params["n_diss"] // params["sampling_ratio"],
+        ds["lat"] = (
+            "time",
+            _window_mean_slow(ds["aux_latitude"].values, params).astype("f4"),
         )
-        ds["lat"] = ("time", lat_mean.astype("f4"))
-
     if "aux_longitude" in ds:
-        lon_mean = window_mean(
-            ds["aux_longitude"].values,
-            params["n_fft"] // params["sampling_ratio"],
-            params["n_diss"] // params["sampling_ratio"],
+        ds["lon"] = (
+            "time",
+            _window_mean_slow(ds["aux_longitude"].values, params).astype("f4"),
         )
-        ds["lon"] = ("time", lon_mean.astype("f4"))
-
-    # Add CT sensor data if available (as temperature and conductivity)
-    if config.temperature in means:
-        # Only add if not already set from auxiliary data
-        if "temperature" not in ds:
-            ds["temperature"] = ("time", means[config.temperature].astype("f4"))
     if "JAC_C" in means:
         ds["conductivity"] = ("time", means["JAC_C"].astype("f4"))
 
+    return ds
+
+
+def _compute_shear_spectra_with_cleaning(
+    ds: xr.Dataset, params: dict, config: ProfileConfig
+) -> tuple[xr.Dataset, np.ndarray, dict[str, np.ndarray]]:
+    """Compute power spectra and optionally apply Goodman coherent-noise removal.
+
+    Returns the dataset with ``frequency`` coord and ``S_*`` data vars
+    attached, plus the frequency vector and spectra dict (for downstream
+    epsilon estimation).
+    """
     freq, spectra = compute_spectra(
         ds,
         config.all_probes,
@@ -1124,7 +1042,6 @@ def process_profile(
         params["n_diss"],
     )
 
-    # Goodman coherent-noise removal: replace shear spectra with cleaned versions
     if config.accel_clean or config.emc_clean:
         avail_accel = (
             [ch for ch in config.accel_channels if ch in ds]
@@ -1136,9 +1053,9 @@ def process_profile(
         )
         all_noise_refs = avail_accel + avail_emc
         if all_noise_refs:
-            accel_data = np.column_stack([ds[ch].values for ch in all_noise_refs])
             avail_shear = [p for p in config.shear_probes if f"{p}_clean" in ds]
             if avail_shear:
+                accel_data = np.column_stack([ds[ch].values for ch in all_noise_refs])
                 shear_data = np.column_stack(
                     [ds[f"{p}_clean"].values for p in avail_shear]
                 )
@@ -1151,37 +1068,69 @@ def process_profile(
                 )
                 # clean_psd shape: (n_windows, n_probes, n_freq) or (n_windows, n_freq)
                 if clean_psd.ndim == 2:
-                    # Single probe
                     spectra[avail_shear[0]] = clean_psd
                 else:
                     for i, p in enumerate(avail_shear):
                         spectra[p] = clean_psd[:, i, :]
                 freq = freq_clean
-                logger.info(
-                    "Applied Goodman cleaning using %s",
-                    ", ".join(all_noise_refs),
+                _log.info(
+                    "Applied Goodman cleaning using %s", ", ".join(all_noise_refs)
                 )
         else:
-            logger.warning(
-                "Goodman cleaning requested but no noise reference channels "
-                "(%s) found in dataset",
-                ", ".join(
-                    (list(config.accel_channels) if config.accel_clean else [])
-                    + (list(config.emc_channels) if config.emc_clean else [])
-                ),
+            requested = (list(config.accel_channels) if config.accel_clean else []) + (
+                list(config.emc_channels) if config.emc_clean else []
+            )
+            _log.warning(
+                "Goodman cleaning requested but no noise reference channels (%s) "
+                "found in dataset",
+                ", ".join(requested),
             )
 
     ds = ds.assign_coords(frequency=("frequency", freq))
     for name, psd in spectra.items():
         ds[f"S_{name}"] = (("time", "frequency"), psd.astype("f4"))
+    return ds, freq, spectra
 
+
+def _attach_epsilon(
+    ds: xr.Dataset, freq: np.ndarray, spectra: dict[str, np.ndarray]
+) -> xr.Dataset:
+    """Attach per-probe epsilon, k_max, and the wavenumber coordinate ``k``."""
     epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
-
     for name, (eps, k_max) in epsilon_results.items():
         probe_num = name[-1]
         ds[f"eps_{probe_num}"] = ("time", eps.astype("f4"))
         ds[f"k_max_{probe_num}"] = ("time", k_max.astype("f4"))
-
     ds["k"] = ds.frequency / ds.W
-
     return ds
+
+
+def process_profile(
+    ds: xr.Dataset,
+    config: Optional[ProfileConfig] = None,
+) -> xr.Dataset:
+    """Process a microstructure profile to compute dissipation rates.
+
+    If the dataset hasn't been prepared (no smoothed speed variable),
+    :func:`prepare_profile` will be called automatically.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset from p2nc conversion or after :func:`prepare_profile`.
+    config : ProfileConfig, optional
+        Configuration for processing. If None, uses defaults.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with epsilon estimates, shear spectra, and supporting scalars
+        on the ``time`` dimension.
+    """
+    if config is None:
+        config = ProfileConfig()
+
+    ds, params = _preprocess_for_spectra(ds, config)
+    ds = _attach_window_scalars(ds, params, config)
+    ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
+    return _attach_epsilon(ds, freq, spectra)

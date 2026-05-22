@@ -6,7 +6,7 @@ import numpy as np
 import scipy.signal as sig
 from numpy.lib.stride_tricks import sliding_window_view
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 
 def nasmyth_spectrum(k: np.ndarray, eps: float, nu: float = 1e-6) -> np.ndarray:
@@ -415,7 +415,7 @@ def clean_shear_spec(
     try:
         X = np.linalg.solve(AA, UA_H)
     except np.linalg.LinAlgError:
-        logger.debug("Goodman solve encountered singular AA; using pinv fallback")
+        _log.debug("Goodman solve encountered singular AA; using pinv fallback")
         AA_pinv = np.linalg.pinv(AA)
         X = np.einsum("wfij,wfjk->wfik", AA_pinv, UA_H)
 

@@ -26,7 +26,7 @@ from ._pfile import (
     to_xarray,
 )
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 # Re-export for public API
 __all__ = [
@@ -294,15 +294,15 @@ def batch_convert_to_netcdf(
         pfiles = [pf for pf in pfiles if pf.stat().st_size >= min_file_size]
         skipped_small = original_count - len(pfiles)
         if skipped_small:
-            logger.info(
+            _log.info(
                 f"Skipping {skipped_small} files smaller than {min_file_size / 1000:.0f} kB"
             )
 
     if not pfiles:
-        logger.info("No files to process after size filtering")
+        _log.info("No files to process after size filtering")
         return
 
-    logger.info(f"Found {len(pfiles)} P-files to convert")
+    _log.info(f"Found {len(pfiles)} P-files to convert")
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -322,12 +322,12 @@ def batch_convert_to_netcdf(
                 files_to_process.append(pf)
 
         if skipped:
-            logger.info(f"Skipping {len(skipped)} files (output already exists)")
+            _log.info(f"Skipping {len(skipped)} files (output already exists)")
 
         pfiles = files_to_process
 
         if not pfiles:
-            logger.info("No files to process (all outputs already exist)")
+            _log.info("No files to process (all outputs already exist)")
             return
 
     if n_workers is None:
@@ -361,11 +361,11 @@ def batch_convert_to_netcdf(
             }
         )
         status = "successfully converted" if success else "failed to convert"
-        logger.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
+        _log.info(f"[{i + 1}/{len(pfiles)}] {status} {input_path.name}")
         if error:
-            logger.error(f"    Error: {error}")
+            _log.error(f"    Error: {error}")
 
     # Summary
     n_success = sum(1 for r in results if r["success"])
     n_failed = len(results) - n_success
-    logger.info(f"Completed: {n_success} succeeded, {n_failed} failed")
+    _log.info(f"Completed: {n_success} succeeded, {n_failed} failed")

@@ -14,7 +14,7 @@ from typing import Any, Union
 
 import netCDF4 as nc
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 __all__ = ["merge_netcdf"]
 
@@ -103,8 +103,6 @@ def merge_netcdf(
         List of input NetCDF file paths to merge. Will be sorted by filename.
     output_file : str or Path
         Path for the output merged file.
-    verbose : bool, optional
-        Print progress information. Default False.
     overwrite : bool, optional
         Overwrite output file if it exists. Default False.
 
@@ -137,9 +135,9 @@ def merge_netcdf(
             f"Output file '{output_file}' already exists. Use overwrite=True to replace."
         )
 
-    logger.info(f"Merging {len(file_list)} files")
-    logger.info(f"Output: {output_file}")
-    logger.debug("-" * 50)
+    _log.info(f"Merging {len(file_list)} files")
+    _log.info(f"Output: {output_file}")
+    _log.debug("-" * 50)
 
     # Get structure from first file
     dims, var_info, global_attrs, _ = _get_file_info(file_list[0])
@@ -167,14 +165,14 @@ def merge_netcdf(
     total_t_fast = sum(f["t_fast_size"] for f in file_info)
     total_t_slow = sum(f["t_slow_size"] for f in file_info)
 
-    logger.info(f"Total t_fast: {total_t_fast}")
-    logger.info(f"Total t_slow: {total_t_slow}")
+    _log.info(f"Total t_fast: {total_t_fast}")
+    _log.info(f"Total t_slow: {total_t_slow}")
     for info in file_info:
-        logger.debug(
+        _log.debug(
             f"  {info['path'].name}: "
             f"t_fast={info['t_fast_size']}, t_slow={info['t_slow_size']}"
         )
-    logger.debug("-" * 50)
+    _log.debug("-" * 50)
 
     # Create output directory if needed
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -237,7 +235,7 @@ def merge_netcdf(
             t_slow_size = info["t_slow_size"]
 
             progress = (idx + 1) / len(file_list) * 100
-            logger.info(f"[{progress:5.1f}%] Processing {f.name}...")
+            _log.info(f"[{progress:5.1f}%] Processing {f.name}...")
 
             with nc.Dataset(f, "r") as src:
                 for name in src.variables:
@@ -288,7 +286,7 @@ def merge_netcdf(
             offset_t_slow += t_slow_size
 
     output_size = os.path.getsize(output_file) / (1024 * 1024)
-    logger.debug("-" * 50)
-    logger.info(f"Done! Output file size: {output_size:.2f} MB")
+    _log.debug("-" * 50)
+    _log.info(f"Done! Output file size: {output_size:.2f} MB")
 
     return output_file

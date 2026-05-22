@@ -2,6 +2,7 @@
 
 import logging
 import multiprocessing as mp
+from functools import partial
 from pathlib import Path
 from typing import Literal, Optional, Union
 
@@ -9,21 +10,63 @@ import gsw  # type: ignore[import]
 import numpy as np
 import xarray as xr
 
-from .io import load_profile_nc
+from .auxiliary import attach_auxiliary, load_auxiliary
+from .io import load_profile_nc, resolve_input_files
 from .profile import (
     ProfileConfig,
-    merge_auxiliary_data,
     prepare_profile,
     process_profile,
     split_into_profiles,
 )
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "batch_compute_epsilon",
     "bin_profiles",
 ]
+
+
+_INSTRUMENT_ATTRS = ("instrument_vehicle", "instrument_model", "instrument_sn")
+
+
+def _write_epsilon_profile(
+    result: xr.Dataset,
+    source_ds: xr.Dataset,
+    output_file: Path,
+    source_file_name: str,
+    profile_idx: int,
+    config: ProfileConfig,
+) -> None:
+    """Write a processed-profile dataset to NetCDF with stamped metadata.
+
+    Keeps only time-dimensioned data variables, reattaches the ``frequency``
+    and ``k`` coordinates, carries over ``time`` attrs, and stamps source
+    file / profile / instrument metadata.
+    """
+    vars_to_keep = [
+        v
+        for v in result.data_vars
+        if "time" in result[v].dims and len(result[v].dims) > 0
+    ]
+    out = result[vars_to_keep].assign_coords(
+        frequency=result.frequency,
+        k=result.k,
+    )
+
+    if "time" in result.coords:
+        for attr in ("units", "long_name"):
+            if attr in result.time.attrs:
+                out.time.attrs[attr] = result.time.attrs[attr]
+
+    out.attrs["source_file"] = source_file_name
+    out.attrs["profile_index"] = profile_idx
+    out.attrs["profile_direction"] = config.profile_direction
+    for attr in _INSTRUMENT_ATTRS:
+        if attr in source_ds.attrs:
+            out.attrs[attr] = source_ds.attrs[attr]
+
+    out.to_netcdf(output_file)
 
 
 def _process_file(
@@ -33,8 +76,7 @@ def _process_file(
     overwrite: bool,
     aux_ds: Optional[xr.Dataset] = None,
 ) -> list[tuple]:
-    """
-    Process a file that may contain multiple profiles.
+    """Process a file that may contain multiple profiles.
 
     Returns list of (input_path, output_path, profile_index, error) tuples.
     """
@@ -43,30 +85,16 @@ def _process_file(
 
     try:
         ds = load_profile_nc(input_file)
-
-        # Merge auxiliary data if provided (needs decoded times)
         if aux_ds is not None:
-            ds_decoded = xr.decode_cf(ds)
-            ds_decoded = merge_auxiliary_data(ds_decoded, aux_ds, config)
-            # Copy auxiliary variables back to original dataset
-            for var in [
-                "aux_latitude",
-                "aux_longitude",
-                "aux_temperature",
-                "aux_salinity",
-                "aux_density",
-            ]:
-                if var in ds_decoded:
-                    ds[var] = ("t_slow", ds_decoded[var].values)
-
-        # Prepare the profile (smooth speed/pressure, scale shear/gradT)
+            ds = attach_auxiliary(ds, aux_ds, config)
         ds = prepare_profile(ds, config)
 
-        # Split into individual profiles
-        profile_count = 0
-        for profile_idx, profile_ds in split_into_profiles(ds, config):
-            profile_count += 1
-            # Generate output filename with profile index
+        # Iterate detected profiles, falling back to one whole-file profile.
+        profile_iter = list(split_into_profiles(ds, config))
+        if not profile_iter:
+            profile_iter = [(0, ds)]
+
+        for profile_idx, profile_ds in profile_iter:
             output_file = output_dir / f"{stem}_p{profile_idx:04d}.nc"
 
             if output_file.exists() and not overwrite:
@@ -77,75 +105,12 @@ def _process_file(
 
             try:
                 result = process_profile(profile_ds, config)
-
-                # Keep only variables on time dimension (epsilon results)
-                vars_to_keep = [
-                    v
-                    for v in result.data_vars
-                    if "time" in result[v].dims and len(result[v].dims) > 0
-                ]
-                result_filtered = result[vars_to_keep]
-
-                # Add coordinates
-                result_filtered = result_filtered.assign_coords(
-                    frequency=result.frequency,
-                    k=result.k,
+                _write_epsilon_profile(
+                    result, ds, output_file, input_file.name, profile_idx, config
                 )
-
-                # Ensure time coordinate has units attribute
-                if "time" in result.coords and "units" in result.time.attrs:
-                    result_filtered.time.attrs["units"] = result.time.attrs["units"]
-                if "time" in result.coords and "long_name" in result.time.attrs:
-                    result_filtered.time.attrs["long_name"] = result.time.attrs[
-                        "long_name"
-                    ]
-
-                # Add source file metadata
-                result_filtered.attrs["source_file"] = input_file.name
-                result_filtered.attrs["profile_index"] = profile_idx
-                result_filtered.attrs["profile_direction"] = config.profile_direction
-
-                # Copy instrument info from source dataset
-                for attr in ["instrument_vehicle", "instrument_model", "instrument_sn"]:
-                    if attr in ds.attrs:
-                        result_filtered.attrs[attr] = ds.attrs[attr]
-
-                result_filtered.to_netcdf(output_file)
                 results.append((input_file, output_file, profile_idx, None))
-
             except Exception as e:
                 results.append((input_file, None, profile_idx, str(e)))
-
-        # If no profiles were found, try single-profile processing as fallback
-        if profile_count == 0:
-            output_file = output_dir / f"{stem}_p0000.nc"
-
-            if output_file.exists() and not overwrite:
-                return [(input_file, output_file, 0, "skipped (exists)")]
-
-            # Fall back to original single-profile processing
-            result = process_profile(ds, config)
-
-            vars_to_keep = [
-                v
-                for v in result.data_vars
-                if "time" in result[v].dims and len(result[v].dims) > 0
-            ]
-            result_filtered = result[vars_to_keep]
-            result_filtered = result_filtered.assign_coords(
-                frequency=result.frequency,
-                k=result.k,
-            )
-            if "time" in result.coords and "units" in result.time.attrs:
-                result_filtered.time.attrs["units"] = result.time.attrs["units"]
-            if "time" in result.coords and "long_name" in result.time.attrs:
-                result_filtered.time.attrs["long_name"] = result.time.attrs["long_name"]
-
-            result_filtered.attrs["source_file"] = input_file.name
-            result_filtered.attrs["profile_index"] = 0
-
-            result_filtered.to_netcdf(output_file)
-            results.append((input_file, output_file, 0, None))
 
     except Exception as e:
         results.append((input_file, None, -1, str(e)))
@@ -153,10 +118,62 @@ def _process_file(
     return results
 
 
-def _unpack_epsilon_args(args: tuple) -> list[tuple]:
-    """Unpack arguments for imap_unordered."""
-    input_file, output_dir, config, overwrite, aux_ds = args
-    return _process_file(input_file, output_dir, config, overwrite, aux_ds)
+def _ensure_output_dir(output_dir: Optional[Union[str, Path]]) -> Path:
+    """Resolve and create the output directory (defaults to cwd)."""
+    if output_dir is None:
+        return Path.cwd()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def _run_epsilon_pool(
+    nc_files: list[Path],
+    output_dir: Path,
+    config: ProfileConfig,
+    overwrite: bool,
+    aux_ds: Optional[xr.Dataset],
+    n_workers: int,
+) -> list[dict]:
+    """Dispatch ``_process_file`` across ``nc_files`` and collect results."""
+    worker = partial(
+        _process_file,
+        output_dir=output_dir,
+        config=config,
+        overwrite=overwrite,
+        aux_ds=aux_ds,
+    )
+    effective_workers = min(n_workers, len(nc_files))
+    _log.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
+
+    results: list[dict] = []
+    with mp.Pool(processes=effective_workers) as pool:
+        for i, file_results in enumerate(pool.imap_unordered(worker, nc_files)):
+            for input_path, output_path, profile_idx, error in file_results:
+                success = error is None
+                results.append(
+                    {
+                        "input": input_path,
+                        "output": output_path,
+                        "profile_index": profile_idx,
+                        "success": success,
+                        "error": error,
+                    }
+                )
+                status = (
+                    f"profile {profile_idx} processed"
+                    if success
+                    else f"profile {profile_idx} failed ({error})"
+                )
+                _log.info(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
+
+    n_success = sum(1 for r in results if r["success"])
+    n_failed = len(results) - n_success
+    _log.info(
+        f"Completed: {n_success} profiles succeeded, {n_failed} failed "
+        f"from {len(nc_files)} files"
+    )
+    return results
 
 
 def batch_compute_epsilon(
@@ -183,7 +200,6 @@ def batch_compute_epsilon(
     accel_clean: bool = False,
     emc_clean: bool = True,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
     overwrite: bool = False,
 ) -> list[dict]:
     """
@@ -239,8 +255,6 @@ def batch_compute_epsilon(
         onto each profile and used for viscosity calculation and output.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default False.
     overwrite : bool, optional
         Whether to overwrite existing files. Default False.
 
@@ -260,49 +274,15 @@ def batch_compute_epsilon(
     >>> # Process both up and down casts
     >>> results = batch_compute_epsilon('/path/to/data/*.nc', profile_direction='both')
     """
-    # Handle different input types
-    if isinstance(files, list):
-        # Already a list of files
-        nc_files = sorted(files)
-    else:
-        # It's a pattern or directory
-        pattern = Path(files)
-
-        if pattern.is_dir():
-            pattern = pattern / "*.nc"
-
-        if pattern.is_absolute():
-            nc_files = sorted(pattern.parent.glob(pattern.name))
-        else:
-            nc_files = sorted(Path.cwd().glob(str(pattern)))
-
+    nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
-        logger.info("No NetCDF files found.")
+        _log.info("No NetCDF files found.")
         return []
+    _log.info(f"Found {len(nc_files)} NetCDF files to process")
 
-    logger.info(f"Found {len(nc_files)} NetCDF files to process")
+    output_dir = _ensure_output_dir(output_dir)
 
-    if output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        output_dir = Path.cwd()
-
-    # Note: Skip logic for existing files is now handled per-profile in _process_file
-
-    if n_workers is None:
-        n_workers = mp.cpu_count()
-
-    # Set default peaks_kwargs if not provided
-    if peaks_kwargs is None:
-        peaks_kwargs = {
-            "height": 25,
-            "distance": 200,
-            "width": 200,
-            "prominence": 25,
-        }
-
-    config = ProfileConfig(
+    config_kwargs: dict = dict(
         diss_len_sec=diss_len_sec,
         fft_len_sec=fft_len_sec,
         min_speed=min_speed,
@@ -313,7 +293,6 @@ def batch_compute_epsilon(
         use_pitch_correction=use_pitch_correction,
         profile_direction=profile_direction,
         min_profile_pressure=min_profile_pressure,
-        peaks_kwargs=peaks_kwargs,
         aux_latitude=aux_latitude,
         aux_longitude=aux_longitude,
         aux_temperature=aux_temperature,
@@ -322,93 +301,19 @@ def batch_compute_epsilon(
         despike_max_passes=despike_max_passes,
         accel_clean=accel_clean,
         emc_clean=emc_clean,
-        verbose=verbose,
+    )
+    if peaks_kwargs is not None:
+        config_kwargs["peaks_kwargs"] = peaks_kwargs
+    config = ProfileConfig(**config_kwargs)
+
+    aux_ds = (
+        load_auxiliary(auxiliary_file, config) if auxiliary_file is not None else None
     )
 
-    # Load auxiliary dataset if provided
-    aux_ds = None
-    if auxiliary_file is not None:
-        auxiliary_file = Path(auxiliary_file)
-        if not auxiliary_file.exists():
-            raise FileNotFoundError(f"Auxiliary file not found: {auxiliary_file}")
+    if n_workers is None:
+        n_workers = mp.cpu_count()
 
-        logger.info(f"Loading auxiliary dataset from {auxiliary_file}")
-
-        aux_ds = xr.open_dataset(auxiliary_file, decode_times=True)
-
-        # Require a time coordinate named 'time' (CF time decoding is expected)
-        if "time" not in aux_ds.coords:
-            raise ValueError(
-                "Auxiliary dataset must have a coordinate named 'time' for interpolation"
-            )
-
-        # Ensure time coordinate decodes to datetime64
-        if not np.issubdtype(aux_ds["time"].dtype, np.datetime64):
-            raise ValueError(
-                "Auxiliary dataset 'time' coordinate must be CF-decodable to datetimes (e.g., 'seconds since 1970-01-01')"
-            )
-
-        # Drop NaN times, sort by time, and remove duplicate times (keep first occurrence)
-        aux_ds = aux_ds.dropna(dim="time", subset=["time"]).sortby("time")
-
-        # Interpolate over NaN values in auxiliary variables (use configured names).
-        # Latitude/longitude are always considered; temperature/salinity/density
-        # are only used if explicitly provided by the user (config value not None).
-        aux_vars = [config.aux_latitude, config.aux_longitude]
-        opt_vars = [config.aux_temperature, config.aux_salinity, config.aux_density]
-        aux_vars.extend([v for v in opt_vars if v is not None])
-
-        for var in aux_vars:
-            if var in aux_ds and aux_ds[var].isnull().any():
-                aux_ds[var] = aux_ds[var].interpolate_na(
-                    dim="time", method="linear", fill_value="extrapolate"
-                )
-                logger.info(f"Interpolated NaN values in auxiliary variable '{var}'")
-
-        logger.info(f"Loaded auxiliary dataset from {auxiliary_file}")
-
-    args = [(f, output_dir, config, overwrite, aux_ds) for f in nc_files]
-
-    results = []
-    total_profiles = 0
-
-    effective_workers = min(n_workers, len(nc_files))
-
-    logger.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
-
-    with mp.Pool(processes=effective_workers) as pool:
-        results_iter = pool.imap_unordered(_unpack_epsilon_args, args)
-        for i, file_results in enumerate(results_iter):
-            for input_path, output_path, profile_idx, error in file_results:
-                success = error is None
-                results.append(
-                    {
-                        "input": input_path,
-                        "output": output_path,
-                        "profile_index": profile_idx,
-                        "success": success,
-                        "error": error,
-                    }
-                )
-                total_profiles += 1
-                if verbose:
-                    if success:
-                        status = f"profile {profile_idx} processed"
-                    else:
-                        status = f"profile {profile_idx} failed ({error})"
-                    logger.info(
-                        f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}"
-                    )
-
-    # Summary
-    if verbose:
-        n_success = sum(1 for r in results if r["success"])
-        n_failed = len(results) - n_success
-        logger.info(
-            f"Completed: {n_success} profiles succeeded, {n_failed} failed from {len(nc_files)} files"
-        )
-
-    return results
+    return _run_epsilon_pool(nc_files, output_dir, config, overwrite, aux_ds, n_workers)
 
 
 def _bin_single_profile(
@@ -528,7 +433,7 @@ def _bin_single_profile(
         return ds_binned
 
     except Exception as e:
-        logger.error(f"Error binning {file}: {e}")
+        _log.error(f"Error binning {file}: {e}")
         return None
 
 
@@ -550,7 +455,6 @@ def bin_profiles(
     default_latitude: float = 45.0,
     bin_by_pressure: bool = False,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
 ) -> Optional[xr.Dataset]:
     """
     Bin multiple profile datasets by depth (or pressure) and concatenate.
@@ -583,8 +487,6 @@ def bin_profiles(
         If True, bin by pressure (dbar) instead of depth (m). Default False.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default False.
 
     Returns
     -------
@@ -614,29 +516,17 @@ def bin_profiles(
             "lon",
         ]
 
-    # Handle different input types
-    if isinstance(files, list):
-        nc_files = sorted(files)
-    else:
-        pattern = Path(files)
-        if pattern.is_dir():
-            pattern = pattern / "*.nc"
-        if pattern.is_absolute():
-            nc_files = sorted(pattern.parent.glob(pattern.name))
-        else:
-            nc_files = sorted(Path.cwd().glob(str(pattern)))
-
+    nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
-        if verbose:
-            logger.info("No NetCDF files found.")
+        _log.info("No NetCDF files found.")
         return None
 
-    if verbose:
-        logger.info(f"Found {len(nc_files)} NetCDF files to bin")
-        coord_type = "pressure" if bin_by_pressure else "depth"
-        logger.info(
-            f"Binning by {coord_type} from {depth_min} to {depth_max} m with {bin_width} m bins"
-        )
+    _log.info(f"Found {len(nc_files)} NetCDF files to bin")
+    coord_type = "pressure" if bin_by_pressure else "depth"
+    _log.info(
+        f"Binning by {coord_type} from {depth_min} to {depth_max} m "
+        f"with {bin_width} m bins"
+    )
 
     # Create depth (or pressure) bins
     depth_bins = np.arange(depth_min, depth_max + bin_width, bin_width)
@@ -652,35 +542,27 @@ def bin_profiles(
 
     # Use serial processing for small batches
     if len(nc_files) <= min(n_workers, 4):
-        if verbose:
-            logger.info("Using serial processing for small batch")
+        _log.info("Using serial processing for small batch")
         for i, arg_tuple in enumerate(args):
             result = _unpack_bin_args(arg_tuple)
             if result is not None:
                 binned_datasets.append(result)
-            if verbose:
-                status = "binned" if result is not None else "skipped"
-                logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+            status = "binned" if result is not None else "skipped"
+            _log.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
     else:
-        if verbose:
-            logger.info(f"Using {n_workers} parallel workers")
+        _log.info(f"Using {n_workers} parallel workers")
         with mp.Pool(processes=n_workers) as pool:
             for i, result in enumerate(pool.imap(_unpack_bin_args, args)):
                 if result is not None:
                     binned_datasets.append(result)
-                if verbose:
-                    status = "binned" if result is not None else "skipped"
-                    logger.info(
-                        f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}"
-                    )
+                status = "binned" if result is not None else "skipped"
+                _log.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
 
     if not binned_datasets:
-        if verbose:
-            logger.info("No datasets were successfully binned.")
+        _log.info("No datasets were successfully binned.")
         return None
 
-    if verbose:
-        logger.info(f"Concatenating {len(binned_datasets)} binned profiles...")
+    _log.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
     # Concatenate along profile dimension
     combined = xr.concat(binned_datasets, dim="profile")
@@ -692,15 +574,13 @@ def bin_profiles(
         # Sort by time
         sort_order = np.argsort(profile_times.values)
         combined = combined.isel(profile=sort_order)
-        if verbose:
-            logger.info("Sorted profiles by time")
+        _log.info("Sorted profiles by time")
 
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_netcdf(output_file)
 
-    if verbose:
-        logger.info(f"Saved binned data to {output_file}")
+    _log.info(f"Saved binned data to {output_file}")
 
     return combined

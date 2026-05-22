@@ -445,7 +445,6 @@ def eps(
         emc_clean=emc_clean,
         n_workers=n_workers,
         overwrite=overwrite,
-        verbose=True,
     )
 
 
@@ -553,7 +552,6 @@ def bin(
         default_latitude=default_latitude,
         bin_by_pressure=bin_by_pressure,
         n_workers=n_workers,
-        verbose=True,
     )
 
     if result is None:

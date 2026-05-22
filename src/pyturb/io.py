@@ -7,7 +7,28 @@ import numpy as np
 import xarray as xr
 from scipy.io import loadmat
 
-__all__ = ["load_rockland_mat", "load_profile_nc"]
+__all__ = ["load_rockland_mat", "load_profile_nc", "resolve_input_files"]
+
+
+def resolve_input_files(
+    files: Union[str, Path, list[Path]],
+    pattern: str = "*.nc",
+) -> list[Path]:
+    """Resolve a files argument to a sorted list of paths.
+
+    Accepts a list of Paths, a directory (in which case ``pattern`` is appended),
+    or a glob string. Returns the sorted list of matched files.
+    """
+    if isinstance(files, list):
+        return sorted(files)
+
+    p = Path(files)
+    if p.is_dir():
+        p = p / pattern
+
+    if p.is_absolute():
+        return sorted(p.parent.glob(p.name))
+    return sorted(Path.cwd().glob(str(p)))
 
 
 _variable_map = dict(
