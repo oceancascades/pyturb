@@ -134,7 +134,6 @@ def _run_epsilon_pool(
     overwrite: bool,
     aux_ds: Optional[xr.Dataset],
     n_workers: int,
-    verbose: bool,
 ) -> list[dict]:
     """Dispatch ``_process_file`` across ``nc_files`` and collect results."""
     worker = partial(
@@ -161,23 +160,19 @@ def _run_epsilon_pool(
                         "error": error,
                     }
                 )
-                if verbose:
-                    status = (
-                        f"profile {profile_idx} processed"
-                        if success
-                        else f"profile {profile_idx} failed ({error})"
-                    )
-                    logger.info(
-                        f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}"
-                    )
+                status = (
+                    f"profile {profile_idx} processed"
+                    if success
+                    else f"profile {profile_idx} failed ({error})"
+                )
+                logger.info(f"[{i + 1}/{len(nc_files)}] {input_path.name}: {status}")
 
-    if verbose:
-        n_success = sum(1 for r in results if r["success"])
-        n_failed = len(results) - n_success
-        logger.info(
-            f"Completed: {n_success} profiles succeeded, {n_failed} failed "
-            f"from {len(nc_files)} files"
-        )
+    n_success = sum(1 for r in results if r["success"])
+    n_failed = len(results) - n_success
+    logger.info(
+        f"Completed: {n_success} profiles succeeded, {n_failed} failed "
+        f"from {len(nc_files)} files"
+    )
     return results
 
 
@@ -205,7 +200,6 @@ def batch_compute_epsilon(
     accel_clean: bool = False,
     emc_clean: bool = True,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
     overwrite: bool = False,
 ) -> list[dict]:
     """
@@ -261,8 +255,6 @@ def batch_compute_epsilon(
         onto each profile and used for viscosity calculation and output.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default False.
     overwrite : bool, optional
         Whether to overwrite existing files. Default False.
 
@@ -309,7 +301,6 @@ def batch_compute_epsilon(
         despike_max_passes=despike_max_passes,
         accel_clean=accel_clean,
         emc_clean=emc_clean,
-        verbose=verbose,
     )
     if peaks_kwargs is not None:
         config_kwargs["peaks_kwargs"] = peaks_kwargs
@@ -322,9 +313,7 @@ def batch_compute_epsilon(
     if n_workers is None:
         n_workers = mp.cpu_count()
 
-    return _run_epsilon_pool(
-        nc_files, output_dir, config, overwrite, aux_ds, n_workers, verbose
-    )
+    return _run_epsilon_pool(nc_files, output_dir, config, overwrite, aux_ds, n_workers)
 
 
 def _bin_single_profile(
@@ -466,7 +455,6 @@ def bin_profiles(
     default_latitude: float = 45.0,
     bin_by_pressure: bool = False,
     n_workers: Optional[int] = None,
-    verbose: bool = False,
 ) -> Optional[xr.Dataset]:
     """
     Bin multiple profile datasets by depth (or pressure) and concatenate.
@@ -499,8 +487,6 @@ def bin_profiles(
         If True, bin by pressure (dbar) instead of depth (m). Default False.
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
-    verbose : bool, optional
-        Print progress information. Default False.
 
     Returns
     -------
@@ -532,16 +518,15 @@ def bin_profiles(
 
     nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
-        if verbose:
-            logger.info("No NetCDF files found.")
+        logger.info("No NetCDF files found.")
         return None
 
-    if verbose:
-        logger.info(f"Found {len(nc_files)} NetCDF files to bin")
-        coord_type = "pressure" if bin_by_pressure else "depth"
-        logger.info(
-            f"Binning by {coord_type} from {depth_min} to {depth_max} m with {bin_width} m bins"
-        )
+    logger.info(f"Found {len(nc_files)} NetCDF files to bin")
+    coord_type = "pressure" if bin_by_pressure else "depth"
+    logger.info(
+        f"Binning by {coord_type} from {depth_min} to {depth_max} m "
+        f"with {bin_width} m bins"
+    )
 
     # Create depth (or pressure) bins
     depth_bins = np.arange(depth_min, depth_max + bin_width, bin_width)
@@ -557,35 +542,27 @@ def bin_profiles(
 
     # Use serial processing for small batches
     if len(nc_files) <= min(n_workers, 4):
-        if verbose:
-            logger.info("Using serial processing for small batch")
+        logger.info("Using serial processing for small batch")
         for i, arg_tuple in enumerate(args):
             result = _unpack_bin_args(arg_tuple)
             if result is not None:
                 binned_datasets.append(result)
-            if verbose:
-                status = "binned" if result is not None else "skipped"
-                logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
+            status = "binned" if result is not None else "skipped"
+            logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
     else:
-        if verbose:
-            logger.info(f"Using {n_workers} parallel workers")
+        logger.info(f"Using {n_workers} parallel workers")
         with mp.Pool(processes=n_workers) as pool:
             for i, result in enumerate(pool.imap(_unpack_bin_args, args)):
                 if result is not None:
                     binned_datasets.append(result)
-                if verbose:
-                    status = "binned" if result is not None else "skipped"
-                    logger.info(
-                        f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}"
-                    )
+                status = "binned" if result is not None else "skipped"
+                logger.info(f"[{i + 1}/{len(nc_files)}] {status}: {nc_files[i].name}")
 
     if not binned_datasets:
-        if verbose:
-            logger.info("No datasets were successfully binned.")
+        logger.info("No datasets were successfully binned.")
         return None
 
-    if verbose:
-        logger.info(f"Concatenating {len(binned_datasets)} binned profiles...")
+    logger.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
     # Concatenate along profile dimension
     combined = xr.concat(binned_datasets, dim="profile")
@@ -597,15 +574,13 @@ def bin_profiles(
         # Sort by time
         sort_order = np.argsort(profile_times.values)
         combined = combined.isel(profile=sort_order)
-        if verbose:
-            logger.info("Sorted profiles by time")
+        logger.info("Sorted profiles by time")
 
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_netcdf(output_file)
 
-    if verbose:
-        logger.info(f"Saved binned data to {output_file}")
+    logger.info(f"Saved binned data to {output_file}")
 
     return combined

@@ -126,10 +126,9 @@ def merge_auxiliary_data(
                 kwargs={"fill_value": "extrapolate"},
             )
             ds[output_var] = ("t_slow", interp_data.values)
-            if config.verbose:
-                logger.info(f"Interpolated {aux_var} -> {output_var}")
-        elif config.verbose:
-            logger.info(f"Auxiliary variable '{aux_var}' not found, skipping")
+            logger.debug(f"Interpolated {aux_var} -> {output_var}")
+        else:
+            logger.debug(f"Auxiliary variable '{aux_var}' not found, skipping")
 
     return ds
 

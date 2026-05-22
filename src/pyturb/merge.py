@@ -103,8 +103,6 @@ def merge_netcdf(
         List of input NetCDF file paths to merge. Will be sorted by filename.
     output_file : str or Path
         Path for the output merged file.
-    verbose : bool, optional
-        Print progress information. Default False.
     overwrite : bool, optional
         Overwrite output file if it exists. Default False.
 

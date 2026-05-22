@@ -79,7 +79,6 @@ class ProfileConfig:
 
     # === Processing options ===
     chop_start: bool = True
-    verbose: bool = False
     scale_probes: bool = True
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
     accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
@@ -170,7 +169,6 @@ def gap_aware_sosfiltfilt(
     gap_threshold: float = 5.0,
     gap_factor: float = 10.0,
     min_segment_length: int = 10,
-    verbose: bool = False,
 ) -> np.ndarray:
     """
     Apply sosfiltfilt independently to contiguous time segments.
@@ -193,8 +191,6 @@ def gap_aware_sosfiltfilt(
     min_segment_length : int, optional
         Minimum segment length to apply filter. Shorter segments are
         returned unfiltered. Default 10.
-    verbose : bool, optional
-        Print diagnostic information about detected gaps. Default False.
 
     Returns
     -------
@@ -223,14 +219,14 @@ def gap_aware_sosfiltfilt(
 
     n_gaps = len(gap_indices)
 
-    if verbose and n_gaps > 0:
-        logger.info(
+    if n_gaps > 0:
+        logger.debug(
             f"Detected {n_gaps} time gap(s) in data "
             f"(threshold={threshold:.2f}s, median_dt={median_dt:.4f}s)"
         )
         for i, idx in enumerate(gap_indices):
             gap_size = dt[idx - 1]  # -1 because gap_indices is offset by 1
-            logger.info(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
+            logger.debug(f"  Gap {i + 1}: {gap_size:.2f}s at index {idx}")
 
     if n_gaps == 0:
         # No gaps, filter entire array
@@ -315,7 +311,6 @@ def prepare_profile(
                 t_slow,
                 gap_threshold=config.gap_threshold,
                 gap_factor=config.gap_factor,
-                verbose=config.verbose,
             ),
         )
     else:
@@ -331,23 +326,18 @@ def prepare_profile(
                 t_slow,
                 gap_threshold=config.gap_threshold,
                 gap_factor=config.gap_factor,
-                verbose=config.verbose,
             ),
         )
     else:
-        if config.verbose:
-            logger.info(
-                f"Speed variable '{config.speed}' not found, "
-                "estimating from pressure derivative"
-            )
+        logger.info(
+            f"Speed variable '{config.speed}' not found, "
+            "estimating from pressure derivative"
+        )
 
         pitch = None
         if config.use_pitch_correction and config.pitch in ds:
             pitch = ds[config.pitch].values
-            if config.verbose:
-                logger.info(
-                    f"Using pitch correction with AoA={config.angle_of_attack}°"
-                )
+            logger.info(f"Using pitch correction with AoA={config.angle_of_attack}°")
         speed_est = estimate_speed_from_pressure(
             ds[config.pressure_smooth].values,
             fs_slow,
@@ -610,10 +600,7 @@ def find_all_profiles(
                         if u_e > u_s:
                             segments.append((u_s, u_e))
 
-        if config.verbose:
-            logger.info(
-                f"Found {len(segments)} profile segment(s) via gap-based detection"
-            )
+        logger.info(f"Found {len(segments)} profile segment(s) via gap-based detection")
         return segments
 
     dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
@@ -630,13 +617,11 @@ def find_all_profiles(
             direction=config.profile_direction,
         )
     except Exception as e:
-        if config.verbose:
-            logger.warning(f"Profile detection failed: {e}")
+        logger.warning(f"Profile detection failed: {e}")
         return []
 
     if not profiles:
-        if config.verbose:
-            logger.info("No profiles detected in dataset")
+        logger.info("No profiles detected in dataset")
         return []
 
     # Extract segments based on direction
@@ -663,8 +648,7 @@ def find_all_profiles(
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
-    if config.verbose:
-        logger.info(f"Found {len(segments)} profile segment(s)")
+    logger.info(f"Found {len(segments)} profile segment(s)")
 
     return segments
 
@@ -885,8 +869,7 @@ def _preprocess_for_spectra(
     Returns the trimmed dataset and the window-parameter dict.
     """
     if config.speed_smooth not in ds:
-        if config.verbose:
-            logger.info("Smoothed speed not found, running prepare_profile")
+        logger.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
 
     ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
