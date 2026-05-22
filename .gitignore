@@ -15,3 +15,5 @@ odas*
 *.nc
 *.mat
 *.pdf
+
+.DS_Store

@@ -546,9 +546,17 @@ def find_all_profiles(
     """
     Find all profile segments in a dataset.
 
-    Uses profinder.find_profiles() to detect multiple dive cycles in the
-    pressure time series, then returns index bounds for the requested
-    cast direction(s).
+    A combination of strategies are used:
+
+    1. Gap-based (merged / pre-segmented datasets): When the
+       time series contains breaks larger than ``gap_threshold`` seconds (or
+       ``gap_factor x median_dt``), and the pressure differences at each step
+       are mostly in one direction then the data are treated as a single profile.
+
+    2. Peak-based (multi-profile): When no
+       gaps are found, ``profinder.find_profiles`` identifies dive/ascent
+       cycles from pressure peaks and troughs.  Signed velocity (negative =
+       ascending) is derived from the smoothed pressure.
 
     Parameters
     ----------
@@ -567,7 +575,114 @@ def find_all_profiles(
     speed_var = config.speed_smooth
 
     pressure = ds[pressure_var].values
-    velocity = ds[speed_var].values
+    velocity = ds[speed_var].values  # absolute speed, always >= 0
+    t_slow = ds.t_slow.values
+    n = len(pressure)
+    fs_slow = float(ds.fs_slow)
+
+    dt = np.diff(t_slow)
+    if np.issubdtype(dt.dtype, np.timedelta64):
+        dt = dt.astype("timedelta64[ns]").astype(float) / 1e9
+    else:
+        dt = dt.astype(float)
+
+    median_dt = np.median(dt)
+    threshold = max(config.gap_threshold, config.gap_factor * median_dt)
+    gap_indices = (np.where(dt > threshold)[0] + 1).tolist()
+
+    if gap_indices:
+        min_height = config.peaks_kwargs.get(
+            "height", max(config.min_profile_pressure, 1.0)
+        )
+        boundaries = [0] + gap_indices + [n]
+        segments: list[tuple[int, int]] = []
+
+        for i in range(len(boundaries) - 1):
+            seg_start = boundaries[i]
+            seg_end = boundaries[i + 1] - 1  # inclusive
+
+            seg_p = pressure[seg_start : seg_end + 1]
+            seg_n = len(seg_p)
+            if seg_n < 2:
+                continue
+
+            # Skip segments that never reach the minimum depth
+            if seg_p.max() < min_height:
+                continue
+
+            # Determine if this segment is monotonic. For a
+            # single glider cast, most pressure steps will be in one direction.
+            # For a VMP segment cycling between surface and depth the fraction
+            # will be close to 0.5.
+            seg_dp_steps = np.diff(seg_p)
+            n_pos = int(np.sum(seg_dp_steps > 0))  # steps toward deeper
+            n_neg = int(np.sum(seg_dp_steps < 0))  # steps toward shallower
+            n_total = n_pos + n_neg
+            dominant_frac = max(n_pos, n_neg) / n_total if n_total > 0 else 1.0
+            monotonic = dominant_frac >= 0.8
+            mostly_down = n_pos >= n_neg
+
+            is_single = (
+                (config.profile_direction == "down" and monotonic and mostly_down)
+                or (config.profile_direction == "up" and monotonic and not mostly_down)
+                or (config.profile_direction == "both" and monotonic)
+            )
+
+            if is_single:
+                # Single monotonic profile: trim edges by speed threshold
+                seg_v = velocity[seg_start : seg_end + 1]
+                valid_mask = seg_v >= config.min_speed
+                if not valid_mask.any():
+                    continue
+                valid_idx = np.where(valid_mask)[0]
+                start = seg_start + int(valid_idx[0])
+                end = seg_start + int(valid_idx[-1])
+                if end > start:
+                    segments.append((start, end))
+            else:
+                seg_dp_dt = np.gradient(seg_p, 1.0 / fs_slow)
+                seg_vel_signed = seg_dp_dt * config.dbar_to_m
+                try:
+                    sub_profiles = find_profiles(
+                        seg_p,
+                        min_pressure=config.min_profile_pressure,
+                        peaks_kwargs=config.peaks_kwargs,
+                        apply_speed_threshold=True,
+                        velocity=seg_vel_signed,
+                        min_speed=config.min_speed,
+                        direction=config.profile_direction,
+                    )
+                except Exception:
+                    continue
+                for down_start, down_end, up_start, up_end in sub_profiles:
+                    if config.profile_direction == "down":
+                        s = seg_start + max(0, down_start)
+                        e = seg_start + min(down_end, seg_n - 1)
+                        if e > s:
+                            segments.append((s, e))
+                    elif config.profile_direction == "up":
+                        s = seg_start + max(0, up_start)
+                        e = seg_start + min(up_end, seg_n - 1)
+                        if e > s:
+                            segments.append((s, e))
+                    else:  # "both"
+                        d_s = seg_start + max(0, down_start)
+                        d_e = seg_start + min(down_end, seg_n - 1)
+                        if d_e > d_s:
+                            segments.append((d_s, d_e))
+                        u_s = seg_start + max(0, up_start)
+                        u_e = seg_start + min(up_end, seg_n - 1)
+                        if u_e > u_s:
+                            segments.append((u_s, u_e))
+
+        if config.verbose:
+            logger.info(
+                f"Found {len(segments)} profile segment(s) via gap-based detection"
+            )
+        return segments
+
+    dp_dt = np.gradient(pressure, 1.0 / fs_slow)  # dbar/s, negative when ascending
+    vel_signed = dp_dt * config.dbar_to_m  # ~m/s, sign preserved
 
     try:
         profiles = find_profiles(
@@ -575,7 +690,7 @@ def find_all_profiles(
             min_pressure=config.min_profile_pressure,
             peaks_kwargs=config.peaks_kwargs,
             apply_speed_threshold=True,
-            velocity=velocity,
+            velocity=vel_signed,
             min_speed=config.min_speed,
             direction=config.profile_direction,
         )
@@ -594,25 +709,22 @@ def find_all_profiles(
     segments = []
     for down_start, down_end, up_start, up_end in profiles:
         if config.profile_direction == "down":
-            # Clamp indices to valid range
             start = max(0, down_start)
-            end = min(down_end, ds.t_slow.size - 1)
+            end = min(down_end, n - 1)
             if end > start:
                 segments.append((start, end))
         elif config.profile_direction == "up":
             start = max(0, up_start)
-            end = min(up_end, ds.t_slow.size - 1)
+            end = min(up_end, n - 1)
             if end > start:
                 segments.append((start, end))
         else:  # "both"
-            # Add down cast
             d_start = max(0, down_start)
-            d_end = min(down_end, ds.t_slow.size - 1)
+            d_end = min(down_end, n - 1)
             if d_end > d_start:
                 segments.append((d_start, d_end))
-            # Add up cast
             u_start = max(0, up_start)
-            u_end = min(up_end, ds.t_slow.size - 1)
+            u_end = min(up_end, n - 1)
             if u_end > u_start:
                 segments.append((u_start, u_end))
 

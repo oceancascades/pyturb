@@ -390,9 +390,9 @@ def eps(
         typer.Argument(help="Input NetCDF files (supports shell globs)"),
     ] = None,
 ):
-    """Compute epsilon TKE dissipation rate from converted NetCDF files.
+    """Compute the dissipation rate of turbulent kinetic energy.
 
-    Automatically detects multiple profiles (dive cycles) within each file.
+    Detects multiple profiles within each input file.
     Output files are named {input_stem}_p{NNN}.nc for each profile.
 
     Examples:
