@@ -82,6 +82,11 @@ _PEAKS_FIELDS: dict[str, Callable[[str], object]] = {
     "prominence": float,
 }
 
+_QC_THRESH_FIELDS: dict[str, Callable[[str], object]] = {
+    "questionable": float,
+    "bad": float,
+}
+
 
 def cli():
     app()
@@ -595,6 +600,22 @@ def bin(
             show_default="all CPUs",
         ),
     ] = None,
+    qc_thresh: Annotated[
+        Optional[str],
+        typer.Option(
+            "--qc-thresh",
+            help=(
+                "Epsilon rejection thresholds (W/kg) as two comma-separated "
+                "values: questionable,bad. A qc=2 (questionable) window is "
+                "dropped before binning when its eps exceeds the first value; "
+                "a qc=4 (bad) window is dropped when its eps exceeds the "
+                "second. Low-epsilon flagged values are usually noise-floor "
+                "artifacts and are kept by default. Defaults: 1e-7,1e-9. "
+                "Pass 'inf,inf' to disable masking. Example: "
+                "--qc-thresh 5e-8,5e-10"
+            ),
+        ),
+    ] = None,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input epsilon NetCDF files (supports shell globs)"),
@@ -609,6 +630,7 @@ def bin(
         pyturb bin ./eps_output/*.nc -o binned.nc
         pyturb bin ./eps_output/*.nc -b 5.0 --dmax 500
         pyturb bin ./eps_output/*.nc --pressure --dmin 0 --dmax 500
+        pyturb bin ./eps_output/*.nc --qc-thresh 5e-10
     """
     if not input_files:
         typer.echo("Error: No input files specified.", err=True)
@@ -618,6 +640,8 @@ def bin(
     var_list = None
     if variables is not None:
         var_list = [v.strip() for v in variables.split(",")]
+
+    qc_opts = _parse_input_list(qc_thresh, "qc-thresh", _QC_THRESH_FIELDS) or {}
 
     result = bin_profiles(
         files=input_files,
@@ -629,6 +653,8 @@ def bin(
         default_latitude=default_latitude,
         bin_by_pressure=bin_by_pressure,
         n_workers=n_workers,
+        questionable_thresh=qc_opts.get("questionable", 1e-7),
+        bad_thresh=qc_opts.get("bad", 1e-9),
     )
 
     if result is None:

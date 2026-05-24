@@ -75,6 +75,13 @@ class ProfileConfig:
     # Speed-based and FM-based QC are combined by taking the higher flag.
     fm_good: float = 1.5
     fm_bad: float = 2.5
+    # Despike fraction thresholds for per-window QC. The per-window fraction
+    # of fast samples modified by despiking promotes the eps_N_qc flag for
+    # the matching shear probe: fraction > despike_frac_questionable -> 2,
+    # fraction > despike_frac_bad -> 4. Combined with the speed and FM
+    # contributions via max.
+    despike_frac_questionable: float = 0.1
+    despike_frac_bad: float = 0.2
 
     # === Default values for missing data ===
     default_temperature: float = 10.0
@@ -1104,16 +1111,22 @@ def _dof_spec(params: dict) -> float:
 
 
 def _compose_qc(
-    eps: np.ndarray, fm: np.ndarray, speed_bad: np.ndarray, config: ProfileConfig
+    eps: np.ndarray,
+    fm: np.ndarray,
+    speed_bad: np.ndarray,
+    despike_frac: np.ndarray,
+    config: ProfileConfig,
 ) -> np.ndarray:
-    """Combine speed-based and FM-based QC into a flag per window.
+    """Combine speed, FM, and despike-fraction contributions into a per-window flag.
 
-    Precedence (max wins, then NaN-eps overrides as 9):
-      * FM <= fm_good  -> 1 (good)
-      * fm_good < FM <= fm_bad  -> 2 (questionable)
-      * FM > fm_bad  -> 4 (bad)
-      * speed below min_speed  -> 2 (questionable)
-      * eps NaN  -> 9 (missing), overrides all the above
+    Precedence (max wins across the three contributions, then NaN-eps overrides as 9):
+      * FM <= fm_good                                           -> 1 (good)
+      * fm_good < FM <= fm_bad                                  -> 2 (questionable)
+      * FM > fm_bad                                             -> 4 (bad)
+      * speed below min_speed                                   -> 2 (questionable)
+      * despike_frac > despike_frac_questionable                -> 2 (questionable)
+      * despike_frac > despike_frac_bad                         -> 4 (bad)
+      * eps NaN                                                 -> 9 (missing, overrides)
     """
     qc_speed = np.zeros(eps.size, dtype="i1")
     qc_speed[speed_bad] = 2
@@ -1124,7 +1137,12 @@ def _compose_qc(
     qc_fm[(fm > config.fm_good) & (fm <= config.fm_bad)] = 2
     qc_fm[fm > config.fm_bad] = 4
 
-    qc = np.maximum(qc_speed, qc_fm)
+    # Despike fraction: 0 (or absent → zeros from caller) leaves qc_dsp at 0.
+    qc_dsp = np.zeros(eps.size, dtype="i1")
+    qc_dsp[despike_frac > config.despike_frac_questionable] = 2
+    qc_dsp[despike_frac > config.despike_frac_bad] = 4
+
+    qc = np.maximum(np.maximum(qc_speed, qc_fm), qc_dsp)
     qc[np.isnan(eps)] = 9
     return qc
 
@@ -1139,12 +1157,17 @@ def _attach_epsilon(
     """Attach per-probe epsilon, k_max, FM, wavenumber ``k``, and QC flags.
 
     QC convention (IODE): 0=unknown, 1=good, 2=questionable, 4=bad, 9=missing.
-    Two contributions are folded together (see ``_compose_qc``):
+    Three contributions are folded together via max (see ``_compose_qc``):
 
       * Window-mean speed below ``config.min_speed`` raises the flag to 2.
       * FM = mad * sqrt(dof_spec) is the spectrum-vs-Nasmyth fit residual
         (low = trustworthy). It promotes flags to 1/2/4 against the two
-        ``config.fm_good``/``config.fm_bad`` thresholds.
+        ``config.fm_good`` / ``config.fm_bad`` thresholds.
+      * Per-probe window despike fraction (``sh1_despike_frac`` for eps_1,
+        ``sh2_despike_frac`` for eps_2) promotes flags to 2/4 against the
+        two ``config.despike_frac_questionable`` / ``config.despike_frac_bad``
+        thresholds. Treated as zero if the despike-fraction variable is
+        absent (e.g., probe was never despiked).
     """
     epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
     sqrt_dof = float(np.sqrt(_dof_spec(params)))
@@ -1166,7 +1189,14 @@ def _attach_epsilon(
                 "fft/diss window length. NaN if the fit band was too narrow."
             ),
         }
-        qc = _compose_qc(eps, fm, speed_bad, config)
+        # The despike-fraction contribution: sh1 drives eps_1's flag, sh2
+        # drives eps_2's. Absent variable -> zeros (no QC penalty).
+        despike_frac_var = f"{name}_despike_frac"
+        if despike_frac_var in ds:
+            despike_frac = ds[despike_frac_var].values
+        else:
+            despike_frac = np.zeros(eps.size, dtype="f4")
+        qc = _compose_qc(eps, fm, speed_bad, despike_frac, config)
         qc_var = f"eps_{probe_num}_qc"
         ds[qc_var] = ("time", qc)
         ds[qc_var].attrs = {
@@ -1176,8 +1206,11 @@ def _attach_epsilon(
             "valid_min": np.int8(0),
             "valid_max": np.int8(9),
             "comment": (
-                f"Composed from speed (min_speed={config.min_speed} m/s) and "
-                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad})."
+                f"Composed from speed (min_speed={config.min_speed} m/s), "
+                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
+                f"and {name}_despike_frac "
+                f"(questionable>{config.despike_frac_questionable}, "
+                f"bad>{config.despike_frac_bad})."
             ),
         }
 
