@@ -553,7 +553,7 @@ def _bin_single_profile(
 
         return ds_binned
 
-    except Exception as e:
+    except Exception:
         _log.error(f"Error binning {file}, skipping.")
         return None
 
