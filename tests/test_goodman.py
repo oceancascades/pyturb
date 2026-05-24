@@ -9,12 +9,11 @@ from pyturb._pfile import to_xarray
 from pyturb.pfile import load_pfile_phys
 from pyturb.profile import ProfileConfig, process_profile
 from pyturb.shear import (
-    clean_shear_spec,
     estimate_epsilon,
     nasmyth_spectrum,
     single_pole_correction,
 )
-from pyturb.signal import window_psd
+from pyturb.signal import clean_spec, window_psd
 
 
 def _tone(t: np.ndarray, f: float, amp: float, phase: float = 0.0) -> np.ndarray:
@@ -90,7 +89,7 @@ class TestGoodmanSyntheticTones:
 
         freq_raw, psd_raw = window_psd(shear_contam, fs, n_fft, n_diss)
         _, psd_base = window_psd(shear_base, fs, n_fft, n_diss)
-        freq_clean, psd_clean = clean_shear_spec(
+        freq_clean, psd_clean = clean_spec(
             shear_contam,
             accel,
             n_fft,
@@ -126,14 +125,14 @@ class TestGoodmanSyntheticTones:
         shear = _tone(t, 20.0, 0.2)
         accel = np.column_stack([_tone(t, 20.0, 1.0), _tone(t, 40.0, 1.0)])
 
-        freq, psd = clean_shear_spec(shear, accel, n_fft, fs, n_diss)
+        freq, psd = clean_spec(shear, accel, n_fft, fs, n_diss)
         assert freq.ndim == 1
         assert psd.ndim == 2
         assert psd.shape[1] == n_fft // 2 + 1
         assert np.all(psd >= 0)
 
         with pytest.raises(ValueError, match="same number of rows"):
-            clean_shear_spec(shear[:-1], accel, n_fft, fs, n_diss)
+            clean_spec(shear[:-1], accel, n_fft, fs, n_diss)
 
 
 class TestGoodmanSyntheticNasmyth:
@@ -182,7 +181,7 @@ class TestGoodmanSyntheticNasmyth:
 
         freq_raw, psd_raw = window_psd(shear_contam, fs, n_fft, n_diss)
         _, psd_base = window_psd(shear_base, fs, n_fft, n_diss)
-        freq_clean, psd_clean = clean_shear_spec(shear_contam, accel, n_fft, fs, n_diss)
+        freq_clean, psd_clean = clean_spec(shear_contam, accel, n_fft, fs, n_diss)
 
         mean_raw = psd_raw.mean(axis=0)
         mean_base = psd_base.mean(axis=0)

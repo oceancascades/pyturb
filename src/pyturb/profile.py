@@ -11,8 +11,8 @@ import xarray as xr
 import yaml
 from profinder import find_profiles  # type: ignore[import]
 
-from .shear import clean_shear_spec, estimate_epsilon
-from .signal import despike, window_mean, window_psd
+from .shear import estimate_epsilon
+from .signal import clean_spec, despike, window_mean, window_psd
 from .viscosity import viscosity
 
 _log = logging.getLogger(__name__)
@@ -1072,7 +1072,7 @@ def _compute_shear_spectra_with_cleaning(
                 shear_data = np.column_stack(
                     [ds[f"{p}_clean"].values for p in avail_shear]
                 )
-                freq_clean, clean_psd = clean_shear_spec(
+                freq_clean, clean_psd = clean_spec(
                     shear_data,
                     accel_data,
                     params["n_fft"],

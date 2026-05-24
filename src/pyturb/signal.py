@@ -1,11 +1,14 @@
 # Methods for signal processing, including despiking, power spectra and windowed means
 
+import logging
 from typing import Optional
 
 import numpy as np
 import scipy.signal as sig
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import ArrayLike, NDArray
+
+_log = logging.getLogger(__name__)
 
 
 def _despike_once(
@@ -196,3 +199,186 @@ def window_psd(y: ArrayLike, fs: float, n_fft: int, n_diss: int, window: str = "
     PSD = PSD.reshape(-1, ffts_per_diss, PSD.shape[1]).mean(axis=1)
 
     return freq, PSD
+
+
+def clean_spec(
+    y: np.ndarray,
+    y_c: np.ndarray,
+    n_fft: int,
+    fs: float,
+    n_diss: int,
+    window: str = "hann",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Remove coherent contamination from spectra via the Goodman method.
+
+    Given a time series ``y`` and one or more reference (coherent / correlated)
+    signals ``y_c``, this returns the auto-spectra of ``y`` with the portion
+    coherent with ``y_c`` subtracted in the cross-spectral domain. The classic
+    use case is removing accelerometer- or EM-current-coherent vibration from
+    shear-probe spectra, but the algorithm is general: any reference signals
+    expected to share linear, coherent power with ``y`` can be used.
+
+    Operates entirely in the spectral domain. Computes ensemble-averaged
+    cross-spectral matrices over the FFT segments within each dissipation
+    window and applies the Lueck/Goodman correction
+    ``clean(YY) = YY - YC @ inv(CC) @ YC^H`` per (window, frequency) bin.
+    A bias correction (RSI Technical Note 61) is then applied to compensate
+    for the reduction in effective degrees of freedom.
+
+    Parameters
+    ----------
+    y : ndarray, shape (N,) or (N, n_y)
+        Time series to be cleaned. Each column is an independent channel.
+    y_c : ndarray, shape (N,) or (N, n_c)
+        Reference time series carrying the coherent component to remove.
+        Each column is one reference (e.g. one accelerometer axis or one
+        EM-current component).
+    n_fft : int
+        FFT segment length (must be even).
+    fs : float
+        Sampling rate (Hz).
+    n_diss : int
+        Dissipation-window length in samples (must be a multiple of n_fft).
+    window : str, optional
+        Window function name (default ``"hann"``).
+
+    Returns
+    -------
+    freq : ndarray, shape (n_fft // 2 + 1,)
+        Frequency vector (Hz).
+    clean_psd : ndarray, shape (n_windows, n_y, n_fft // 2 + 1)
+        Cleaned auto-spectra of ``y`` averaged over dissipation windows. If
+        ``y`` has a single channel the channel axis is squeezed out, leaving
+        shape ``(n_windows, n_fft // 2 + 1)``.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    y_c = np.asarray(y_c, dtype=np.float64)
+
+    if y.ndim == 1:
+        y = y[:, np.newaxis]
+    if y_c.ndim == 1:
+        y_c = y_c[:, np.newaxis]
+    if y.shape[0] != y_c.shape[0]:
+        raise ValueError("y and y_c must have the same number of rows")
+
+    n_y = y.shape[1]
+    n_c = y_c.shape[1]
+    fft_overlap = n_fft // 2
+    n_freq = n_fft // 2 + 1
+    step = n_fft - fft_overlap
+
+    # Build window and normalisation factor
+    win = sig.windows.get_window(window, n_fft).astype(np.float64)
+    norm = np.sum(win**2) * fs  # power-spectrum normalisation
+
+    # ------------------------------------------------------------------
+    # Segment all channels using sliding_window_view
+    # sliding_window_view with axis=0 on (N, n_ch) gives (n_seg, n_ch, n_fft)
+    # We transpose to (n_seg, n_fft, n_ch) for consistent downstream use.
+    # ------------------------------------------------------------------
+    y_segs = np.array(
+        sliding_window_view(y, n_fft, axis=0)[::step], dtype=np.float64
+    ).transpose(0, 2, 1)
+    yc_segs = np.array(
+        sliding_window_view(y_c, n_fft, axis=0)[::step], dtype=np.float64
+    ).transpose(0, 2, 1)
+
+    # Apply window: (n_seg, n_fft, n_ch) * (n_fft,)
+    y_segs *= win[np.newaxis, :, np.newaxis]
+    yc_segs *= win[np.newaxis, :, np.newaxis]
+
+    # Linear detrend each segment (matches MATLAB 'linear' method)
+    x = np.linspace(0.0, 1.0, n_fft, dtype=np.float64)
+    xm = x - x.mean()
+    xm_ss = np.dot(xm, xm)  # sum of squares
+    for segs in (y_segs, yc_segs):
+        # segs: (n_seg, n_fft, n_ch)
+        mean_y = segs.mean(axis=1, keepdims=True)
+        slope = np.einsum("stc,t->sc", segs, xm) / xm_ss
+        segs -= mean_y + slope[:, np.newaxis, :] * xm[np.newaxis, :, np.newaxis]
+
+    # One-sided FFT: (n_seg, n_freq, n_ch)
+    Y = np.fft.rfft(y_segs, axis=1)
+    C = np.fft.rfft(yc_segs, axis=1)
+
+    # ------------------------------------------------------------------
+    # Group FFT segments into dissipation windows and build ensemble-
+    # averaged cross-spectral matrices.
+    # ------------------------------------------------------------------
+    ffts_per_diss = (n_diss - fft_overlap) // step
+    n_seg_total = Y.shape[0]
+    n_windows = n_seg_total // ffts_per_diss
+
+    # Trim to exact number of complete dissipation windows
+    n_seg_used = n_windows * ffts_per_diss
+    Y = Y[:n_seg_used].reshape(n_windows, ffts_per_diss, n_freq, n_y)
+    C = C[:n_seg_used].reshape(n_windows, ffts_per_diss, n_freq, n_c)
+
+    # Scale factor for one-sided spectrum (×2), then halve DC and Nyquist
+    scale = 2.0 / norm
+
+    # Cross-spectral matrices averaged over segments within each window
+    # Axes: w=window, s=segment, f=freq, i/j=channel
+    # YY: (n_windows, n_freq, n_y, n_y)
+    YY = scale * np.einsum("wsfi,wsfj->wfij", Y, Y.conj()) / ffts_per_diss
+    CC = scale * np.einsum("wsfi,wsfj->wfij", C, C.conj()) / ffts_per_diss
+    YC = scale * np.einsum("wsfi,wsfj->wfij", Y, C.conj()) / ffts_per_diss
+
+    # Fix DC and Nyquist (should not be doubled)
+    for M in (YY, CC, YC):
+        M[:, 0, :, :] *= 0.5
+        M[:, -1, :, :] *= 0.5
+
+    # ------------------------------------------------------------------
+    # Goodman cleaning: clean_YY = YY - YC @ inv(CC) @ YC^H
+    # Solve via np.linalg.solve for numerical stability.
+    # CC @ X = YC^H  =>  X = inv(CC) @ YC^H
+    # Then  clean_YY = YY - YC @ X
+    # ------------------------------------------------------------------
+    # YC^H: (w, f, n_c, n_y) — conjugate transpose of last two axes
+    YC_H = np.conj(np.swapaxes(YC, -2, -1))
+
+    # Solve CC @ X = YC_H for X: (w, f, n_c, n_y)
+    # In low-signal or perfectly coherent synthetic cases, CC can be singular
+    # at some (window, frequency) bins. Fall back to pseudo-inverse so the
+    # cleaner remains numerically robust across platforms/LAPACK builds.
+    try:
+        X = np.linalg.solve(CC, YC_H)
+    except np.linalg.LinAlgError:
+        _log.debug("Goodman solve encountered singular CC; using pinv fallback")
+        CC_pinv = np.linalg.pinv(CC)
+        X = np.einsum("wfij,wfjk->wfik", CC_pinv, YC_H)
+
+    # Correction: YC @ X  -> (w, f, n_y, n_y)
+    correction = np.einsum("wfij,wfjk->wfik", YC, X)
+
+    clean_YY = YY - correction
+
+    # Take real part of the diagonal (auto-spectra)
+    # clean_YY[..., i, i] for each channel of y
+    clean_psd = np.real(
+        np.diagonal(clean_YY, axis1=-2, axis2=-1)
+    ).copy()  # (n_windows, n_freq, n_y)
+
+    # ------------------------------------------------------------------
+    # Bias correction (RSI Technical Note 61)
+    # R = 1 / (1 - 1.02 * n_references / n_fft_segments)
+    # ------------------------------------------------------------------
+    n_segments = ffts_per_diss
+    R = 1.0 / (1.0 - 1.02 * n_c / n_segments)
+    clean_psd *= R
+
+    # Ensure non-negative (numerical noise can cause tiny negatives)
+    np.maximum(clean_psd, 0.0, out=clean_psd)
+
+    # Frequency vector
+    freq = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+
+    # Transpose to (n_windows, n_y, n_freq) for consistency with
+    # how callers store spectra per channel.
+    clean_psd = np.moveaxis(clean_psd, -1, 1)
+
+    if n_y == 1:
+        clean_psd = clean_psd[:, 0, :]  # squeeze single-channel axis
+
+    return freq, clean_psd
