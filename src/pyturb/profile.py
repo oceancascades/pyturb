@@ -68,6 +68,13 @@ class ProfileConfig:
     min_speed: float = (
         0.2  # Speed below which a window's epsilon is QC-flagged questionable
     )
+    # FM (figure of merit) thresholds for per-window QC.
+    # FM = mad(log10(spectrum / Nasmyth)) * sqrt(dof_spec). Low FM = good
+    # Nasmyth-shaped spectrum. FM <= fm_good -> qc=1 (good);
+    # fm_good < FM <= fm_bad -> qc=2 (questionable); FM > fm_bad -> qc=4 (bad).
+    # Speed-based and FM-based QC are combined by taking the higher flag.
+    fm_good: float = 1.5
+    fm_bad: float = 2.5
 
     # === Default values for missing data ===
     default_temperature: float = 10.0
@@ -754,8 +761,8 @@ def compute_epsilon(
     spectra: dict[str, np.ndarray],
     speed: np.ndarray,
     nu: np.ndarray,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Compute epsilon for each shear probe spectrum."""
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Compute (epsilon, k_max, mad) for each shear probe spectrum."""
     results = {}
 
     for name, psd in spectra.items():
@@ -765,11 +772,14 @@ def compute_epsilon(
         n_windows = psd.shape[0]
         eps = np.full(n_windows, np.nan)
         k_max = np.full(n_windows, np.nan)
+        mad = np.full(n_windows, np.nan)
 
         for i in range(n_windows):
-            eps[i], k_max[i] = estimate_epsilon(frequency, psd[i], W=speed[i], nu=nu[i])
+            eps[i], k_max[i], mad[i] = estimate_epsilon(
+                frequency, psd[i], W=speed[i], nu=nu[i]
+            )
 
-        results[name] = (eps, k_max)
+        results[name] = (eps, k_max, mad)
 
     return results
 
@@ -1085,35 +1095,95 @@ _QC_FLAG_VALUES = np.array([0, 1, 2, 4, 9], dtype="i1")
 _QC_FLAG_MEANINGS = "unknown good questionable bad missing"
 
 
+def _dof_spec(params: dict) -> float:
+    """Spectral degrees of freedom per Nuttall (1971) for 50%% FFT overlap.
+
+    ``num_of_ffts = 2 * (n_diss // n_fft) - 1`` (matches ODAS get_diss_odas)
+    and ``dof_spec = 1.9 * num_of_ffts``. Constant for a given dissipation
+    window / FFT length, hence independent of probe and window index.
+    """
+    n_fft = params["n_fft"]
+    n_diss = params["n_diss"]
+    num_of_ffts = 2 * (n_diss // n_fft) - 1
+    return 1.9 * num_of_ffts
+
+
+def _compose_qc(
+    eps: np.ndarray, fm: np.ndarray, speed_bad: np.ndarray, config: ProfileConfig
+) -> np.ndarray:
+    """Combine speed-based and FM-based QC into an IODE flag per window.
+
+    Precedence (max wins, then NaN-eps overrides as 9):
+      * FM <= fm_good  -> 1 (good)
+      * fm_good < FM <= fm_bad  -> 2 (questionable)
+      * FM > fm_bad  -> 4 (bad)
+      * speed below min_speed  -> 2 (questionable)
+      * eps NaN  -> 9 (missing), overrides all the above
+    """
+    qc_speed = np.zeros(eps.size, dtype="i1")
+    qc_speed[speed_bad] = 2
+
+    qc_fm = np.zeros(eps.size, dtype="i1")
+    # Comparisons against NaN are False, so FM=NaN leaves qc_fm at 0 (unknown).
+    qc_fm[fm <= config.fm_good] = 1
+    qc_fm[(fm > config.fm_good) & (fm <= config.fm_bad)] = 2
+    qc_fm[fm > config.fm_bad] = 4
+
+    qc = np.maximum(qc_speed, qc_fm)
+    qc[np.isnan(eps)] = 9
+    return qc
+
+
 def _attach_epsilon(
     ds: xr.Dataset,
     freq: np.ndarray,
     spectra: dict[str, np.ndarray],
     config: ProfileConfig,
+    params: dict,
 ) -> xr.Dataset:
-    """Attach per-probe epsilon, k_max, wavenumber ``k``, and QC flags.
+    """Attach per-probe epsilon, k_max, FM, wavenumber ``k``, and QC flags.
 
     QC convention (IODE): 0=unknown, 1=good, 2=questionable, 4=bad, 9=missing.
-    Flags start at 0 and are raised to 2 where the window-mean speed ``W``
-    falls below ``config.min_speed`` — epsilon is still computed in those
-    windows, but at speeds below the probe's normal operating range.
+    Two contributions are folded together (see ``_compose_qc``):
+
+      * Window-mean speed below ``config.min_speed`` raises the flag to 2.
+      * FM = mad * sqrt(dof_spec) is the spectrum-vs-Nasmyth fit residual
+        (low = trustworthy). It promotes flags to 1/2/4 against the two
+        ``config.fm_good``/``config.fm_bad`` thresholds.
     """
     epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
-    qc_base = np.zeros(ds["W"].size, dtype="i1")
-    qc_base[ds["W"].values < config.min_speed] = 2
+    sqrt_dof = float(np.sqrt(_dof_spec(params)))
+    W = ds["W"].values
+    speed_bad = W < config.min_speed
 
-    for name, (eps, k_max) in epsilon_results.items():
+    for name, (eps, k_max, mad) in epsilon_results.items():
         probe_num = name[-1]
+        fm = mad * sqrt_dof
         ds[f"eps_{probe_num}"] = ("time", eps.astype("f4"))
         ds[f"k_max_{probe_num}"] = ("time", k_max.astype("f4"))
+        ds[f"eps_{probe_num}_fm"] = ("time", fm.astype("f4"))
+        ds[f"eps_{probe_num}_fm"].attrs = {
+            "long_name": f"Figure of merit for eps_{probe_num} Nasmyth fit",
+            "units": "1",
+            "comment": (
+                "FM = mean(|log10(P_sh / Nasmyth)|) * sqrt(dof_spec) over the "
+                "fit wavenumber band. Lower is better; independent of "
+                "fft/diss window length. NaN if the fit band was too narrow."
+            ),
+        }
+        qc = _compose_qc(eps, fm, speed_bad, config)
         qc_var = f"eps_{probe_num}_qc"
-        ds[qc_var] = ("time", qc_base.copy())
+        ds[qc_var] = ("time", qc)
         ds[qc_var].attrs = {
             "long_name": f"QC flag for eps_{probe_num}",
             "flag_values": _QC_FLAG_VALUES,
             "flag_meanings": _QC_FLAG_MEANINGS,
             "valid_min": np.int8(0),
             "valid_max": np.int8(9),
+            "comment": (
+                f"Composed from speed (min_speed={config.min_speed} m/s) and "
+                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad})."
+            ),
         }
 
     ds["k"] = ds.frequency / ds.W
@@ -1148,4 +1218,4 @@ def process_profile(
     ds, params = _preprocess_for_spectra(ds, config)
     ds = _attach_window_scalars(ds, params, config)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
-    return _attach_epsilon(ds, freq, spectra, config)
+    return _attach_epsilon(ds, freq, spectra, config, params)
