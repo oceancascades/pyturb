@@ -481,7 +481,7 @@ def eps(
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
 
-    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS) or {}
+    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS)
     cfg_kwargs: dict = dict(
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,
@@ -498,13 +498,18 @@ def eps(
         aux_temperature=aux_temp,
         aux_salinity=aux_sal,
         aux_density=aux_dens,
-        despike_max_passes=despike_opts.get("passes", 6),
-        despike_thresh=despike_opts.get("thresh", 8.0),
-        despike_smooth=despike_opts.get("smooth", 0.5),
-        despike_replace_sec=despike_opts.get("replace_sec", 0.04),
         accel_clean=accel_clean,
         emc_clean=emc_clean,
     )
+    # Only override the despike defaults — and force re-despike — when the
+    # user explicitly passed --despike. Otherwise embedded <probe>_clean
+    # vars from p2nc flow through untouched.
+    if despike_opts is not None:
+        cfg_kwargs["despike_max_passes"] = despike_opts["passes"]
+        cfg_kwargs["despike_thresh"] = despike_opts["thresh"]
+        cfg_kwargs["despike_smooth"] = despike_opts["smooth"]
+        cfg_kwargs["despike_replace_sec"] = despike_opts["replace_sec"]
+        cfg_kwargs["force_despike"] = True
     peaks_kwargs = _parse_input_list(peaks, "peaks", _PEAKS_FIELDS)
     if peaks_kwargs is not None:
         cfg_kwargs["peaks_kwargs"] = peaks_kwargs

@@ -95,6 +95,10 @@ class ProfileConfig:
     )
     despike_smooth: float = 0.5  # Low-pass cutoff for the spike envelope (Hz)
     despike_replace_sec: float = 0.04  # Replacement window around each spike (seconds)
+    # When True, embedded <probe>_clean / <probe>_despike_mask variables in the
+    # input file are discarded and despiking is re-run with the params above.
+    # CLI sets this only when the user explicitly passes --despike to `eps`.
+    force_despike: bool = False
 
     accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
     emc_clean: bool = (
@@ -788,70 +792,25 @@ def _window_mean_slow(x: np.ndarray, params: dict) -> np.ndarray:
     )
 
 
-def _reconcile_pre_cleaned_signals(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Compare embedded despike params against ``config`` and act accordingly.
+def _drop_embedded_clean(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Drop any ``<probe>_clean`` / ``<probe>_despike_mask`` variables.
 
-    When ``p2nc --despike`` produced the input, the source ``ds`` carries
-    ``<probe>_clean`` / ``<probe>_despike_mask`` variables plus four
-    ``despike_*`` global attrs. Three outcomes:
-
-      * **params match** — keep embedded signals (despike_variables will skip).
-      * **params differ** — drop embedded signals so despike_variables
-        recomputes with the requested params; log INFO.
-      * **clean present but no recorded params** — log WARNING, leave
-        embedded in place (cannot verify provenance).
+    Used when ``config.force_despike`` is True so the subsequent
+    ``despike_variables`` call recomputes from raw with the requested params.
+    No-op (and no log) when nothing is embedded.
     """
-    has_clean = any(f"{p}_clean" in ds for p in config.all_probes)
-    if not has_clean:
+    drop = [
+        name
+        for probe in config.all_probes
+        for name in (f"{probe}_clean", despike_mask_name(probe))
+        if name in ds
+    ]
+    if not drop:
         return ds
-
-    embedded = {
-        "passes": ds.attrs.get("despike_passes"),
-        "thresh": ds.attrs.get("despike_thresh"),
-        "smooth": ds.attrs.get("despike_smooth"),
-        "replace_sec": ds.attrs.get("despike_replace_sec"),
-    }
-    if all(v is None for v in embedded.values()):
-        _log.warning(
-            "Pre-cleaned probe signals present but no despike parameters "
-            "recorded in source file; using as-is (cannot verify provenance)."
-        )
-        return ds
-
-    requested = {
-        "passes": config.despike_max_passes,
-        "thresh": config.despike_thresh,
-        "smooth": config.despike_smooth,
-        "replace_sec": config.despike_replace_sec,
-    }
-
-    # passes is an int (compared exactly); the three float params get
-    # np.isclose to absorb any numpy <-> python round-trip noise.
-    def _match(key: str) -> bool:
-        e, r = embedded[key], requested[key]
-        if e is None:
-            return False
-        if key == "passes":
-            return int(e) == int(r)
-        return bool(np.isclose(float(e), float(r)))
-
-    if all(_match(k) for k in requested):
-        _log.info(
-            "Using pre-cleaned probe signals from source file (despike params match)."
-        )
-        return ds
-
     _log.info(
-        "Re-despiking: source file has (%s) but eps requested (%s); "
-        "dropping embedded clean/mask variables and recomputing.",
-        ", ".join(f"{k}={embedded[k]}" for k in requested),
-        ", ".join(f"{k}={requested[k]}" for k in requested),
+        "Dropping embedded despike output (%s) to honour --despike re-clean request.",
+        ", ".join(drop),
     )
-    drop = []
-    for probe in config.all_probes:
-        for name in (f"{probe}_clean", despike_mask_name(probe)):
-            if name in ds:
-                drop.append(name)
     return ds.drop_vars(drop)
 
 
@@ -866,7 +825,8 @@ def _preprocess_for_spectra(
         _log.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
 
-    ds = _reconcile_pre_cleaned_signals(ds, config)
+    if config.force_despike:
+        ds = _drop_embedded_clean(ds, config)
     ds = despike_variables(
         ds,
         config.all_probes,
