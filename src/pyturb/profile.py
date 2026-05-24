@@ -786,16 +786,6 @@ def compute_window_means(
     return result
 
 
-def compute_viscosity(
-    temperature: np.ndarray,
-    salinity: float = 35.0,
-    density: float = 1025.0,
-) -> np.ndarray:
-    """Compute kinematic viscosity from temperature."""
-    nu, _ = viscosity(salinity, temperature, density)
-    return nu
-
-
 def compute_spectra(
     ds: xr.Dataset,
     variables: tuple[str, ...],
@@ -1012,7 +1002,8 @@ def _attach_window_scalars(
     else:
         ds["temperature"] = ("time", T_mean.astype("f4"))
 
-    ds["nu"] = ("time", compute_viscosity(T_visc, S_mean, rho_mean).astype("f4"))
+    nu, _ = viscosity(S_mean, T_visc, rho_mean)
+    ds["nu"] = ("time", nu.astype("f4"))
 
     if "aux_latitude" in ds:
         ds["lat"] = (
