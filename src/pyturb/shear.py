@@ -158,6 +158,31 @@ def polynomial_spectral_min_search(k: np.ndarray, phi: np.ndarray, fit_order: in
         raise RuntimeError("Not enough points for polynomial fit")
 
 
+def _mad_vs_nasmyth(
+    k: np.ndarray,
+    phi: np.ndarray,
+    eps: float,
+    nu: float,
+    fit_mask: np.ndarray,
+) -> float:
+    """Mean absolute deviation (MAD) in log10 space between spectrum and Nasmyth model.
+
+    Computed over the bins flagged by ``fit_mask`` after skipping the lowest
+    one. Returns NaN if fewer than 2 bins remain or if the data /
+    model are non-positive everywhere in the band.
+    """
+    fit_idx = np.where(fit_mask)[0]
+    if fit_idx.size < 2:
+        return float("nan")
+    idx = fit_idx[1:]  # skip lowest k in the fit range
+    nas = nasmyth_spectrum(k[idx], eps, nu)
+    spec = phi[idx]
+    valid = (spec > 0) & (nas > 0) & np.isfinite(spec) & np.isfinite(nas)
+    if not valid.any():
+        return float("nan")
+    return float(np.mean(np.abs(np.log10(spec[valid] / nas[valid]))))
+
+
 def estimate_epsilon(
     f: np.ndarray,
     P_f: np.ndarray,
@@ -168,25 +193,32 @@ def estimate_epsilon(
     fit_order: int = 3,
     is_wavenumber: bool = False,
     apply_single_pole_correction: bool = True,
-) -> tuple[float, float]:
-    """
-    Estimate epsilon from one shear spectrum.
+) -> tuple[float, float, float]:
+    """Estimate epsilon and the mean absolute deviation (MAD) from one shear spectrum.
 
     Inputs
+    ------
     f    : frequency vector (Hz), length N
     P_f  : shear auto-spectrum (shear^2 / Hz), length N
     W    : mean speed (m/s)
     nu   : kinematic viscosity (m^2/s)
     f_AA : anti-alias cutoff (Hz)
     e_isr_threshold : threshold to switch to inertial-subrange fitting
-    fit_order : polynomial order (3–8) for spectral-min search
+    fit_order : polynomial order (3-8) for spectral-min search
     is_wavenumber : if True, input f is already in wavenumber domain (cpm) and
         spectra are in wavenumber too (corrected by a velocity).
     apply_single_pole_correction : if True, apply single pole correction to spectrum
 
-
     Returns
-    epsilon, K_max_used
+    -------
+    epsilon : float
+        Dissipation rate (W/kg).
+    K_max_used : float
+        Upper wavenumber of the integration band (cpm).
+    mad : float
+        Mean absolute deviation in log10 of the observed shear spectrum from
+        the fitted Nasmyth model over the integration band (NaN if the band
+        is too narrow).
     """
 
     # Convert to wavenumber domain
@@ -217,8 +249,11 @@ def estimate_epsilon(
     if e_1 >= e_isr_threshold:
         # Direct inertial-subrange method - return fit result directly
         # (no additional variance corrections; ISR fit is self-consistent)
-        eps_fit, k_max, _ = inertial_subrange_fit(k, phi, e_1, nu, min(150.0, k_AA))
-        return eps_fit, k_max
+        eps_fit, k_max, fit_mask = inertial_subrange_fit(
+            k, phi, e_1, nu, min(150.0, k_AA)
+        )
+        mad = _mad_vs_nasmyth(k, phi, eps_fit, nu, fit_mask)
+        return eps_fit, k_max, mad
 
     # If the first guess is low we undertake a more thorough fitting procedure
     # If there are enough points in the inertial subrange with refine the initial guess
@@ -275,4 +310,5 @@ def estimate_epsilon(
         else:
             eps_adj = eps_low
 
-    return eps_adj, k_range[-1]
+    mad = _mad_vs_nasmyth(k, phi, eps_adj, nu, range_mask & (k > 0))
+    return eps_adj, k_range[-1], mad

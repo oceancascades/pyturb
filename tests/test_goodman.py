@@ -204,9 +204,9 @@ class TestGoodmanSyntheticNasmyth:
         # cleaned full-band fit should improve.
         contamination_strength = np.sum(raw_excesses) / np.sum(base_levels)
 
-        eps_base, _ = estimate_epsilon(freq_clean, mean_base, W=W, nu=nu)
-        eps_raw, _ = estimate_epsilon(freq_raw, mean_raw, W=W, nu=nu)
-        eps_clean, _ = estimate_epsilon(freq_clean, mean_clean, W=W, nu=nu)
+        eps_base, _, _ = estimate_epsilon(freq_clean, mean_base, W=W, nu=nu)
+        eps_raw, _, _ = estimate_epsilon(freq_raw, mean_raw, W=W, nu=nu)
+        eps_clean, _, _ = estimate_epsilon(freq_clean, mean_clean, W=W, nu=nu)
 
         if contamination_strength > 1.0 and eps_true <= 1e-7:
             band = (freq_raw >= 5.0) & (freq_raw <= 120.0)

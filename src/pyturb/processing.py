@@ -470,6 +470,8 @@ def bin_profiles(
         variables = [
             "eps_1",
             "eps_2",
+            "eps_1_fm",
+            "eps_2_fm",
             "eps_1_qc",
             "eps_2_qc",
             "sh1_despike_frac",
