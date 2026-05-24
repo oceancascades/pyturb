@@ -1077,16 +1077,9 @@ def _compute_shear_spectra_with_cleaning(
                 ", ".join(requested),
             )
 
-    # Convert raw-probe spectra to physical-gradient spectra using the
-    # per-window mean speed. PSDs scale as the square of the time-domain
-    # signal, so shear (s(t) = raw / U^2) gets PSD / W^4 and gradT
-    # (g(t) = raw / U) gets PSD / W^2. Done per window rather than
-    # sample-by-sample so the velocity factor is the window-mean — this
-    # matches the dissipation estimator's assumption of stationary speed
-    # across each window and keeps the despike step on stationary raw signals.
-    W = ds["W"].values
+    # Convert spectra so that they represent shear variance [s-2/Hz]
     with np.errstate(divide="ignore", invalid="ignore"):
-        inv_W2 = 1.0 / (W * W)
+        inv_W2 = 1 / ds["W"].values**2
         inv_W4 = inv_W2 * inv_W2
     for name in list(spectra):
         if name in config.shear_probes:
