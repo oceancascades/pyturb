@@ -12,7 +12,13 @@ import yaml
 from profinder import find_profiles  # type: ignore[import]
 
 from .shear import estimate_epsilon
-from .signal import clean_spec, despike, window_mean, window_psd
+from .signal import (
+    clean_spec,
+    despike_mask_name,
+    despike_variables,
+    window_mean,
+    window_psd,
+)
 from .viscosity import viscosity
 
 _log = logging.getLogger(__name__)
@@ -362,52 +368,6 @@ def prepare_profile(
 
         # Speed is already smoothed in estimate_speed_from_pressure
         ds[config.speed_smooth] = ("t_slow", speed_est)
-
-    return ds
-
-
-_DESPIKE_MASK_PREFIX = "_despike_mask_"
-
-
-def despike_variables(
-    ds: xr.Dataset,
-    variables: tuple[str, ...],
-    fs: float,
-    suffix: str = "_clean",
-    max_passes: int = 6,
-    thresh: float = 8.0,
-    smooth: float = 0.5,
-    replace_sec: float = 0.04,
-) -> xr.Dataset:
-    """Despike specified variables, creating cleaned versions and per-sample masks.
-
-    For each present ``var`` this adds:
-      - ``var + suffix`` (default ``"_clean"``) on ``t_fast`` with the cleaned signal.
-      - ``_despike_mask_<var>`` on ``t_fast`` — boolean mask of samples that were
-        modified. Used downstream to compute per-window despike fractions; the
-        leading underscore marks it as scratch and keeps it out of the on-disk
-        output (the writer filters to ``time``-dim vars).
-
-    ``replace_sec`` is the spike replacement window in seconds; converted to
-    samples here as ``int(replace_sec * fs)`` for the underlying ``despike``.
-    """
-    ds = ds.copy()
-    n_samples = int(replace_sec * fs)
-
-    for var in variables:
-        if var not in ds:
-            continue
-        original = ds[var].values
-        cleaned, _, _, _ = despike(
-            original,
-            thresh=thresh,
-            smooth=smooth,
-            fs=fs,
-            n=n_samples,
-            max_passes=max_passes,
-        )
-        ds[var + suffix] = ("t_fast", cleaned)
-        ds[_DESPIKE_MASK_PREFIX + var] = ("t_fast", cleaned != original)
 
     return ds
 
@@ -999,7 +959,7 @@ def _attach_window_scalars(
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]
     for probe in config.all_probes:
-        mask_name = _DESPIKE_MASK_PREFIX + probe
+        mask_name = despike_mask_name(probe)
         if mask_name not in ds:
             continue
         frac = window_mean(ds[mask_name].values.astype("f4"), n_fft, n_diss)

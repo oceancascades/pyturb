@@ -147,6 +147,20 @@ def p2nc(
             show_default=True,
         ),
     ] = False,
+    despike: Annotated[
+        Optional[str],
+        typer.Option(
+            "--despike",
+            help=(
+                "Pre-despike shear (sh1, sh2) and gradT (gradT1, gradT2) signals "
+                "during conversion. Same format as 'pyturb eps --despike': "
+                "passes,thresh,smooth,replace_sec. Adds <probe>_clean and "
+                "<probe>_despike_mask variables to the NetCDF, plus the four "
+                "parameters as global attrs. The eps subcommand will detect the "
+                "pre-cleaned signals and skip its own despike pass."
+            ),
+        ),
+    ] = None,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input P-files (supports shell globs)"),
@@ -157,10 +171,13 @@ def p2nc(
     Examples:
         pyturb p2nc ./data/*.p -o ./output
         pyturb p2nc file1.p file2.p file3.p
+        pyturb p2nc ./data/*.p -o ./out --despike 6,8,0.5,0.04
     """
     if not input_files:
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
+
+    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS)
 
     batch_convert_to_netcdf(
         files=input_files,
@@ -170,6 +187,7 @@ def p2nc(
         n_workers=n_workers,
         min_file_size=min_file_size,
         overwrite=overwrite,
+        despike_kwargs=despike_opts,
     )
 
 

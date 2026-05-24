@@ -25,6 +25,10 @@ from ._pfile import (
     read_pfile,
     to_xarray,
 )
+from .signal import despike_variables
+
+# Probes that p2nc will optionally pre-despike. Matches ProfileConfig defaults.
+_DESPIKE_PROBES = ("sh1", "sh2", "gradT1", "gradT2")
 
 _log = logging.getLogger(__name__)
 
@@ -115,6 +119,7 @@ def save_netcdf(
     compress: bool = False,
     compression_level: int = 4,
     overwrite: bool = False,
+    despike_kwargs: Optional[Dict] = None,
 ) -> None:
     """
     Save P-file data to a CF-compliant NetCDF file.
@@ -165,6 +170,26 @@ def save_netcdf(
 
     ds = to_xarray(data, variables=variables)
 
+    if despike_kwargs is not None:
+        fs_fast = float(ds.attrs.get("fs_fast", data.get("fs_fast", 0.0)))
+        if fs_fast <= 0:
+            raise ValueError("fs_fast missing; cannot pre-despike on save_netcdf")
+        ds = despike_variables(
+            ds,
+            _DESPIKE_PROBES,
+            fs=fs_fast,
+            max_passes=despike_kwargs.get("passes", 6),
+            thresh=despike_kwargs.get("thresh", 8.0),
+            smooth=despike_kwargs.get("smooth", 0.5),
+            replace_sec=despike_kwargs.get("replace_sec", 0.04),
+        )
+        # Persist the parameters used so downstream (eps) callers can audit
+        # them via ncdump -h or xarray attrs.
+        ds.attrs["despike_passes"] = int(despike_kwargs.get("passes", 6))
+        ds.attrs["despike_thresh"] = float(despike_kwargs.get("thresh", 8.0))
+        ds.attrs["despike_smooth"] = float(despike_kwargs.get("smooth", 0.5))
+        ds.attrs["despike_replace_sec"] = float(despike_kwargs.get("replace_sec", 0.04))
+
     encoding = {}
     if compress:
         for var in ds.data_vars:
@@ -191,6 +216,7 @@ def _process_single_file(
     compression_level: int,
     exclude_types: Optional[list],
     overwrite: bool,
+    despike_kwargs: Optional[Dict] = None,
 ) -> tuple:
     """Worker function for parallel processing. Returns (input_path, output_path, error)."""
     try:
@@ -203,6 +229,7 @@ def _process_single_file(
             compress=compress,
             compression_level=compression_level,
             overwrite=overwrite,
+            despike_kwargs=despike_kwargs,
         )
         return (pfile_path, output_file, None)
     except Exception as e:
@@ -219,6 +246,7 @@ def batch_convert_to_netcdf(
     n_workers: Optional[int] = None,
     overwrite: bool = False,
     min_file_size: int = 100_000,
+    despike_kwargs: Optional[Dict] = None,
 ) -> None:
     """
     Batch convert multiple P-files to NetCDF using parallel processing.
@@ -342,6 +370,7 @@ def batch_convert_to_netcdf(
             compression_level,
             exclude_types,
             overwrite,
+            despike_kwargs,
         )
         for pf in pfiles
     ]
