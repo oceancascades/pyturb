@@ -334,9 +334,9 @@ def _restore_qc_missing(ds: xr.Dataset, qc_vars: list[str]) -> xr.Dataset:
 def _combine_eps_pair(
     eps1: np.ndarray, eps2: np.ndarray, qc1: np.ndarray, qc2: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Combine two probe estimates into (eps_best, eps_qc).
+    """Combine two probe estimates into (eps, eps_qc).
 
-    eps_best:
+    eps:
       * both finite & within factor of ``_EPS_AGREEMENT_FACTOR`` → mean
       * both finite, disagreement larger → element-wise minimum
       * exactly one finite → that value
@@ -355,7 +355,7 @@ def _combine_eps_pair(
     lo = np.fmin(eps1, eps2)
     within = both & (hi <= _EPS_AGREEMENT_FACTOR * lo)
 
-    eps_best = np.where(
+    eps = np.where(
         within,
         0.5 * (eps1 + eps2),
         np.where(both, lo, np.where(e1_ok, eps1, np.where(e2_ok, eps2, np.nan))),
@@ -367,11 +367,11 @@ def _combine_eps_pair(
     eps_qc[only1] = qc1[only1]
     eps_qc[only2] = qc2[only2]
     eps_qc[both] = np.maximum(qc1[both], qc2[both])
-    return eps_best.astype("f4"), eps_qc
+    return eps.astype("f4"), eps_qc
 
 
 def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
-    """Build ``eps_best`` and ``eps_qc`` from binned ``eps_1``/``eps_2`` (+ QCs).
+    """Build ``eps`` and ``eps_qc`` from binned ``eps_1``/``eps_2`` (+ QCs).
 
     No-op if either probe's eps or QC variable is missing from the dataset.
     """
@@ -382,10 +382,10 @@ def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
     e2 = ds["eps_2"].values
     q1 = ds["eps_1_qc"].values.astype("i1")
     q2 = ds["eps_2_qc"].values.astype("i1")
-    eps_best, eps_qc = _combine_eps_pair(e1, e2, q1, q2)
+    eps, eps_qc = _combine_eps_pair(e1, e2, q1, q2)
     dims = ds["eps_1"].dims
-    ds["eps_best"] = (dims, eps_best)
-    ds["eps_best"].attrs = {
+    ds["eps"] = (dims, eps)
+    ds["eps"].attrs = {
         "long_name": "Best epsilon estimate combined from eps_1 and eps_2",
         "units": "W kg-1",
         "comment": (
@@ -396,7 +396,7 @@ def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
     }
     ds["eps_qc"] = (dims, eps_qc)
     ds["eps_qc"].attrs = {
-        "long_name": "Combined QC flag for eps_best",
+        "long_name": "Combined QC flag for eps",
         "flag_values": np.array([0, 1, 2, 4, 9], dtype="i1"),
         "flag_meanings": "unknown good questionable bad missing",
         "valid_min": np.int8(0),
@@ -522,7 +522,7 @@ def _bin_single_profile(
             # valid IODE flag in {0, 1, 2, 4, 9}.
             ds_binned = _restore_qc_missing(ds_binned, qc_vars)
 
-        # Build combined eps_best / eps_qc from binned probe pair (if present).
+        # Build combined eps / eps_qc from binned probe pair (if present).
         ds_binned = _attach_combined_eps(ds_binned)
 
         # Convert bin intervals to midpoints
