@@ -82,7 +82,6 @@ class ProfileConfig:
 
     # === Processing options ===
     chop_start: bool = True
-    scale_probes: bool = True
     # === Despike parameters (see signal.despike) ===
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
     despike_thresh: float = (
@@ -269,38 +268,36 @@ def prepare_profile(
     ds: xr.Dataset,
     config: Optional[ProfileConfig] = None,
 ) -> xr.Dataset:
-    """
-    Prepare raw p2nc output for epsilon processing.
+    """Prepare raw p2nc output for epsilon processing.
 
-    This function performs the preprocessing needed for data converted via p2nc:
-    1. Low-pass filters the pressure data
-    2. Estimates or smooths the speed variable
-    3. Scales shear by 1/U^2 to convert to du/dz
-    4. Scales temperature gradient by 1/U to convert to dT/dz
+    Performs only the slow-channel preprocessing:
+      1. Low-pass filters the pressure data.
+      2. Smooths the speed variable, or estimates it from pressure if absent.
 
-    If the speed variable (default 'W') is not present in the dataset, speed
-    is estimated from pressure.
+    Probe signals (shear, gradT) are left in their raw calibrated units. The
+    velocity normalisation that converts them to physical gradients is applied
+    later in the spectral domain using the window-mean speed (see
+    ``_compute_shear_spectra_with_cleaning``). Keeping the time series raw
+    means despiking and high-pass filtering operate on stationary signals
+    whose amplitude does not balloon near turnarounds.
 
     Parameters
     ----------
     ds : xr.Dataset
         Raw dataset from p2nc conversion containing:
-        - P on t_slow dimension
-        - Optionally W (speed) on t_slow dimension
-        - Optionally Incl_Y (pitch) on t_slow dimension
-        - sh1, sh2, gradT1, gradT2 on t_fast dimension
-        - fs_slow, fs_fast sampling rates as attributes or variables
+        - ``P`` on ``t_slow``
+        - Optionally ``W`` (speed) on ``t_slow``
+        - Optionally ``Incl_Y`` (pitch) on ``t_slow``
+        - ``sh1``, ``sh2``, ``gradT1``, ``gradT2`` on ``t_fast``
+        - ``fs_slow``, ``fs_fast`` sampling rates as attributes or variables.
     config : ProfileConfig, optional
         Configuration for preprocessing. If None, uses defaults.
 
     Returns
     -------
     xr.Dataset
-        Dataset with:
-        - {speed}_smooth: smoothed or estimated speed
-        - {pressure}_smooth: smoothed pressure
-        - sh1, sh2: scaled by 1/speed^2 (overwrites original)
-        - gradT1, gradT2: scaled by 1/speed (overwrites original)
+        Dataset with two added variables: ``{speed}_smooth`` and
+        ``{pressure}_smooth``. Probe channels are unchanged.
     """
     if config is None:
         config = ProfileConfig()
@@ -365,25 +362,6 @@ def prepare_profile(
 
         # Speed is already smoothed in estimate_speed_from_pressure
         ds[config.speed_smooth] = ("t_slow", speed_est)
-
-    if not config.scale_probes:
-        return ds
-
-    # Interpolate smoothed speed to fast time for scaling
-    interp_kwargs = dict(
-        t_slow=ds.t_fast,
-        method="linear",
-        kwargs={"fill_value": "extrapolate"},
-    )
-    U_fast = ds[config.speed_smooth].interp(**interp_kwargs)
-
-    for probe in config.shear_probes:
-        if probe in ds:
-            ds[probe] = ds[probe] / U_fast**2
-
-    for probe in config.temperature_probes:
-        if probe in ds:
-            ds[probe] = ds[probe] / U_fast
 
     return ds
 
@@ -1098,6 +1076,16 @@ def _compute_shear_spectra_with_cleaning(
                 "found in dataset",
                 ", ".join(requested),
             )
+
+    # Convert spectra so that they represent shear variance [s-2/Hz]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv_W2 = 1 / ds["W"].values ** 2
+        inv_W4 = inv_W2 * inv_W2
+    for name in list(spectra):
+        if name in config.shear_probes:
+            spectra[name] = spectra[name] * inv_W4[:, None]
+        elif name in config.temperature_probes:
+            spectra[name] = spectra[name] * inv_W2[:, None]
 
     ds = ds.assign_coords(frequency=("frequency", freq))
     for name, psd in spectra.items():
