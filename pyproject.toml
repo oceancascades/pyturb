@@ -17,6 +17,7 @@ dependencies = [
     "typer-slim>=0.20.0",
     "xarray>=2025.10.1",
     "typing_extensions>=4.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]

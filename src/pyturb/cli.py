@@ -1,16 +1,17 @@
 """Command line interface for pyturb."""
 
 import logging
-from importlib.metadata import version
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import typer
 from typing_extensions import Annotated
 
+from . import __version__
 from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
+from .profile import ProfileConfig
 
 app = typer.Typer()
 
@@ -35,35 +36,51 @@ def _setup_logging(level: str) -> None:
 
 def version_callback(value: bool):
     if value:
-        typer.echo(f"pyturb version {version('pyturb')}")
+        typer.echo(f"pyturb version {__version__}")
         raise typer.Exit()
 
 
-_DESPIKE_FIELDS = ("passes", "thresh", "smooth", "replace_sec")
+def _parse_input_list(
+    spec: Optional[str],
+    flag_name: str,
+    fields: dict[str, Callable[[str], object]],
+) -> Optional[dict]:
+    """Parse a comma-separated positional value list into a dict.
 
+    ``fields`` maps each output key to a 1-arg type constructor (e.g. ``int``,
+    ``float``) that converts the corresponding comma-separated token. The
+    order of ``fields`` dictates the expected token order.
 
-def _parse_despike(spec: Optional[str]) -> Optional[dict]:
-    """Parse ``--despike passes,thresh,smooth,replace_sec`` into a dict.
-
-    Returns None when the option is omitted; the caller then keeps defaults.
+    Returns ``None`` when ``spec`` is omitted so callers can keep defaults.
+    Raises ``typer.BadParameter`` for wrong arity or unparseable values.
     """
     if not spec:
         return None
     parts = [p.strip() for p in spec.split(",")]
-    if len(parts) != len(_DESPIKE_FIELDS):
+    if len(parts) != len(fields):
         raise typer.BadParameter(
-            f"--despike needs {len(_DESPIKE_FIELDS)} comma-separated values "
-            f"({','.join(_DESPIKE_FIELDS)}); got {len(parts)}"
+            f"--{flag_name} needs {len(fields)} comma-separated values "
+            f"({','.join(fields)}); got {len(parts)}"
         )
     try:
-        return {
-            "passes": int(parts[0]),
-            "thresh": float(parts[1]),
-            "smooth": float(parts[2]),
-            "replace_sec": float(parts[3]),
-        }
+        return {key: cast(val) for (key, cast), val in zip(fields.items(), parts)}
     except ValueError as e:
-        raise typer.BadParameter(f"Could not parse --despike values: {e}")
+        raise typer.BadParameter(f"Could not parse --{flag_name} values: {e}")
+
+
+_DESPIKE_FIELDS: dict[str, Callable[[str], object]] = {
+    "passes": int,
+    "thresh": float,
+    "smooth": float,
+    "replace_sec": float,
+}
+
+_PEAKS_FIELDS: dict[str, Callable[[str], object]] = {
+    "height": float,
+    "distance": int,
+    "width": int,
+    "prominence": float,
+}
 
 
 def cli():
@@ -357,30 +374,21 @@ def eps(
             show_default=True,
         ),
     ] = 0.0,
-    peaks_height: Annotated[
-        float,
+    peaks: Annotated[
+        Optional[str],
         typer.Option(
-            "--peaks-height",
-            help="Minimum peak height for profile detection (dbar)",
-            show_default=True,
+            "--peaks",
+            help=(
+                "Peak-detection parameters as 4 comma-separated values: "
+                "height,distance,width,prominence. "
+                "height = min peak height (dbar). "
+                "distance = min samples between peaks. "
+                "width = min peak width (samples). "
+                "prominence = min peak prominence (dbar). "
+                "Defaults: 25,200,200,25. Example: --peaks 50,300,300,25"
+            ),
         ),
-    ] = 25.0,
-    peaks_distance: Annotated[
-        int,
-        typer.Option(
-            "--peaks-distance",
-            help="Minimum samples between peaks for profile detection",
-            show_default=True,
-        ),
-    ] = 200,
-    peaks_prominence: Annotated[
-        float,
-        typer.Option(
-            "--peaks-prominence",
-            help="Minimum peak prominence for profile detection (dbar)",
-            show_default=True,
-        ),
-    ] = 25.0,
+    ] = None,
     despike: Annotated[
         Optional[str],
         typer.Option(
@@ -449,19 +457,8 @@ def eps(
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
 
-    # Build peaks_kwargs from individual options
-    peaks_kwargs = {
-        "height": peaks_height,
-        "distance": peaks_distance,
-        "width": peaks_distance,  # Use same as distance
-        "prominence": peaks_prominence,
-    }
-
-    despike_opts = _parse_despike(despike) or {}
-
-    batch_compute_epsilon(
-        files=input_files,
-        output_dir=output_dir,
+    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS) or {}
+    cfg_kwargs: dict = dict(
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,
         min_speed=min_speed,
@@ -472,8 +469,6 @@ def eps(
         use_pitch_correction=use_pitch_correction,
         profile_direction=profile_direction,
         min_profile_pressure=min_profile_pressure,
-        peaks_kwargs=peaks_kwargs,
-        auxiliary_file=auxiliary_file,
         aux_latitude=aux_lat,
         aux_longitude=aux_lon,
         aux_temperature=aux_temp,
@@ -485,6 +480,17 @@ def eps(
         despike_replace_sec=despike_opts.get("replace_sec", 0.04),
         accel_clean=accel_clean,
         emc_clean=emc_clean,
+    )
+    peaks_kwargs = _parse_input_list(peaks, "peaks", _PEAKS_FIELDS)
+    if peaks_kwargs is not None:
+        cfg_kwargs["peaks_kwargs"] = peaks_kwargs
+    config = ProfileConfig(**cfg_kwargs)
+
+    batch_compute_epsilon(
+        files=input_files,
+        config=config,
+        output_dir=output_dir,
+        auxiliary_file=auxiliary_file,
         n_workers=n_workers,
         overwrite=overwrite,
     )
