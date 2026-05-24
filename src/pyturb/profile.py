@@ -1079,7 +1079,7 @@ def _compute_shear_spectra_with_cleaning(
 
     # Convert spectra so that they represent shear variance [s-2/Hz]
     with np.errstate(divide="ignore", invalid="ignore"):
-        inv_W2 = 1 / ds["W"].values**2
+        inv_W2 = 1 / ds["W"].values ** 2
         inv_W4 = inv_W2 * inv_W2
     for name in list(spectra):
         if name in config.shear_probes:
