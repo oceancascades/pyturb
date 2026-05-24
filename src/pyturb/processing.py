@@ -134,6 +134,16 @@ def _ensure_output_dir(output_dir: Optional[Union[str, Path]]) -> Path:
     return output_dir
 
 
+def _init_worker_logging(level: int) -> None:
+    """Pool initializer: mirror the parent's logging config in each worker.
+
+    Without this, INFO/DEBUG messages emitted from inside ``_process_file``
+    (e.g., the despike-reconcile notices) are silently dropped because each
+    worker is a fresh Python process with no ``basicConfig``.
+    """
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s", force=True)
+
+
 def _run_epsilon_pool(
     nc_files: list[Path],
     output_dir: Path,
@@ -153,8 +163,13 @@ def _run_epsilon_pool(
     effective_workers = min(n_workers, len(nc_files))
     _log.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
 
+    log_level = logging.getLogger().getEffectiveLevel()
     results: list[dict] = []
-    with mp.Pool(processes=effective_workers) as pool:
+    with mp.Pool(
+        processes=effective_workers,
+        initializer=_init_worker_logging,
+        initargs=(log_level,),
+    ) as pool:
         for i, file_results in enumerate(pool.imap_unordered(worker, nc_files)):
             for input_path, output_path, profile_idx, error in file_results:
                 success = error is None

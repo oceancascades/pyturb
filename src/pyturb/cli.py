@@ -152,12 +152,15 @@ def p2nc(
         typer.Option(
             "--despike",
             help=(
-                "Pre-despike shear (sh1, sh2) and gradT (gradT1, gradT2) signals "
-                "during conversion. Same format as 'pyturb eps --despike': "
-                "passes,thresh,smooth,replace_sec. Adds <probe>_clean and "
-                "<probe>_despike_mask variables to the NetCDF, plus the four "
-                "parameters as global attrs. The eps subcommand will detect the "
-                "pre-cleaned signals and skip its own despike pass."
+                "Despike shear (sh1, sh2) and gradT (gradT1, gradT2) signals. "
+                "Adds <probe>_clean and <probe>_despike_mask variables to the NetCDF. "
+                "Specify using 4 comma-separated values: "
+                "passes,thresh,smooth,replace_sec. "
+                "passes = max iterations (1=fast, 10=thorough). "
+                "thresh = spike-detection ratio of HP to LP envelope. "
+                "smooth = envelope low-pass cutoff (Hz). "
+                "replace_sec = replacement window around each spike (s). "
+                "Defaults: 6,8.0,0.5,0.04. Example: --despike 10,7,0.5,0.05"
             ),
         ),
     ] = None,
@@ -418,7 +421,10 @@ def eps(
                 "thresh = spike-detection ratio of HP to LP envelope. "
                 "smooth = envelope low-pass cutoff (Hz). "
                 "replace_sec = replacement window around each spike (s). "
-                "Defaults: 6,8.0,0.5,0.04. Example: --despike 3,10,0.5,0.04"
+                "Defaults: 6,8.0,0.5,0.04."
+                ""
+                "Note that despike may be applied at the p2nc conversion, in which case the "
+                "eps command will not despike unless the parameters are have changed."
             ),
         ),
     ] = None,
