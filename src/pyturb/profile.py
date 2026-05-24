@@ -558,11 +558,11 @@ def find_all_profiles(
             direction=config.profile_direction,
         )
     except Exception as e:
-        _log.warning(f"Profile detection failed: {e}")
+        _log.warning(f"Peak-based profile detection failed: {e}")
         return []
 
     if not profiles:
-        _log.info("No profiles detected in dataset")
+        _log.info("Peak-based detection found no complete profiles.")
         return []
 
     # Extract segments based on direction
@@ -589,7 +589,7 @@ def find_all_profiles(
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
-    _log.info(f"Found {len(segments)} profile segment(s)")
+    _log.info(f"Peak-based detection found {len(segments)} profile segment(s)")
 
     return segments
 
