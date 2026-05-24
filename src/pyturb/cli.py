@@ -3,7 +3,7 @@
 import logging
 from importlib.metadata import version
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import typer
 from typing_extensions import Annotated
@@ -37,6 +37,33 @@ def version_callback(value: bool):
     if value:
         typer.echo(f"pyturb version {version('pyturb')}")
         raise typer.Exit()
+
+
+_DESPIKE_FIELDS = ("passes", "thresh", "smooth", "replace_sec")
+
+
+def _parse_despike(spec: Optional[str]) -> Optional[dict]:
+    """Parse ``--despike passes,thresh,smooth,replace_sec`` into a dict.
+
+    Returns None when the option is omitted; the caller then keeps defaults.
+    """
+    if not spec:
+        return None
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != len(_DESPIKE_FIELDS):
+        raise typer.BadParameter(
+            f"--despike needs {len(_DESPIKE_FIELDS)} comma-separated values "
+            f"({','.join(_DESPIKE_FIELDS)}); got {len(parts)}"
+        )
+    try:
+        return {
+            "passes": int(parts[0]),
+            "thresh": float(parts[1]),
+            "smooth": float(parts[2]),
+            "replace_sec": float(parts[3]),
+        }
+    except ValueError as e:
+        raise typer.BadParameter(f"Could not parse --despike values: {e}")
 
 
 def cli():
@@ -219,7 +246,10 @@ def eps(
     min_speed: Annotated[
         float,
         typer.Option(
-            "--min-speed", "-s", help="Minimum speed threshold (m/s)", show_default=True
+            "--min-speed",
+            "-s",
+            help="Speed below which a window's epsilon is QC-flagged questionable (m/s)",
+            show_default=True,
         ),
     ] = 0.2,
     pressure_smoothing_period: Annotated[
@@ -351,14 +381,21 @@ def eps(
             show_default=True,
         ),
     ] = 25.0,
-    despike_passes: Annotated[
-        int,
+    despike: Annotated[
+        Optional[str],
         typer.Option(
-            "--despike-passes",
-            help="Max despike iterations (1 = fast, 10 = thorough)",
-            show_default=True,
+            "--despike",
+            help=(
+                "Despike parameters as 4 comma-separated values: "
+                "passes,thresh,smooth,replace_sec. "
+                "passes = max iterations (1=fast, 10=thorough). "
+                "thresh = spike-detection ratio of HP to LP envelope. "
+                "smooth = envelope low-pass cutoff (Hz). "
+                "replace_sec = replacement window around each spike (s). "
+                "Defaults: 6,8.0,0.5,0.04. Example: --despike 3,10,0.5,0.04"
+            ),
         ),
-    ] = 6,
+    ] = None,
     accel_clean: Annotated[
         bool,
         typer.Option(
@@ -420,6 +457,8 @@ def eps(
         "prominence": peaks_prominence,
     }
 
+    despike_opts = _parse_despike(despike) or {}
+
     batch_compute_epsilon(
         files=input_files,
         output_dir=output_dir,
@@ -440,7 +479,10 @@ def eps(
         aux_temperature=aux_temp,
         aux_salinity=aux_sal,
         aux_density=aux_dens,
-        despike_max_passes=despike_passes,
+        despike_max_passes=despike_opts.get("passes", 6),
+        despike_thresh=despike_opts.get("thresh", 8.0),
+        despike_smooth=despike_opts.get("smooth", 0.5),
+        despike_replace_sec=despike_opts.get("replace_sec", 0.04),
         accel_clean=accel_clean,
         emc_clean=emc_clean,
         n_workers=n_workers,
