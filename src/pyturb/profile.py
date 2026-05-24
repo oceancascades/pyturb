@@ -1096,12 +1096,7 @@ _QC_FLAG_MEANINGS = "unknown good questionable bad missing"
 
 
 def _dof_spec(params: dict) -> float:
-    """Spectral degrees of freedom per Nuttall (1971) for 50%% FFT overlap.
-
-    ``num_of_ffts = 2 * (n_diss // n_fft) - 1`` (matches ODAS get_diss_odas)
-    and ``dof_spec = 1.9 * num_of_ffts``. Constant for a given dissipation
-    window / FFT length, hence independent of probe and window index.
-    """
+    """Spectral degrees of freedom per Nuttall (1971) for 50%% FFT overlap."""
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]
     num_of_ffts = 2 * (n_diss // n_fft) - 1
@@ -1111,7 +1106,7 @@ def _dof_spec(params: dict) -> float:
 def _compose_qc(
     eps: np.ndarray, fm: np.ndarray, speed_bad: np.ndarray, config: ProfileConfig
 ) -> np.ndarray:
-    """Combine speed-based and FM-based QC into an IODE flag per window.
+    """Combine speed-based and FM-based QC into a flag per window.
 
     Precedence (max wins, then NaN-eps overrides as 9):
       * FM <= fm_good  -> 1 (good)
