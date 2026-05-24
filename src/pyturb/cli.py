@@ -147,6 +147,23 @@ def p2nc(
             show_default=True,
         ),
     ] = False,
+    despike: Annotated[
+        Optional[str],
+        typer.Option(
+            "--despike",
+            help=(
+                "Despike shear (sh1, sh2) and gradT (gradT1, gradT2) signals. "
+                "Adds <probe>_clean and <probe>_despike_mask variables to the NetCDF. "
+                "Specify using 4 comma-separated values: "
+                "passes,thresh,smooth,replace_sec. "
+                "passes = max iterations (1=fast, 10=thorough). "
+                "thresh = spike-detection ratio of HP to LP envelope. "
+                "smooth = envelope low-pass cutoff (Hz). "
+                "replace_sec = replacement window around each spike (s). "
+                "Defaults: 6,8.0,0.5,0.04. Example: --despike 10,7,0.5,0.05"
+            ),
+        ),
+    ] = None,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input P-files (supports shell globs)"),
@@ -157,10 +174,13 @@ def p2nc(
     Examples:
         pyturb p2nc ./data/*.p -o ./output
         pyturb p2nc file1.p file2.p file3.p
+        pyturb p2nc ./data/*.p -o ./out --despike 6,8,0.5,0.04
     """
     if not input_files:
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
+
+    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS)
 
     batch_convert_to_netcdf(
         files=input_files,
@@ -170,6 +190,7 @@ def p2nc(
         n_workers=n_workers,
         min_file_size=min_file_size,
         overwrite=overwrite,
+        despike_kwargs=despike_opts,
     )
 
 
@@ -400,7 +421,10 @@ def eps(
                 "thresh = spike-detection ratio of HP to LP envelope. "
                 "smooth = envelope low-pass cutoff (Hz). "
                 "replace_sec = replacement window around each spike (s). "
-                "Defaults: 6,8.0,0.5,0.04. Example: --despike 3,10,0.5,0.04"
+                "Defaults: 6,8.0,0.5,0.04."
+                ""
+                "Note that despike may be applied at the p2nc conversion, in which case the "
+                "eps command will not despike unless the parameters are have changed."
             ),
         ),
     ] = None,
@@ -457,7 +481,7 @@ def eps(
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
 
-    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS) or {}
+    despike_opts = _parse_input_list(despike, "despike", _DESPIKE_FIELDS)
     cfg_kwargs: dict = dict(
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,
@@ -474,13 +498,18 @@ def eps(
         aux_temperature=aux_temp,
         aux_salinity=aux_sal,
         aux_density=aux_dens,
-        despike_max_passes=despike_opts.get("passes", 6),
-        despike_thresh=despike_opts.get("thresh", 8.0),
-        despike_smooth=despike_opts.get("smooth", 0.5),
-        despike_replace_sec=despike_opts.get("replace_sec", 0.04),
         accel_clean=accel_clean,
         emc_clean=emc_clean,
     )
+    # Only override the despike defaults — and force re-despike — when the
+    # user explicitly passed --despike. Otherwise embedded <probe>_clean
+    # vars from p2nc flow through untouched.
+    if despike_opts is not None:
+        cfg_kwargs["despike_max_passes"] = despike_opts["passes"]
+        cfg_kwargs["despike_thresh"] = despike_opts["thresh"]
+        cfg_kwargs["despike_smooth"] = despike_opts["smooth"]
+        cfg_kwargs["despike_replace_sec"] = despike_opts["replace_sec"]
+        cfg_kwargs["force_despike"] = True
     peaks_kwargs = _parse_input_list(peaks, "peaks", _PEAKS_FIELDS)
     if peaks_kwargs is not None:
         cfg_kwargs["peaks_kwargs"] = peaks_kwargs

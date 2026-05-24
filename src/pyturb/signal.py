@@ -5,10 +5,16 @@ from typing import Optional
 
 import numpy as np
 import scipy.signal as sig
+import xarray as xr
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import ArrayLike, NDArray
 
 _log = logging.getLogger(__name__)
+
+
+def despike_mask_name(var: str) -> str:
+    """Standard name for the per-sample despike mask companion of ``var``."""
+    return f"{var}_despike_mask"
 
 
 def _despike_once(
@@ -382,3 +388,52 @@ def clean_spec(
         clean_psd = clean_psd[:, 0, :]  # squeeze single-channel axis
 
     return freq, clean_psd
+
+
+def despike_variables(
+    ds: xr.Dataset,
+    variables: tuple[str, ...],
+    fs: float,
+    suffix: str = "_clean",
+    max_passes: int = 6,
+    thresh: float = 8.0,
+    smooth: float = 0.5,
+    replace_sec: float = 0.04,
+) -> xr.Dataset:
+    """Despike specified variables on the ``t_fast`` dimension.
+
+    For each present ``var`` this adds:
+      - ``var + suffix`` (default ``"_clean"``) — the despiked signal.
+      - ``<var>_despike_mask`` — boolean per-sample mask of modified samples.
+
+    If both companions are already present (e.g., the input file was
+    pre-cleaned during ``p2nc``), despiking is skipped for that variable so
+    the existing cleaned signal and mask flow through unchanged.
+
+    ``replace_sec`` is the spike replacement window in seconds; converted to
+    samples here as ``int(replace_sec * fs)`` for the underlying ``despike``.
+    """
+    ds = ds.copy()
+    n_samples = int(replace_sec * fs)
+
+    for var in variables:
+        if var not in ds:
+            continue
+        cleaned_name = var + suffix
+        mask_name = despike_mask_name(var)
+        if cleaned_name in ds and mask_name in ds:
+            _log.debug("Despike skipped for %s; pre-cleaned signal present", var)
+            continue
+        original = ds[var].values
+        cleaned, _, _, _ = despike(
+            original,
+            thresh=thresh,
+            smooth=smooth,
+            fs=fs,
+            n=n_samples,
+            max_passes=max_passes,
+        )
+        ds[cleaned_name] = ("t_fast", cleaned)
+        ds[mask_name] = ("t_fast", cleaned != original)
+
+    return ds

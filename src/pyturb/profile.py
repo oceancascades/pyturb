@@ -12,7 +12,13 @@ import yaml
 from profinder import find_profiles  # type: ignore[import]
 
 from .shear import estimate_epsilon
-from .signal import clean_spec, despike, window_mean, window_psd
+from .signal import (
+    clean_spec,
+    despike_mask_name,
+    despike_variables,
+    window_mean,
+    window_psd,
+)
 from .viscosity import viscosity
 
 _log = logging.getLogger(__name__)
@@ -89,6 +95,10 @@ class ProfileConfig:
     )
     despike_smooth: float = 0.5  # Low-pass cutoff for the spike envelope (Hz)
     despike_replace_sec: float = 0.04  # Replacement window around each spike (seconds)
+    # When True, embedded <probe>_clean / <probe>_despike_mask variables in the
+    # input file are discarded and despiking is re-run with the params above.
+    # CLI sets this only when the user explicitly passes --despike to `eps`.
+    force_despike: bool = False
 
     accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
     emc_clean: bool = (
@@ -366,52 +376,6 @@ def prepare_profile(
     return ds
 
 
-_DESPIKE_MASK_PREFIX = "_despike_mask_"
-
-
-def despike_variables(
-    ds: xr.Dataset,
-    variables: tuple[str, ...],
-    fs: float,
-    suffix: str = "_clean",
-    max_passes: int = 6,
-    thresh: float = 8.0,
-    smooth: float = 0.5,
-    replace_sec: float = 0.04,
-) -> xr.Dataset:
-    """Despike specified variables, creating cleaned versions and per-sample masks.
-
-    For each present ``var`` this adds:
-      - ``var + suffix`` (default ``"_clean"``) on ``t_fast`` with the cleaned signal.
-      - ``_despike_mask_<var>`` on ``t_fast`` — boolean mask of samples that were
-        modified. Used downstream to compute per-window despike fractions; the
-        leading underscore marks it as scratch and keeps it out of the on-disk
-        output (the writer filters to ``time``-dim vars).
-
-    ``replace_sec`` is the spike replacement window in seconds; converted to
-    samples here as ``int(replace_sec * fs)`` for the underlying ``despike``.
-    """
-    ds = ds.copy()
-    n_samples = int(replace_sec * fs)
-
-    for var in variables:
-        if var not in ds:
-            continue
-        original = ds[var].values
-        cleaned, _, _, _ = despike(
-            original,
-            thresh=thresh,
-            smooth=smooth,
-            fs=fs,
-            n=n_samples,
-            max_passes=max_passes,
-        )
-        ds[var + suffix] = ("t_fast", cleaned)
-        ds[_DESPIKE_MASK_PREFIX + var] = ("t_fast", cleaned != original)
-
-    return ds
-
-
 def highpass_filter(
     ds: xr.Dataset,
     variables: tuple[str, ...],
@@ -594,11 +558,11 @@ def find_all_profiles(
             direction=config.profile_direction,
         )
     except Exception as e:
-        _log.warning(f"Profile detection failed: {e}")
+        _log.warning(f"Peak-based profile detection failed: {e}")
         return []
 
     if not profiles:
-        _log.info("No profiles detected in dataset")
+        _log.info("Peak-based detection found no complete profiles.")
         return []
 
     # Extract segments based on direction
@@ -625,7 +589,7 @@ def find_all_profiles(
             if u_end > u_start:
                 segments.append((u_start, u_end))
 
-    _log.info(f"Found {len(segments)} profile segment(s)")
+    _log.info(f"Peak-based detection found {len(segments)} profile segment(s)")
 
     return segments
 
@@ -828,6 +792,28 @@ def _window_mean_slow(x: np.ndarray, params: dict) -> np.ndarray:
     )
 
 
+def _drop_embedded_clean(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Drop any ``<probe>_clean`` / ``<probe>_despike_mask`` variables.
+
+    Used when ``config.force_despike`` is True so the subsequent
+    ``despike_variables`` call recomputes from raw with the requested params.
+    No-op (and no log) when nothing is embedded.
+    """
+    drop = [
+        name
+        for probe in config.all_probes
+        for name in (f"{probe}_clean", despike_mask_name(probe))
+        if name in ds
+    ]
+    if not drop:
+        return ds
+    _log.info(
+        "Dropping embedded despike output (%s) to honour --despike re-clean request.",
+        ", ".join(drop),
+    )
+    return ds.drop_vars(drop)
+
+
 def _preprocess_for_spectra(
     ds: xr.Dataset, config: ProfileConfig
 ) -> tuple[xr.Dataset, dict]:
@@ -839,6 +825,8 @@ def _preprocess_for_spectra(
         _log.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
 
+    if config.force_despike:
+        ds = _drop_embedded_clean(ds, config)
     ds = despike_variables(
         ds,
         config.all_probes,
@@ -999,7 +987,7 @@ def _attach_window_scalars(
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]
     for probe in config.all_probes:
-        mask_name = _DESPIKE_MASK_PREFIX + probe
+        mask_name = despike_mask_name(probe)
         if mask_name not in ds:
             continue
         frac = window_mean(ds[mask_name].values.astype("f4"), n_fft, n_diss)
