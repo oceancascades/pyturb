@@ -2,14 +2,16 @@
 
 import logging
 import multiprocessing as mp
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Optional, Union
 
 import gsw  # type: ignore[import]
 import numpy as np
 import xarray as xr
 
+from . import __version__
 from .auxiliary import attach_auxiliary, load_auxiliary
 from .io import load_profile_nc, resolve_input_files
 from .profile import (
@@ -62,6 +64,11 @@ def _write_epsilon_profile(
     out.attrs["source_file"] = source_file_name
     out.attrs["profile_index"] = profile_idx
     out.attrs["profile_direction"] = config.profile_direction
+    out.attrs["pyturb_version"] = __version__
+    out.attrs["pyturb_processed_utc"] = datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    )
+    out.attrs["pyturb_config"] = config.to_yaml()
     for attr in _INSTRUMENT_ATTRS:
         if attr in source_ds.attrs:
             out.attrs[attr] = source_ds.attrs[attr]
@@ -178,35 +185,14 @@ def _run_epsilon_pool(
 
 def batch_compute_epsilon(
     files: Union[str, Path, list[Path]],
+    *,
+    config: Optional[ProfileConfig] = None,
     output_dir: Optional[Union[str, Path]] = None,
-    diss_len_sec: float = 4.0,
-    fft_len_sec: float = 1.0,
-    min_speed: float = 0.2,
-    pressure_smoothing_period: float = 0.25,
-    temperature: str = "JAC_T",
-    speed: str = "W",
-    angle_of_attack: float = 3.0,
-    use_pitch_correction: bool = False,
-    profile_direction: Literal["down", "up", "both"] = "down",
-    min_profile_pressure: float = 0.0,
-    peaks_kwargs: Optional[dict] = None,
     auxiliary_file: Optional[Union[str, Path]] = None,
-    aux_latitude: str = "lat",
-    aux_longitude: str = "lon",
-    aux_temperature: Optional[str] = None,
-    aux_salinity: Optional[str] = None,
-    aux_density: Optional[str] = None,
-    despike_max_passes: int = 6,
-    despike_thresh: float = 8.0,
-    despike_smooth: float = 0.5,
-    despike_replace_sec: float = 0.04,
-    accel_clean: bool = False,
-    emc_clean: bool = True,
     n_workers: Optional[int] = None,
     overwrite: bool = False,
 ) -> list[dict]:
-    """
-    Batch compute epsilon from converted NetCDF files.
+    """Batch compute epsilon from converted NetCDF files.
 
     This function processes raw p2nc output by:
     1. Detecting multiple profiles within each file (for glider data)
@@ -215,68 +201,38 @@ def batch_compute_epsilon(
     4. Computing epsilon using the Nasmyth spectrum fit
 
     Each input file may produce multiple output files if it contains multiple
-    dive cycles. Output files are named {original_stem}_p{NNN}.nc where NNN
-    is the 0-indexed profile number.
+    dive cycles. Output files are named ``{stem}_p{NNN}.nc``.
 
     Parameters
     ----------
     files : str, Path, or list of Path
-        Either a glob pattern to match NetCDF files (e.g., '/path/to/data/*.nc'),
-        a directory path (in which case '*.nc' is appended), or a list of
-        Path objects pointing to specific files.
+        Either a glob pattern, a directory (``*.nc`` is appended), or a list
+        of Path objects.
+    config : ProfileConfig, optional
+        Processing configuration. Defaults to ``ProfileConfig()``. All
+        algorithm knobs live here.
     output_dir : str or Path, optional
-        Directory for output NetCDF files. If None, uses current directory.
-    diss_len_sec : float, optional
-        Dissipation window length in seconds. Default 4.0.
-    fft_len_sec : float, optional
-        FFT window length in seconds. Default 1.0.
-    min_speed : float, optional
-        Speed below which a window's epsilon is QC-flagged as
-        questionable (eps_N_qc = 2). Default 0.2 m/s.
-    pressure_smoothing_period : float, optional
-        Low-pass filter cutoff period for pressure smoothing. Default 0.25 s.
-    temperature : str, optional
-        Name of temperature variable for viscosity calculation. Default 'JAC_T'.
-    speed : str, optional
-        Name of speed variable. If not found in dataset, speed is estimated
-        from pressure derivative. Default 'W'.
-    angle_of_attack : float, optional
-        Angle of attack in degrees, used when estimating speed from pressure.
-        Default 3.0.
-    use_pitch_correction : bool, optional
-        Whether to apply pitch correction when estimating speed from pressure.
-        Default False.
-    profile_direction : {'down', 'up', 'both'}, optional
-        Which cast directions to process. Default 'down'.
-    min_profile_pressure : float, optional
-        Minimum pressure (dbar) for profile detection. Default 10.0.
-    peaks_kwargs : dict, optional
-        Keyword arguments for scipy.signal.find_peaks used in profile detection.
-        Default uses height=25, distance=200, width=200, prominence=25.
+        Directory for output NetCDF files. Defaults to the current directory.
     auxiliary_file : str or Path, optional
-        Path to auxiliary NetCDF file containing time series of latitude,
-        longitude, temperature, salinity, and/or density. These are interpolated
-        onto each profile and used for viscosity calculation and output.
+        Auxiliary NetCDF file (lat, lon, T, S, density time series) to
+        interpolate onto each profile.
     n_workers : int, optional
-        Number of parallel workers. Default is number of CPU cores.
+        Number of parallel workers. Defaults to ``mp.cpu_count()``.
     overwrite : bool, optional
-        Whether to overwrite existing files. Default False.
+        Whether to overwrite existing output files. Default False.
 
     Returns
     -------
     list of dict
-        Results for each profile with keys: 'input', 'output', 'profile_index',
-        'success', 'error'
+        Per-profile results with keys ``input``, ``output``, ``profile_index``,
+        ``success``, ``error``.
 
     Examples
     --------
+    >>> from pyturb.profile import ProfileConfig
     >>> from pyturb.processing import batch_compute_epsilon
-    >>> # Using glob pattern - processes all profiles in each file
-    >>> results = batch_compute_epsilon('/path/to/data/*.nc', output_dir='/path/to/output')
-    >>> # Process only up casts
-    >>> results = batch_compute_epsilon('/path/to/data/*.nc', profile_direction='up')
-    >>> # Process both up and down casts
-    >>> results = batch_compute_epsilon('/path/to/data/*.nc', profile_direction='both')
+    >>> cfg = ProfileConfig(profile_direction="both", min_speed=0.15)
+    >>> batch_compute_epsilon("/data/*.nc", config=cfg, output_dir="/out")
     """
     nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
@@ -284,34 +240,10 @@ def batch_compute_epsilon(
         return []
     _log.info(f"Found {len(nc_files)} NetCDF files to process")
 
-    output_dir = _ensure_output_dir(output_dir)
+    if config is None:
+        config = ProfileConfig()
 
-    config_kwargs: dict = dict(
-        diss_len_sec=diss_len_sec,
-        fft_len_sec=fft_len_sec,
-        min_speed=min_speed,
-        pressure_smoothing_period=pressure_smoothing_period,
-        temperature=temperature,
-        speed=speed,
-        angle_of_attack=angle_of_attack,
-        use_pitch_correction=use_pitch_correction,
-        profile_direction=profile_direction,
-        min_profile_pressure=min_profile_pressure,
-        aux_latitude=aux_latitude,
-        aux_longitude=aux_longitude,
-        aux_temperature=aux_temperature,
-        aux_salinity=aux_salinity,
-        aux_density=aux_density,
-        despike_max_passes=despike_max_passes,
-        despike_thresh=despike_thresh,
-        despike_smooth=despike_smooth,
-        despike_replace_sec=despike_replace_sec,
-        accel_clean=accel_clean,
-        emc_clean=emc_clean,
-    )
-    if peaks_kwargs is not None:
-        config_kwargs["peaks_kwargs"] = peaks_kwargs
-    config = ProfileConfig(**config_kwargs)
+    output_dir = _ensure_output_dir(output_dir)
 
     aux_ds = (
         load_auxiliary(auxiliary_file, config) if auxiliary_file is not None else None

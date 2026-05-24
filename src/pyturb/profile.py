@@ -1,13 +1,14 @@
 """Profile processing for microstructure data."""
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Generator, Literal, Optional
 
 import gsw  # type: ignore[import]
 import numpy as np
 import scipy.signal as sig
 import xarray as xr
+import yaml
 from profinder import find_profiles  # type: ignore[import]
 
 from .shear import clean_shear_spec, estimate_epsilon
@@ -126,6 +127,13 @@ class ProfileConfig:
     def pressure_smooth(self) -> str:
         """Name of smoothed pressure variable."""
         return f"{self.pressure}_smooth"
+
+    def to_yaml(self) -> str:
+        """Serialize this config to a human-readable YAML string.
+
+        Tuple-typed fields (e.g. ``shear_probes``) round-trip as YAML lists.
+        """
+        return yaml.safe_dump(asdict(self), sort_keys=False, default_flow_style=False)
 
 
 def estimate_speed_from_pressure(
