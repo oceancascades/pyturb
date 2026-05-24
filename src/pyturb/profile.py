@@ -82,7 +82,14 @@ class ProfileConfig:
     # === Processing options ===
     chop_start: bool = True
     scale_probes: bool = True
+    # === Despike parameters (see signal.despike) ===
     despike_max_passes: int = 6  # Max despike iterations (1 = ~4x faster)
+    despike_thresh: float = (
+        8.0  # Spike detection threshold (ratio of HP to LP envelope)
+    )
+    despike_smooth: float = 0.5  # Low-pass cutoff for the spike envelope (Hz)
+    despike_replace_sec: float = 0.04  # Replacement window around each spike (seconds)
+
     accel_clean: bool = False  # Goodman coherent-noise removal using accelerometers
     emc_clean: bool = (
         True  # Goodman coherent-noise removal using EM current meter channels
@@ -373,20 +380,48 @@ def prepare_profile(
     return ds
 
 
+_DESPIKE_MASK_PREFIX = "_despike_mask_"
+
+
 def despike_variables(
     ds: xr.Dataset,
     variables: tuple[str, ...],
+    fs: float,
     suffix: str = "_clean",
-    max_passes: int = 10,
+    max_passes: int = 6,
+    thresh: float = 8.0,
+    smooth: float = 0.5,
+    replace_sec: float = 0.04,
 ) -> xr.Dataset:
-    """Despike specified variables, creating new cleaned versions."""
+    """Despike specified variables, creating cleaned versions and per-sample masks.
+
+    For each present ``var`` this adds:
+      - ``var + suffix`` (default ``"_clean"``) on ``t_fast`` with the cleaned signal.
+      - ``_despike_mask_<var>`` on ``t_fast`` — boolean mask of samples that were
+        modified. Used downstream to compute per-window despike fractions; the
+        leading underscore marks it as scratch and keeps it out of the on-disk
+        output (the writer filters to ``time``-dim vars).
+
+    ``replace_sec`` is the spike replacement window in seconds; converted to
+    samples here as ``int(replace_sec * fs)`` for the underlying ``despike``.
+    """
     ds = ds.copy()
+    n_samples = int(replace_sec * fs)
 
     for var in variables:
         if var not in ds:
             continue
-        cleaned, _, _, _ = despike(ds[var].values, max_passes=max_passes)
+        original = ds[var].values
+        cleaned, _, _, _ = despike(
+            original,
+            thresh=thresh,
+            smooth=smooth,
+            fs=fs,
+            n=n_samples,
+            max_passes=max_passes,
+        )
         ds[var + suffix] = ("t_fast", cleaned)
+        ds[_DESPIKE_MASK_PREFIX + var] = ("t_fast", cleaned != original)
 
     return ds
 
@@ -828,7 +863,15 @@ def _preprocess_for_spectra(
         _log.debug("Smoothed speed not found, running prepare_profile")
         ds = prepare_profile(ds, config)
 
-    ds = despike_variables(ds, config.all_probes, max_passes=config.despike_max_passes)
+    ds = despike_variables(
+        ds,
+        config.all_probes,
+        fs=float(ds.fs_fast),
+        max_passes=config.despike_max_passes,
+        thresh=config.despike_thresh,
+        smooth=config.despike_smooth,
+        replace_sec=config.despike_replace_sec,
+    )
 
     hp_cutoff = _resolve_hp_cutoff(config)
     if hp_cutoff is not None and hp_cutoff > 0:
@@ -975,6 +1018,23 @@ def _attach_window_scalars(
         )
     if "JAC_C" in means:
         ds["conductivity"] = ("time", means["JAC_C"].astype("f4"))
+
+    n_fft = params["n_fft"]
+    n_diss = params["n_diss"]
+    for probe in config.all_probes:
+        mask_name = _DESPIKE_MASK_PREFIX + probe
+        if mask_name not in ds:
+            continue
+        frac = window_mean(ds[mask_name].values.astype("f4"), n_fft, n_diss)
+        out_name = f"{probe}_despike_frac"
+        ds[out_name] = ("time", frac.astype("f4"))
+        ds[out_name].attrs = {
+            "long_name": f"Fraction of {probe} samples modified by despiking",
+            "units": "1",
+            "valid_min": np.float32(0.0),
+            "valid_max": np.float32(1.0),
+        }
+        ds = ds.drop_vars(mask_name)
 
     return ds
 
