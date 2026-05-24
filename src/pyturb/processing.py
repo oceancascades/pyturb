@@ -99,10 +99,7 @@ def _process_file(
         # Iterate detected profiles, falling back to one whole-file profile.
         profile_iter = list(split_into_profiles(ds, config))
         if not profile_iter:
-            _log.info(
-                "Processing the whole file as a single profile.",
-                input_file.name,
-            )
+            _log.info("Processing the whole file as a single profile.")
             profile_iter = [(0, ds)]
 
         for profile_idx, profile_ds in profile_iter:
