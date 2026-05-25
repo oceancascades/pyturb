@@ -76,19 +76,16 @@ def inertial_subrange_fit(
 
     eps = eps_init
 
+    # Fix fit window from initial eps
+    K_isr_max = min(k_limit, x_isr * (eps / nu**3) ** 0.25)
+    fit_mask = (k > 0) & (k <= K_isr_max)
+
     for _ in range(3):
-        K_isr_max = min(k_limit, x_isr * (eps / nu**3) ** 0.25)
-        fit_mask = (k > 0) & (k <= K_isr_max)
         if fit_mask.sum() < 8:
             break
-
         model = nasmyth_spectrum(k[fit_mask], eps, nu)
         err = np.mean(np.log10(phi[fit_mask] / model))
         eps *= 10 ** (1.5 * err)  # scale factor (3/2 slope relation)
-
-    # Remove flyers (>0.5 dex) up to 20%
-    K_isr_max = min(k_limit, x_isr * (eps / nu**3) ** 0.25)
-    fit_mask = (k > 0) & (k <= K_isr_max)
 
     if fit_mask.sum() >= 8:
         model = nasmyth_spectrum(k[fit_mask], eps, nu)
@@ -147,7 +144,7 @@ def polynomial_spectral_min_search(k: np.ndarray, phi: np.ndarray, fit_order: in
         d2 = poly_deriv(coeff, 2)
         roots = np.roots(d1)
 
-        roots = roots[np.isreal(roots)].real  # Real roots only
+        roots = np.sort(roots[np.isreal(roots)].real)
 
         roots = [r for r in roots if np.polyval(d2, r) > 0 and r >= np.log10(10)]
         if roots:
