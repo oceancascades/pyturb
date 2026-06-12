@@ -8,13 +8,22 @@ Install using `pip`.
 
 ## Usage
 
-Pyturb is primarily a CLI but can also be integrated into scripts or notebooks. The processing should be run in the following order:
+```mermaid
+flowchart TD;
+    pfile[L0: .p] -->|pyturb p2nc| ncfile[L1: .nc];
+    ncfile --- C[ ]:::empty;
+    glider[glider.data.nc] --- C;
+    C -->|pyturb eps| l2[L2: *_0001.nc, ... *_N.nc];
+    l2 -->|pyturb bin| l3[L3: .binned.nc];
+    
+classDef empty fill:none,stroke:none,color:transparent,width:1px,height:1px;
+```
 
-1. Convert p files to netCDF. Optionally, merge converted p files.
-2. Calculate turbulence estimates on a per-profile basis.
-3. Bin estimates onto a regular grid.
+Pyturb is primarily a CLI. The processing should be run in the following order:
 
-The three steps summarized above are applied in the CLI using subcommands `p2nc`, `merge`, `eps`, and `bin`.
+1. Convert p files to netCDF using `pyturb p2nc`. Optionally, merge converted p files with `pyturb merge`.
+2. Calculate turbulence estimates per-profile using `pyturb eps`.
+3. Bin estimates onto a regular grid with `pyturb bin`.
 
 ### `p2nc` - convert P files
 
@@ -26,17 +35,17 @@ pyturb p2nc ./path/to/raw_data/*.p -o ./converted/
 
 Note that unlike the ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. The units of these variables are different to their ODAS counterparts. The scaling is applied later.
 
-The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where files prematurely end before instrument recovery. 
+The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where profiles are split across multiple files. 
 
 ### `eps` - calculate the dissipation rate
 
-Estimate turbulent kinetic energy dissipation rate (epsilon) from converted NetCDF files:
+Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:
 
 ```bash
 pyturb eps ./converted/*.nc -o ./eps_output/
 ```
 
-The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNN}.nc` for each profile found.
+The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a Slocum glider and used to esimate viscosity. Velocity from a calibrated glider flight model may also be specified.
 
 A selection of the option used:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
@@ -45,6 +54,8 @@ A selection of the option used:
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
+
+See `pyturb eps --help` for details. 
 
 Example processing just up casts:
 ```bash
@@ -64,33 +75,26 @@ Options:
 - `--dmin`/`--dmax`: Depth range for binning (default: 0-1000 m)
 - `--pressure`: Bin by pressure instead of depth
 
-## Processing Methods
+## Methods
 
-### Preprocessing Pipeline
+### Preprocessing
 
 Before computing epsilon, profiles undergo:
 
-1. Low-pass filtering of speed (or dP/dt-derived speed) to remove high-frequency noise
-2. Shear signals are scaled by 1/U² and temperature gradients by 1/U to convert to physical units
-3. Iterative removal of outliers from shear and temperature gradient signals
+1. Low-pass filtering of speed (or dP/dt-derived speed) to remove high-frequency noise.
+2. Shear signals are scaled by 1/U^2 and temperature gradients by 1/U to convert to physical units.
+3. Iterative removal of outliers from shear and temperature gradient signals using a form of median filter.
 
-### Shear Spectrum Processing
+### Shear spectrum processing
 
 The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectrum:
 
-1. Shear probe signals are converted to wavenumber spectra using Welch's method with overlapping FFT windows
-2. A single-pole transfer function correction is applied to account for the spatial averaging of the shear probe
-3. Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange
-4. Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum
-
-## Python API
-
-```python
-from pyturb.processing import batch_compute_epsilon, bin_profiles
-from pyturb.pfile import batch_convert_to_netcdf
-
-# Convert P-files
-batch_convert_to_netcdf('./path/to/raw_data/*.p', output_dir='./converted/')
+1. Spectra are calculated using Welch's method with overlapping FFT windows. 
+2. Spectra are converted to wavenumber spectra assuming Taylor's frozen turbulence hypothesis using the mean velocity over the window.
+3. Single-pole transfer functions are used to correct spatial averaging of the shear probe and anti-aliasing filter.
+4. Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange
+5. Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum
+6. Quality control metrics including mean absolute deivation are computed and QC flag attached. 
 
 # Compute epsilon
 batch_compute_epsilon('./converted/*.nc', output_dir='./eps/', diss_len_sec=4.0)
