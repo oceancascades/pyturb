@@ -662,8 +662,8 @@ def compute_window_parameters(ds: xr.Dataset, config: ProfileConfig) -> dict:
     fs_fast = float(ds.fs_fast)
     fs_slow = float(ds.fs_slow)
 
-    n_fft = int(config.fft_len_sec * fs_fast)
-    n_diss = int(config.diss_len_sec * fs_fast)
+    n_fft = round(config.fft_len_sec * fs_fast)
+    n_diss = round(config.diss_len_sec * fs_fast)
 
     return {
         "n_fft": n_fft,
