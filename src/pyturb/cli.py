@@ -449,6 +449,19 @@ def eps(
             show_default=True,
         ),
     ] = True,
+    thermo: Annotated[
+        bool,
+        typer.Option(
+            "--thermo/--no-thermo",
+            help=(
+                "Compute Conservative Temperature, Absolute Salinity, and "
+                "potential density (0 dbar) when temperature and salinity are "
+                "available. Uses lat/lon from --aux if provided, otherwise a "
+                "default position (45N, 0E)."
+            ),
+            show_default=True,
+        ),
+    ] = False,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -505,6 +518,7 @@ def eps(
         aux_density=aux_dens,
         accel_clean=accel_clean,
         emc_clean=emc_clean,
+        compute_thermo=thermo,
     )
     # Only override the despike defaults — and force re-despike — when the
     # user explicitly passed --despike. Otherwise embedded <probe>_clean
@@ -588,7 +602,11 @@ def bin(
         typer.Option(
             "--vars",
             "-v",
-            help="Comma-separated list of variables to bin (default: eps_1,eps_2,W,temperature,salinity,density,nu,lat,lon)",
+            help=(
+                "Comma-separated list of variables to bin (default: "
+                "eps_1,eps_2,W,temperature,salinity,density,absolute_salinity,"
+                "conservative_temperature,potential_density,nu,lat,lon)"
+            ),
         ),
     ] = None,
     n_workers: Annotated[

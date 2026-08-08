@@ -54,6 +54,7 @@ A selection of the option used:
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
+- `--thermo`/`--no-thermo`: Compute Conservative Temperature, Absolute Salinity, and potential density (referenced to 0 dbar) via `gsw` when temperature and salinity are available (default: off). Uses lat/lon from `--aux` if provided, otherwise a default position (45°N, 0°E).
 
 See `pyturb eps --help` for details. 
 
@@ -74,6 +75,8 @@ Options:
 - `--bin-width`: Depth bin width in meters (default: 2.0)
 - `--dmin`/`--dmax`: Depth range for binning (default: 0-1000 m)
 - `--pressure`: Bin by pressure instead of depth
+
+`absolute_salinity`, `conservative_temperature`, and `potential_density` are included in the binned output by default whenever they exist in the input files (i.e., `eps` was run with `--thermo`).
 
 ## Methods
 

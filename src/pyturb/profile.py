@@ -87,6 +87,14 @@ class ProfileConfig:
     default_temperature: float = 10.0
     default_salinity: float = 35.0
     default_density: float = 1025.0
+    # Fallback position for gsw calculations (SA_from_SP, in-situ density) when
+    # no lat/lon is available from an auxiliary dataset.
+    default_latitude: float = 45.0
+    default_longitude: float = 0.0
+
+    # === Conservative Temperature / Absolute Salinity / potential density ===
+    # Requires real (non-default) temperature and salinity to be available.
+    compute_thermo: bool = False
 
     # === Auxiliary dataset variable names ===
     aux_time: str = "time"  # Time variable in auxiliary dataset
@@ -916,12 +924,12 @@ def _derive_thermo(
         lon = (
             float(np.nanmean(ds["aux_longitude"].values))
             if "aux_longitude" in ds
-            else 0.0
+            else config.default_longitude
         )
         lat = (
             float(np.nanmean(ds["aux_latitude"].values))
             if "aux_latitude" in ds
-            else 45.0
+            else config.default_latitude
         )
         P_dbar = means.get(pressure_var, np.full(n_windows, 0.0))
         T_insitu = means[config.temperature]
@@ -946,7 +954,9 @@ def _attach_window_scalars(
 
     Adds: ``time`` coord, ``pressure``, ``W``, ``temperature``, ``nu``;
     plus ``salinity``, ``density``, ``lat``, ``lon``, ``conductivity`` when
-    the relevant inputs are available.
+    the relevant inputs are available; plus ``absolute_salinity``,
+    ``conservative_temperature``, ``potential_density`` when
+    ``config.compute_thermo`` is set and real temperature/salinity exist.
     """
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
@@ -1000,6 +1010,47 @@ def _attach_window_scalars(
         )
     if "JAC_C" in means:
         ds["conductivity"] = ("time", means["JAC_C"].astype("f4"))
+
+    has_real_temperature = config.temperature in means or "aux_temperature" in ds
+    has_real_salinity = "salinity" in ds
+    if config.compute_thermo and has_real_temperature and has_real_salinity:
+        lat = (
+            ds["lat"].values
+            if "lat" in ds
+            else np.full(n_windows, config.default_latitude)
+        )
+        lon = (
+            ds["lon"].values
+            if "lon" in ds
+            else np.full(n_windows, config.default_longitude)
+        )
+        P_dbar = ds["pressure"].values
+        SP = ds["salinity"].values
+        T_insitu = ds["temperature"].values
+
+        SA = gsw.SA_from_SP(SP, P_dbar, lon, lat)
+        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
+        potential_density = gsw.sigma0(SA, CT) + 1000.0
+
+        ds["absolute_salinity"] = ("time", SA.astype("f4"))
+        ds["absolute_salinity"].attrs = {
+            "long_name": "Absolute Salinity",
+            "standard_name": "sea_water_absolute_salinity",
+            "units": "g kg-1",
+        }
+        ds["conservative_temperature"] = ("time", CT.astype("f4"))
+        ds["conservative_temperature"].attrs = {
+            "long_name": "Conservative Temperature",
+            "standard_name": "sea_water_conservative_temperature",
+            "units": "degC",
+        }
+        ds["potential_density"] = ("time", potential_density.astype("f4"))
+        ds["potential_density"].attrs = {
+            "long_name": "Potential density referenced to 0 dbar",
+            "standard_name": "sea_water_potential_density",
+            "units": "kg m-3",
+            "comment": "gsw.sigma0(SA, CT) + 1000",
+        }
 
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]
