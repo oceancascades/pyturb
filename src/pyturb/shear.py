@@ -209,7 +209,8 @@ def estimate_epsilon(
     Returns
     -------
     epsilon : float
-        Dissipation rate (W/kg).
+        Dissipation rate (W/kg). NaN if the spectrum, speed, or viscosity
+        aren't usable (e.g. an uncalibrated/dead probe).
     K_max_used : float
         Upper wavenumber of the integration band (cpm).
     mad : float
@@ -217,6 +218,9 @@ def estimate_epsilon(
         the fitted Nasmyth model over the integration band (NaN if the band
         is too narrow).
     """
+    if not (np.isfinite(W) and np.isfinite(nu) and np.all(np.isfinite(P_f))):
+        # Can't fit a non-finite spectrum.
+        return float("nan"), float("nan"), float("nan")
 
     # Convert to wavenumber domain
     if is_wavenumber:

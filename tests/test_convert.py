@@ -16,6 +16,63 @@ class TestConvertChannel:
         assert result.dtype == np.float64
         assert np.all(np.isfinite(result))
 
+    def test_shear_zero_sens_returns_nan_not_inf(self):
+        # sens=0 is the un-filled setup.cfg placeholder for an uncalibrated
+        # probe. Dividing by it must not silently produce +-inf (which
+        # bypasses np.isnan checks and corrupts downstream sosfiltfilt-based
+        # processing); it should come back as an honest, warned-about NaN.
+        from pyturb._pfile.convert import _shear
+
+        params = {
+            "name": "sh1",
+            "adc_fs": 4.096,
+            "adc_bits": 16,
+            "diff_gain": 0.696,
+            "sens": 0.0,
+        }
+        data = np.array([-100.0, 0.0, 100.0, 32000.0])
+        with pytest.warns(UserWarning, match="sens=0"):
+            result, units = _shear(data, params)
+        assert units == "m^2 s^-3"
+        assert np.all(np.isnan(result))
+        assert not np.any(np.isinf(result))
+
+    @pytest.mark.parametrize("sens", [0.001, 0.02, 0.2, 1.0])
+    def test_shear_sens_outside_calibration_range_warns(self, sens):
+        # sens is hand-entered per probe in setup.cfg; a value far outside
+        # the typical calibrated range usually means a mistyped or
+        # forgotten coefficient. Still converts (unlike sens=0), just warns
+        # loudly so it's caught at p2nc time instead of three stages later.
+        from pyturb._pfile.convert import _shear
+
+        params = {
+            "name": "sh1",
+            "adc_fs": 4.096,
+            "adc_bits": 16,
+            "diff_gain": 0.696,
+            "sens": sens,
+        }
+        data = np.array([-100.0, 0.0, 100.0, 32000.0])
+        with pytest.warns(UserWarning, match="outside the expected calibration range"):
+            result, units = _shear(data, params)
+        assert units == "m^2 s^-3"
+        assert np.all(np.isfinite(result))
+
+    @pytest.mark.parametrize("sens", [0.03, 0.067, 0.15])
+    def test_shear_sens_inside_calibration_range_no_warning(self, recwarn, sens):
+        from pyturb._pfile.convert import _shear
+
+        params = {
+            "name": "sh1",
+            "adc_fs": 4.096,
+            "adc_bits": 16,
+            "diff_gain": 0.696,
+            "sens": sens,
+        }
+        data = np.array([-100.0, 0.0, 100.0, 32000.0])
+        _shear(data, params)
+        assert len(recwarn) == 0
+
     def test_shear_no_offset(self, raw_data):
         # Verify shear conversion matches MATLAB: no adc_zero/sig_zero offset
         cfg = raw_data["cfgobj"]

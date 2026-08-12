@@ -789,6 +789,10 @@ def compute_epsilon(
         k_max = np.full(n_windows, np.nan)
         mad = np.full(n_windows, np.nan)
 
+        n_nan = int((~np.all(np.isfinite(psd), axis=1)).sum())
+        if n_nan:
+            _log.warning(f"{name}: {n_nan}/{n_windows} windows have a NaN spectrum")
+
         for i in range(n_windows):
             eps[i], k_max[i], mad[i] = estimate_epsilon(
                 frequency, psd[i], W=speed[i], nu=nu[i]

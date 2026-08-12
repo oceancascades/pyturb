@@ -157,3 +157,41 @@ class TestKmaxMonotonicity:
         dk = k[2] - k[1]
         diffs = np.diff(k_max_vals)
         assert np.all(diffs >= -dk), f"k_max not monotonic: {k_max_vals}"
+
+
+class TestNonFiniteInputReturnsNan:
+    """A dead/uncalibrated probe (all-NaN spectrum) must not crash the fit.
+
+    Regression test: an all-NaN P_f used to reach np.roots() inside
+    polynomial_spectral_min_search() with a NaN-coefficient polynomial,
+    raising numpy.linalg.LinAlgError deep inside estimate_epsilon and
+    aborting the whole profile instead of yielding "no estimate".
+    """
+
+    def test_all_nan_spectrum_returns_nan_without_raising(self):
+        W = 0.6
+        k = _k_grid(W)
+        phi = np.full_like(k, np.nan)
+        eps, k_max, mad = estimate_epsilon(k, phi, W=W, nu=NU, is_wavenumber=True)
+        assert np.isnan(eps)
+        assert np.isnan(k_max)
+        assert np.isnan(mad)
+
+    def test_partially_nan_spectrum_returns_nan_without_raising(self):
+        W = 0.6
+        k = _k_grid(W)
+        phi = nasmyth_spectrum(k, 1e-8, NU)
+        phi[10] = np.nan
+        eps, k_max, mad = estimate_epsilon(k, phi, W=W, nu=NU, is_wavenumber=True)
+        assert np.isnan(eps)
+        assert np.isnan(k_max)
+        assert np.isnan(mad)
+
+    def test_nan_speed_returns_nan_without_raising(self):
+        W = 0.6
+        k = _k_grid(W)
+        phi = nasmyth_spectrum(k, 1e-8, NU)
+        eps, k_max, mad = estimate_epsilon(k, phi, W=np.nan, nu=NU, is_wavenumber=True)
+        assert np.isnan(eps)
+        assert np.isnan(k_max)
+        assert np.isnan(mad)
