@@ -43,12 +43,35 @@ def _poly(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
     return np.polyval(coeffs, data), units
 
 
+# Typical calibrated range for RSI shear-probe sensitivity (V*s/m).
+_SHEAR_SENS_MIN = 0.03
+_SHEAR_SENS_MAX = 0.15
+
+
 def _shear(data: np.ndarray, params: Dict) -> Tuple[np.ndarray, str]:
     """Shear probe conversion to m^2 s^-3."""
     adc_fs = float(params["adc_fs"])
     adc_bits = int(params["adc_bits"])
     diff_gain = float(params["diff_gain"])
     sens = float(params["sens"])
+    name = params.get("name", "shear")
+
+    if sens == 0:
+        # sens=0 is the un-filled setup.cfg placeholder; avoid dividing by
+        # zero and return NaN instead of +-inf.
+        warnings.warn(
+            f"Shear probe '{name}' has sens=0 (no calibration coefficient set "
+            "in setup.cfg); cannot convert to physical units. Returning NaN."
+        )
+        return np.full(data.shape, np.nan), "m^2 s^-3"
+
+    if not (_SHEAR_SENS_MIN <= sens <= _SHEAR_SENS_MAX):
+        warnings.warn(
+            f"*** Shear probe '{name}' sens={sens:g} is outside the expected "
+            f"calibration range [{_SHEAR_SENS_MIN}, {_SHEAR_SENS_MAX}] V*s/m. "
+            "Check setup.cfg -- this probe may be uncalibrated or the "
+            "coefficient may have been entered incorrectly. ***"
+        )
 
     physical = (adc_fs / 2**adc_bits) * data / (2 * np.sqrt(2) * diff_gain * sens)
 
