@@ -76,12 +76,20 @@ def _write_epsilon_profile(
     out.to_netcdf(output_file)
 
 
+def _has_existing_outputs(stem: str, output_dir: Path) -> bool:
+    """True if any file in output_dir has a name starting with stem."""
+    if not output_dir.exists():
+        return False
+    return any(p.name.startswith(stem) for p in output_dir.iterdir() if p.is_file())
+
+
 def _process_file(
     input_file: Path,
     output_dir: Path,
     config: ProfileConfig,
     overwrite: bool,
     aux_ds: Optional[xr.Dataset] = None,
+    skip_existing: bool = False,
 ) -> list[tuple]:
     """Process a file that may contain multiple profiles.
 
@@ -89,6 +97,10 @@ def _process_file(
     """
     results: list[tuple[Path, Optional[Path], int, Optional[str]]] = []
     stem = input_file.stem
+
+    if skip_existing and not overwrite and _has_existing_outputs(stem, output_dir):
+        _log.info(f"Skipping {input_file.name}: outputs already exist for '{stem}'")
+        return [(input_file, None, -1, "skipped (existing outputs found)")]
 
     try:
         ds = load_profile_nc(input_file)
@@ -152,6 +164,7 @@ def _run_epsilon_pool(
     overwrite: bool,
     aux_ds: Optional[xr.Dataset],
     n_workers: int,
+    skip_existing: bool = False,
 ) -> list[dict]:
     """Dispatch ``_process_file`` across ``nc_files`` and collect results."""
     worker = partial(
@@ -160,6 +173,7 @@ def _run_epsilon_pool(
         config=config,
         overwrite=overwrite,
         aux_ds=aux_ds,
+        skip_existing=skip_existing,
     )
     effective_workers = min(n_workers, len(nc_files))
     _log.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
@@ -207,6 +221,7 @@ def batch_compute_epsilon(
     auxiliary_file: Optional[Union[str, Path]] = None,
     n_workers: Optional[int] = None,
     overwrite: bool = False,
+    skip_existing: bool = False,
 ) -> list[dict]:
     """Batch compute epsilon from converted NetCDF files.
 
@@ -236,6 +251,12 @@ def batch_compute_epsilon(
         Number of parallel workers. Defaults to ``mp.cpu_count()``.
     overwrite : bool, optional
         Whether to overwrite existing output files. Default False.
+    skip_existing : bool, optional
+        Skip a file entirely, without detecting profiles, if any file in
+        ``output_dir`` already starts with its stem. Faster than the default
+        per-profile overwrite check, which still has to load and split the
+        file to find its profile names. Ignored if ``overwrite`` is True.
+        Default False.
 
     Returns
     -------
@@ -268,7 +289,9 @@ def batch_compute_epsilon(
     if n_workers is None:
         n_workers = mp.cpu_count()
 
-    return _run_epsilon_pool(nc_files, output_dir, config, overwrite, aux_ds, n_workers)
+    return _run_epsilon_pool(
+        nc_files, output_dir, config, overwrite, aux_ds, n_workers, skip_existing
+    )
 
 
 _QC_SENTINEL_EXCLUDED = np.int8(-1)

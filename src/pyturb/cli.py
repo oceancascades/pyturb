@@ -480,6 +480,18 @@ def eps(
             show_default=True,
         ),
     ] = False,
+    skip_existing: Annotated[
+        bool,
+        typer.Option(
+            "--skip-existing/--no-skip-existing",
+            help=(
+                "Skip a file entirely if any output already exists for its "
+                "stem, without detecting profiles first. Faster than the "
+                "default per-profile check. Ignored with --overwrite."
+            ),
+            show_default=True,
+        ),
+    ] = False,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input NetCDF files (supports shell globs)"),
@@ -541,6 +553,7 @@ def eps(
         auxiliary_file=auxiliary_file,
         n_workers=n_workers,
         overwrite=overwrite,
+        skip_existing=skip_existing,
     )
 
 
