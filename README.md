@@ -55,6 +55,7 @@ A selection of the option used:
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with glider flight data (lat, lon, T, S)
 - `--thermo`/`--no-thermo`: Compute Conservative Temperature, Absolute Salinity, and potential density (referenced to 0 dbar) via `gsw` when temperature and salinity are available (default: off). Uses lat/lon from `--aux` if provided, otherwise a default position (45°N, 0°E).
+- `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem, without detecting profiles first — faster than the default per-profile check on a rerun. Ignored with `--overwrite` (default: off).
 
 See `pyturb eps --help` for details. 
 
