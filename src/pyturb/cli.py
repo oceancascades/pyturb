@@ -12,6 +12,7 @@ from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
 from .profile import ProfileConfig
+from .profile_index import batch_index_profiles
 
 app = typer.Typer()
 
@@ -555,6 +556,177 @@ def eps(
         overwrite=overwrite,
         skip_existing=skip_existing,
     )
+
+
+@app.command()
+def profiles(
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for profile index (and hires) files",
+            show_default="current directory",
+        ),
+    ] = None,
+    direction: Annotated[
+        Literal["down", "up", "both"],
+        typer.Option(
+            "--direction",
+            help="Profile direction to detect: down, up, or both",
+            show_default=True,
+        ),
+    ] = "down",
+    min_profile_pressure: Annotated[
+        float,
+        typer.Option(
+            "--min-profile-pressure",
+            help="Minimum pressure (dbar) for profile detection",
+            show_default=True,
+        ),
+    ] = 0.0,
+    peaks: Annotated[
+        Optional[str],
+        typer.Option(
+            "--peaks",
+            help=(
+                "Peak-detection parameters as 4 comma-separated values: "
+                "height,distance,width,prominence. "
+                "height = min peak height (dbar). "
+                "distance = min samples between peaks. "
+                "width = min peak width (samples). "
+                "prominence = min peak prominence (dbar). "
+                "Defaults: 25,200,200,25. Example: --peaks 50,300,300,25"
+            ),
+        ),
+    ] = None,
+    pressure_smoothing_period: Annotated[
+        float,
+        typer.Option(
+            "--pressure-smoothing",
+            help="Low-pass filter cutoff period for pressure (s)",
+            show_default=True,
+        ),
+    ] = 0.5,
+    speed: Annotated[
+        str,
+        typer.Option(
+            "--speed",
+            help="Speed variable name. If not found, estimates from pressure.",
+            show_default=True,
+        ),
+    ] = "W",
+    angle_of_attack: Annotated[
+        float,
+        typer.Option(
+            "--aoa",
+            help="Angle of attack in degrees (used when estimating speed from pressure)",
+            show_default=True,
+        ),
+    ] = 3.0,
+    use_pitch_correction: Annotated[
+        bool,
+        typer.Option(
+            "--pitch-correction/--no-pitch-correction",
+            help="Apply pitch correction when estimating speed from pressure",
+            show_default=True,
+        ),
+    ] = False,
+    materialize: Annotated[
+        bool,
+        typer.Option(
+            "--materialize/--no-materialize",
+            help=(
+                "Also write each detected profile's full-resolution data "
+                "(all fast and slow channel variables) to its own file, "
+                "{stem}_p{NNNN}_hires.nc, in the same pass."
+            ),
+            show_default=True,
+        ),
+    ] = False,
+    compress: Annotated[
+        bool,
+        typer.Option(
+            help="Compress materialized profile NetCDF output (--materialize only)",
+            show_default=True,
+        ),
+    ] = False,
+    compression_level: Annotated[
+        int,
+        typer.Option(
+            help="Compression level (1-9) for materialized output", show_default=True
+        ),
+    ] = 4,
+    n_workers: Annotated[
+        int | None,
+        typer.Option(
+            "--n-workers",
+            "-n",
+            help="Number of parallel workers",
+            show_default="all CPUs",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Overwrite existing files",
+            show_default=True,
+        ),
+    ] = False,
+    input_files: Annotated[
+        list[Path] | None,
+        typer.Argument(help="Input NetCDF files (supports shell globs)"),
+    ] = None,
+):
+    """Detect profiles in converted NetCDF files and write a boundary index.
+
+    Detection only touches the slow-channel pressure record, so this is much
+    cheaper than `eps`. Output files are named {stem}_profiles.nc and record
+    each profile's start/end indices, times, and direction, plus the
+    detection config used.
+
+    Use --materialize to also write each detected profile's full-resolution
+    data to its own file ({stem}_p{NNNN}_hires.nc), or extract a single
+    profile later, on demand, from a saved index with
+    pyturb.profile_index.extract_profile().
+
+    Examples:
+        pyturb profiles ./converted/*.nc -o ./profiles/
+        pyturb profiles ./converted/*.nc --direction both --materialize
+    """
+    if not input_files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+
+    peaks_kwargs = _parse_input_list(peaks, "peaks", _PEAKS_FIELDS)
+    cfg_kwargs: dict = dict(
+        pressure_smoothing_period=pressure_smoothing_period,
+        speed=speed,
+        angle_of_attack=angle_of_attack,
+        use_pitch_correction=use_pitch_correction,
+        profile_direction=direction,
+        min_profile_pressure=min_profile_pressure,
+    )
+    if peaks_kwargs is not None:
+        cfg_kwargs["peaks_kwargs"] = peaks_kwargs
+    config = ProfileConfig(**cfg_kwargs)
+
+    results = batch_index_profiles(
+        files=input_files,
+        config=config,
+        output_dir=output_dir,
+        n_workers=n_workers,
+        overwrite=overwrite,
+        materialize=materialize,
+        compress=compress,
+        compression_level=compression_level,
+    )
+
+    if not results:
+        typer.echo("Error: No data was indexed.", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()
