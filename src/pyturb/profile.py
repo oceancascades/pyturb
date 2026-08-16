@@ -616,6 +616,19 @@ def find_all_profiles(
     return segments
 
 
+def extract_profile_by_indices(
+    ds: xr.Dataset, idx_start: int, idx_end: int
+) -> xr.Dataset:
+    """Slice ds to a single profile segment on t_slow/t_fast by t_slow index.
+
+    ``idx_start``/``idx_end`` are inclusive indices into ``ds.t_slow``, as
+    returned by :func:`find_all_profiles`.
+    """
+    t0 = ds.t_slow.values[idx_start]
+    t1 = ds.t_slow.values[idx_end]
+    return ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
+
+
 def split_into_profiles(
     ds: xr.Dataset,
     config: ProfileConfig,
@@ -650,12 +663,7 @@ def split_into_profiles(
     segments = find_all_profiles(ds, config)
 
     for i, (idx_start, idx_end) in enumerate(segments):
-        # Get time bounds for slicing
-        t0 = ds.t_slow.values[idx_start]
-        t1 = ds.t_slow.values[idx_end]
-
-        # Slice both time dimensions
-        profile_ds = ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
+        profile_ds = extract_profile_by_indices(ds, idx_start, idx_end)
 
         # Add profile metadata
         profile_ds.attrs["profile_index"] = i

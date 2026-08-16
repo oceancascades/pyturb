@@ -12,7 +12,17 @@ try:
 except PackageNotFoundError:
     __version__ = "unknown"
 
-from . import auxiliary, io, merge, pfile, processing, profile, shear, viscosity
+from . import (
+    auxiliary,
+    io,
+    merge,
+    pfile,
+    processing,
+    profile,
+    profile_index,
+    shear,
+    viscosity,
+)
 
 __all__ = [
     "__version__",
@@ -22,6 +32,7 @@ __all__ = [
     "pfile",
     "processing",
     "profile",
+    "profile_index",
     "shear",
     "viscosity",
 ]
