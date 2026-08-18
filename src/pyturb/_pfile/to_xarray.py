@@ -43,7 +43,6 @@ _CF_VARIABLE_METADATA = {
 # Default variables to save (in order of priority)
 _DEFAULT_VARIABLES = [
     "P",
-    "P_raw",
     "sh1",
     "sh2",
     "gradT1",

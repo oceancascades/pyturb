@@ -173,6 +173,18 @@ def window_mean(y: ArrayLike, n_fft: int, n_diss: int):
     return y_windowed.mean(axis=1)
 
 
+def block_mean(y: ArrayLike, n: int) -> np.ndarray:
+    """Mean over consecutive, non-overlapping blocks of n samples.
+
+    Trailing samples that don't fill a complete block are dropped.
+    """
+    y = np.asarray(y)
+    n_blocks = len(y) // n
+    if n_blocks == 0:
+        return np.array([], dtype=float)
+    return y[: n_blocks * n].reshape(n_blocks, n).mean(axis=1)
+
+
 def window_psd(y: ArrayLike, fs: float, n_fft: int, n_diss: int, window: str = "hann"):
     """Compute windowed power spectral density averaged over dissipation windows.
 

@@ -22,6 +22,7 @@ def _make_ds(**extra_vars):
         "W_smooth": ("t_slow", np.full(n, 0.5)),
         "JAC_T": ("t_slow", np.full(n, 10.0)),
         "JAC_C": ("t_slow", np.full(n, 35.0)),  # mS/cm, seawater range
+        "fs_slow": 1.0,
     }
     for name, values in extra_vars.items():
         data[name] = ("t_slow", np.full(n, values))
@@ -31,7 +32,7 @@ def _make_ds(**extra_vars):
 class TestComputeThermo:
     def test_off_by_default(self):
         ds = _make_ds()
-        config = ProfileConfig(compute_thermo=False)
+        config = ProfileConfig(compute_thermo=False, match_conductivity=False)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert "absolute_salinity" not in out
         assert "conservative_temperature" not in out
@@ -39,7 +40,7 @@ class TestComputeThermo:
 
     def test_computed_when_salinity_from_jac(self):
         ds = _make_ds()
-        config = ProfileConfig(compute_thermo=True)
+        config = ProfileConfig(compute_thermo=True, match_conductivity=False)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert "absolute_salinity" in out
         assert "conservative_temperature" in out
@@ -57,14 +58,16 @@ class TestComputeThermo:
         # JAC_C below the seawater-range guard -> no real salinity -> no thermo.
         ds = _make_ds()
         ds["JAC_C"] = ("t_slow", np.full(4, 1.0))
-        config = ProfileConfig(compute_thermo=True)
+        config = ProfileConfig(compute_thermo=True, match_conductivity=False)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert "salinity" not in out
         assert "absolute_salinity" not in out
 
     def test_uses_aux_lat_lon_when_present(self):
         ds = _make_ds(aux_latitude=-45.0, aux_longitude=170.0)
-        config = ProfileConfig(compute_thermo=True, default_latitude=45.0)
+        config = ProfileConfig(
+            compute_thermo=True, default_latitude=45.0, match_conductivity=False
+        )
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert "absolute_salinity" in out
         # Different hemisphere should not silently fall back to the default.
@@ -73,7 +76,10 @@ class TestComputeThermo:
     def test_falls_back_to_default_position(self):
         ds = _make_ds()
         config = ProfileConfig(
-            compute_thermo=True, default_latitude=60.0, default_longitude=-150.0
+            compute_thermo=True,
+            default_latitude=60.0,
+            default_longitude=-150.0,
+            match_conductivity=False,
         )
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert "absolute_salinity" in out
