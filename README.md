@@ -83,6 +83,8 @@ A selection of the option:
 - `--dmin`/`--dmax`: Depth range for binning (default: 0-1000 m)
 - `--ctd-bin-width`: Also bin the higher-resolution CTD variables (see `eps` above) onto a separate, typically finer grid of this width, on a separate `ctd_depth` coordinate (default: off)
 
+Profiles are concatenated along a `profile` dimension and sorted chronologically.
+
 ## Methods
 
 ### Preprocessing

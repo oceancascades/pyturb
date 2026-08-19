@@ -451,6 +451,24 @@ def _depth_from_pressure(
     return -gsw.z_from_p(pressure, lat_val)
 
 
+_EPOCH = np.datetime64("1970-01-01T00:00:00", "ns")
+
+
+def _time_to_epoch_seconds(ds: xr.Dataset, time_dim: str) -> np.ndarray:
+    """Absolute float seconds since 1970-01-01 for a raw (per-file relative)
+    time coordinate, NaT-safe.
+
+    Eps files are loaded with ``decode_times=False`` (raw floats relative to
+    each file's own ``filetime``), so different profile files are not
+    directly comparable as numbers. This decodes using the coordinate's own
+    ``units``/``calendar`` attrs to get an absolute instant, then converts to
+    a fixed, common epoch so the result can be safely averaged (via
+    groupby-mean) and compared across files.
+    """
+    decoded = xr.decode_cf(ds[[time_dim]])[time_dim].values.astype("datetime64[ns]")
+    return (decoded - _EPOCH) / np.timedelta64(1, "s")
+
+
 def _bin_var_group(
     ds: xr.Dataset,
     time_dim: str,
@@ -481,7 +499,7 @@ def _bin_var_group(
     ds_subset[bin_var_name] = (time_dim, bin_values)
 
     if include_time and time_dim in ds.coords:
-        ds_subset["time_var"] = (time_dim, ds[time_dim].values)
+        ds_subset["time_var"] = (time_dim, _time_to_epoch_seconds(ds, time_dim))
         present = present + ["time_var"]
 
     qc_vars = [v for v in present if v.endswith("_qc")]
@@ -828,12 +846,23 @@ def bin_profiles(
     combined = xr.concat(binned_datasets, dim="profile")
 
     # Sort profiles by time (use minimum time per profile to handle NaT values)
+    # and attach it as a "profile_time" coordinate so profiles are directly
+    # organizable/selectable by start time even where per-depth-bin "time"
+    # is patchy (missing/NaT bins near the surface, seafloor, etc).
     if "time" in combined:
         # Get representative time for each profile (min time, skipping NaT)
         profile_times = combined.time.min(dim="depth", skipna=True)
         # Sort by time
         sort_order = np.argsort(profile_times.values)
         combined = combined.isel(profile=sort_order)
+        combined = combined.assign_coords(
+            profile_time=("profile", profile_times.values[sort_order])
+        )
+        combined["profile_time"].attrs = {
+            "long_name": "Profile start time",
+            "units": "seconds since 1970-01-01 00:00:00",
+            "calendar": "proleptic_gregorian",
+        }
         _log.info("Sorted profiles by time")
 
     # Save to file
