@@ -54,14 +54,12 @@ A selection of the option:
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
-- `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw.
+- `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw, including potential density and buoyancy frequency.
 - `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
 - `--stationary-platform`/`--moving-platform`: Use one lat/lon per profile instead of interpolating a position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as stationary; anything else is treated as moving, e.g. gliders). For a stationary platform, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); for a moving platform they vary with `time`/`ctd_time` as before.
 
-CTD scalars (pressure, temperature, salinity, conductivity, density) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`), alongside the usual dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable. Velocity and viscosity are only meaningful at dissipation-window resolution and are not included in the `_hires` output.
-
-Depth `z` (m, negative below the surface) is computed from pressure via `gsw.z_from_p` at both the dissipation-bin (`z`) and hires (`z_hires`) resolutions. When `--thermo` is enabled, buoyancy frequency squared `N2` is also computed via `gsw.Nsquared`, using the dissipation-bin-averaged (not hires) absolute salinity, conservative temperature, and pressure to reduce noise; `gsw.Nsquared` returns values at mid-point pressures, which are interpolated back onto the original pressure grid before being written as `N2`.
+CTD scalars (pressure, temperature, salinity, conductivity, density) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`), alongside the usual dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
 See `pyturb eps --help` formore details. 
 

@@ -1163,30 +1163,42 @@ def _attach_scalar_position(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset
     return ds
 
 
-def _attach_buoyancy_frequency(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Attach N2 (buoyancy frequency squared) from the dissipation-window
-    means of absolute_salinity/conservative_temperature/pressure.
+def _attach_buoyancy_frequency(
+    ds: xr.Dataset, config: ProfileConfig, suffix: str = ""
+) -> xr.Dataset:
+    """Attach N2 (buoyancy frequency squared) from the bin-averaged
+    absolute_salinity/conservative_temperature/pressure at one resolution.
 
-    gsw.Nsquared returns values at the midpoints between adjacent windows;
-    computing it from the already window-averaged (not raw) profile reduces
-    noise. The result is then interpolated from that mid-pressure grid back
-    onto the window's own pressure values. No-op unless config.compute_thermo
-    produced absolute_salinity/conservative_temperature.
+    ``suffix=""`` computes ``N2`` from the dissipation-window means (on
+    ``time``); ``suffix="_hires"`` computes ``N2_hires`` from the CTD hires
+    bins (on ``ctd_time``, see :func:`_attach_hires_ctd_vars`). gsw.Nsquared
+    returns values at the midpoints between adjacent bins; computing it from
+    the already bin-averaged (not raw) profile reduces noise. The result is
+    then interpolated from that mid-pressure grid back onto each bin's own
+    pressure value. No-op unless config.compute_thermo produced
+    absolute_salinity/conservative_temperature at this resolution.
     """
-    required = ("absolute_salinity", "conservative_temperature", "pressure")
-    if not all(v in ds for v in required):
+    dim = "ctd_time" if suffix else "time"
+    sa_name, ct_name, p_name = (
+        f"{v}{suffix}"
+        for v in ("absolute_salinity", "conservative_temperature", "pressure")
+    )
+    if not all(v in ds for v in (sa_name, ct_name, p_name)):
         return ds
 
-    SA = np.asarray(ds["absolute_salinity"].values, dtype=float)
-    CT = np.asarray(ds["conservative_temperature"].values, dtype=float)
-    P = np.asarray(ds["pressure"].values, dtype=float)
+    SA = np.asarray(ds[sa_name].values, dtype=float)
+    CT = np.asarray(ds[ct_name].values, dtype=float)
+    P = np.asarray(ds[p_name].values, dtype=float)
     valid = np.isfinite(SA) & np.isfinite(CT) & np.isfinite(P)
     if valid.sum() < 2:
         return ds
 
-    if "lat" in ds:
-        lat_val = ds["lat"].values
+    lat_name = f"lat{suffix}"
+    if lat_name in ds:
+        lat_val = ds[lat_name].values
         lat_arg = float(lat_val) if lat_val.ndim == 0 else np.asarray(lat_val)[valid]
+    elif "lat" in ds and ds["lat"].ndim == 0:
+        lat_arg = float(ds["lat"].values)
     else:
         lat_arg = config.default_latitude
 
@@ -1198,15 +1210,16 @@ def _attach_buoyancy_frequency(ds: xr.Dataset, config: ProfileConfig) -> xr.Data
         P[valid], P_mid[order], N2_mid[order], left=np.nan, right=np.nan
     )
 
-    ds["N2"] = ("time", N2.astype("f4"))
-    ds["N2"].attrs = {
+    source = "CTD hires bins" if suffix else "dissipation-window means"
+    ds[f"N2{suffix}"] = (dim, N2.astype("f4"))
+    ds[f"N2{suffix}"].attrs = {
         "long_name": "Buoyancy frequency squared",
         "standard_name": "square_of_brunt_vaisala_frequency_in_sea_water",
         "units": "s-2",
         "comment": (
             "gsw.Nsquared(absolute_salinity, conservative_temperature, "
-            "pressure) from the dissipation-window means, interpolated from "
-            "gsw's mid-pressure grid back onto pressure."
+            f"pressure) from the {source}, interpolated from gsw's "
+            "mid-pressure grid back onto pressure."
         ),
     }
     return ds
@@ -1274,8 +1287,8 @@ def _attach_window_scalars(
     ``N2`` when ``config.compute_thermo`` is set and real temperature/salinity
     exist. On a stationary platform, a single scalar ``lat``/``lon`` is
     attached instead (see :func:`_attach_scalar_position`). Also attaches
-    ``_hires`` versions of the CTD scalars on a finer ``ctd_time`` axis (see
-    :func:`_attach_hires_ctd_vars`).
+    ``_hires`` versions of the CTD scalars (including ``N2_hires``) on a
+    finer ``ctd_time`` axis (see :func:`_attach_hires_ctd_vars`).
     """
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
@@ -1305,6 +1318,7 @@ def _attach_window_scalars(
     ds = _attach_scalar_position(ds, config)
     ds = _attach_buoyancy_frequency(ds, config)
     ds = _attach_hires_ctd_vars(ds, config)
+    ds = _attach_buoyancy_frequency(ds, config, suffix="_hires")
 
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]

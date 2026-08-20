@@ -62,7 +62,8 @@ class TestScalarPositionSurvivesWriting:
         assert "z_hires" in written
         assert "N2" in written
         assert written["N2"].dims == ("time",)
-        assert "N2_hires" not in written
+        assert "N2_hires" in written
+        assert written["N2_hires"].dims == ("ctd_time",)
 
 
 class TestBinWithScalarPosition:

@@ -107,6 +107,7 @@ class TestHiresCtdVars:
             "absolute_salinity_hires",
             "conservative_temperature_hires",
             "potential_density_hires",
+            "N2_hires",
         ]:
             assert name in out
             assert out[name].dims == ("ctd_time",)
