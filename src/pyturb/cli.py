@@ -463,6 +463,18 @@ def eps(
             show_default=True,
         ),
     ] = False,
+    chi: Annotated[
+        bool,
+        typer.Option(
+            "--chi/--no-chi",
+            help=(
+                "Compute the temperature variance dissipation rate (chi) from "
+                "the microstructure temperature gradient probes, using the "
+                "combined shear-probe epsilon."
+            ),
+            show_default=True,
+        ),
+    ] = True,
     match_conductivity: Annotated[
         bool,
         typer.Option(
@@ -563,6 +575,7 @@ def eps(
         accel_clean=accel_clean,
         emc_clean=emc_clean,
         compute_thermo=thermo,
+        compute_chi=chi,
         match_conductivity=match_conductivity,
         ctd_bin_sec=ctd_bin_sec,
         stationary_platform=stationary_platform,
@@ -823,8 +836,9 @@ def bin(
             "-v",
             help=(
                 "Comma-separated list of variables to bin (default: "
-                "eps_1,eps_2,W,temperature,salinity,density,z,absolute_salinity,"
-                "conservative_temperature,potential_density,N2,nu,lat,lon)"
+                "eps_1,eps_2,chi_1,chi_2,W,temperature,salinity,density,z,"
+                "absolute_salinity,conservative_temperature,potential_density,"
+                "N2,nu,kappa_T,lat,lon)"
             ),
         ),
     ] = None,

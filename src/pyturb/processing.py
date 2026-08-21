@@ -15,7 +15,9 @@ from . import __version__
 from .auxiliary import attach_auxiliary, load_auxiliary
 from .io import load_profile_nc, resolve_input_files
 from .profile import (
+    _EPS_AGREEMENT_FACTOR,
     ProfileConfig,
+    _combine_eps_pair,
     prepare_profile,
     process_profile,
     split_into_profiles,
@@ -301,7 +303,6 @@ def batch_compute_epsilon(
 
 _QC_SENTINEL_EXCLUDED = np.int8(-1)
 _QC_MISSING = np.int8(9)
-_EPS_AGREEMENT_FACTOR = 10.0
 
 
 def _mask_low_quality_eps(
@@ -359,45 +360,6 @@ def _restore_qc_missing(ds: xr.Dataset, qc_vars: list[str]) -> xr.Dataset:
     return ds
 
 
-def _combine_eps_pair(
-    eps1: np.ndarray, eps2: np.ndarray, qc1: np.ndarray, qc2: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Combine two probe estimates into (eps, eps_qc).
-
-    eps:
-      * both finite & within factor of ``_EPS_AGREEMENT_FACTOR`` → mean
-      * both finite, disagreement larger → element-wise minimum
-      * exactly one finite → that value
-      * neither finite → NaN
-
-    eps_qc:
-      * both eps finite → max(qc1, qc2)
-      * exactly one finite → the surviving probe's qc
-      * neither finite → 9 (missing)
-    """
-    e1_ok = np.isfinite(eps1)
-    e2_ok = np.isfinite(eps2)
-    both = e1_ok & e2_ok
-
-    hi = np.fmax(eps1, eps2)
-    lo = np.fmin(eps1, eps2)
-    within = both & (hi <= _EPS_AGREEMENT_FACTOR * lo)
-
-    eps = np.where(
-        within,
-        0.5 * (eps1 + eps2),
-        np.where(both, lo, np.where(e1_ok, eps1, np.where(e2_ok, eps2, np.nan))),
-    )
-
-    eps_qc = np.full(eps1.shape, _QC_MISSING, dtype="i1")
-    only1 = e1_ok & ~e2_ok
-    only2 = e2_ok & ~e1_ok
-    eps_qc[only1] = qc1[only1]
-    eps_qc[only2] = qc2[only2]
-    eps_qc[both] = np.maximum(qc1[both], qc2[both])
-    return eps.astype("f4"), eps_qc
-
-
 def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
     """Build ``eps`` and ``eps_qc`` from binned ``eps_1``/``eps_2`` (+ QCs).
 
@@ -432,6 +394,47 @@ def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
         "comment": (
             "Per-bin max of eps_1_qc and eps_2_qc where both probes have a "
             "finite epsilon; the surviving probe's flag when one is missing; "
+            "9 (missing) when both are missing."
+        ),
+    }
+    return ds
+
+
+def _attach_combined_chi(ds: xr.Dataset) -> xr.Dataset:
+    """Build ``chi`` and ``chi_qc`` from binned ``chi_1``/``chi_2`` (+ QCs).
+
+    Uses the same combination rule as epsilon. No-op if either probe's chi
+    or QC variable is missing from the dataset.
+    """
+    needed = ("chi_1", "chi_2", "chi_1_qc", "chi_2_qc")
+    if any(v not in ds for v in needed):
+        return ds
+    c1 = ds["chi_1"].values
+    c2 = ds["chi_2"].values
+    q1 = ds["chi_1_qc"].values.astype("i1")
+    q2 = ds["chi_2_qc"].values.astype("i1")
+    chi, chi_qc = _combine_eps_pair(c1, c2, q1, q2)
+    dims = ds["chi_1"].dims
+    ds["chi"] = (dims, chi)
+    ds["chi"].attrs = {
+        "long_name": "Best chi estimate combined from chi_1 and chi_2",
+        "units": "K2 s-1",
+        "comment": (
+            "Mean of chi_1 and chi_2 where they agree within a factor of "
+            f"{_EPS_AGREEMENT_FACTOR:g}; element-wise minimum otherwise. "
+            "Falls back to the single surviving probe when one is missing."
+        ),
+    }
+    ds["chi_qc"] = (dims, chi_qc)
+    ds["chi_qc"].attrs = {
+        "long_name": "Combined QC flag for chi",
+        "flag_values": np.array([0, 1, 2, 4, 9], dtype="i1"),
+        "flag_meanings": "unknown good questionable bad missing",
+        "valid_min": np.int8(0),
+        "valid_max": np.int8(9),
+        "comment": (
+            "Per-bin max of chi_1_qc and chi_2_qc where both probes have a "
+            "finite chi; the surviving probe's flag when one is missing; "
             "9 (missing) when both are missing."
         ),
     }
@@ -621,8 +624,9 @@ def _bin_single_profile(
             pieces[0] if len(pieces) == 1 else xr.merge(pieces, compat="override")
         )
 
-        # Build combined eps / eps_qc from binned probe pair (if present).
+        # Build combined eps / eps_qc and chi / chi_qc from binned probe pairs.
         ds_binned = _attach_combined_eps(ds_binned)
+        ds_binned = _attach_combined_chi(ds_binned)
 
         # Rename time_var back to time if it exists and add epoch units
         if "time_var" in ds_binned:
@@ -763,6 +767,12 @@ def bin_profiles(
             "eps_2_fm",
             "eps_1_qc",
             "eps_2_qc",
+            "chi_1",
+            "chi_2",
+            "chi_1_fm",
+            "chi_2_fm",
+            "chi_1_qc",
+            "chi_2_qc",
             "sh1_despike_frac",
             "sh2_despike_frac",
             "gradT1_despike_frac",
@@ -778,6 +788,7 @@ def bin_profiles(
             "potential_density",
             "N2",
             "nu",
+            "kappa_T",
             "lat",
             "lon",
         ]

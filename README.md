@@ -55,6 +55,7 @@ A selection of the option:
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
 - `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw, including potential density and buoyancy frequency.
+- `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).
 - `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
 - `--stationary-platform`/`--moving-platform`: Use one lat/lon per profile instead of interpolating a position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as stationary; anything else is treated as moving, e.g. gliders). For a stationary platform, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); for a moving platform they vary with `time`/`ctd_time` as before.
@@ -103,3 +104,14 @@ The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectr
 4. Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange.
 5. Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum.
 6. Quality control metrics including mean absolute deivation are computed and QC flag attached. 
+
+### Temperature gradient spectrum processing
+
+With `--chi`, the dissipation rate of temperature variance is estimated from the FP07 temperature gradient spectra:
+
+1. Spectra are corrected for the thermistor frequency response using a single-pole transfer function with a speed-dependent time constant (Lueck).
+2. Chi is computed by integrating the corrected spectrum over the resolved wavenumber band, with the upper limit set by the anti-alias cutoff, the spectral noise minimum, and the 95%-variance wavenumber.
+3. Epsilon is taken as the per-window combination of the shear-probe estimates (mean if within a factor of 10, minimum otherwise), fixing the Batchelor wavenumber.
+4. Unresolved variance is corrected using the closed-form integral of the Kraichnan spectrum.
+5. Molecular thermal diffusivity is computed from an empirical conductivity formula (Caldwell 1974).
+6. A figure of merit against the Kraichnan spectrum and a QC flag are attached, mirroring the epsilon QC.

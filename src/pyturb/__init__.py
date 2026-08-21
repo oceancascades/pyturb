@@ -22,7 +22,7 @@ from . import (
     profile,
     profile_index,
     shear,
-    viscosity,
+    temperature,
 )
 
 __all__ = [
@@ -36,5 +36,5 @@ __all__ = [
     "profile",
     "profile_index",
     "shear",
-    "viscosity",
+    "temperature",
 ]

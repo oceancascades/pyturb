@@ -12,7 +12,7 @@ import yaml
 from profinder import find_profiles  # type: ignore[import]
 
 from .conductivity import match_conductivity_to_temperature
-from .shear import estimate_epsilon
+from .shear import estimate_epsilon, viscosity
 from .signal import (
     block_mean,
     clean_spec,
@@ -21,7 +21,7 @@ from .signal import (
     window_mean,
     window_psd,
 )
-from .viscosity import viscosity
+from .temperature import estimate_chi, thermal_diffusivity
 
 _log = logging.getLogger(__name__)
 
@@ -97,6 +97,12 @@ class ProfileConfig:
     # === Conservative Temperature / Absolute Salinity / potential density ===
     # Requires real (non-default) temperature and salinity to be available.
     compute_thermo: bool = False
+
+    # === Temperature variance dissipation (chi) ===
+    compute_chi: bool = True
+    # FP07 single-pole response: tau = fp07_tau0 * W^fp07_speed_exp.
+    fp07_tau0: float = 0.010
+    fp07_speed_exp: float = -0.5
 
     # === JAC-CT conductivity matching ===
     match_conductivity: bool = True  # lag/low-pass match JAC_C to temperature
@@ -1070,6 +1076,15 @@ def _build_ctd_vars(
     if include_kinematics:
         nu, _ = viscosity(S_mean, T_visc, rho_mean)
         out["nu"] = (nu, {})
+        kappa_T = thermal_diffusivity(S_mean, T_visc, rho_mean, out["pressure"][0])
+        out["kappa_T"] = (
+            kappa_T,
+            {
+                "long_name": "Molecular thermal diffusivity",
+                "units": "m2 s-1",
+                "comment": "Caldwell (1974) conductivity / (rho * cp0)",
+            },
+        )
 
     stationary = _is_stationary_platform(ds, config)
     lat_arr = lon_arr = None
@@ -1419,6 +1434,47 @@ def _compute_shear_spectra_with_cleaning(
 
 _QC_FLAG_VALUES = np.array([0, 1, 2, 4, 9], dtype="i1")
 _QC_FLAG_MEANINGS = "unknown good questionable bad missing"
+_QC_MISSING = np.int8(9)
+_EPS_AGREEMENT_FACTOR = 10.0
+
+
+def _combine_eps_pair(
+    eps1: np.ndarray, eps2: np.ndarray, qc1: np.ndarray, qc2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Combine two probe estimates into (eps, eps_qc).
+
+    eps:
+      * both finite & within factor of ``_EPS_AGREEMENT_FACTOR`` → mean
+      * both finite, disagreement larger → element-wise minimum
+      * exactly one finite → that value
+      * neither finite → NaN
+
+    eps_qc:
+      * both eps finite → max(qc1, qc2)
+      * exactly one finite → the surviving probe's qc
+      * neither finite → 9 (missing)
+    """
+    e1_ok = np.isfinite(eps1)
+    e2_ok = np.isfinite(eps2)
+    both = e1_ok & e2_ok
+
+    hi = np.fmax(eps1, eps2)
+    lo = np.fmin(eps1, eps2)
+    within = both & (hi <= _EPS_AGREEMENT_FACTOR * lo)
+
+    eps = np.where(
+        within,
+        0.5 * (eps1 + eps2),
+        np.where(both, lo, np.where(e1_ok, eps1, np.where(e2_ok, eps2, np.nan))),
+    )
+
+    eps_qc = np.full(eps1.shape, _QC_MISSING, dtype="i1")
+    only1 = e1_ok & ~e2_ok
+    only2 = e2_ok & ~e1_ok
+    eps_qc[only1] = qc1[only1]
+    eps_qc[only2] = qc2[only2]
+    eps_qc[both] = np.maximum(qc1[both], qc2[both])
+    return eps.astype("f4"), eps_qc
 
 
 def _dof_spec(params: dict) -> float:
@@ -1537,6 +1593,126 @@ def _attach_epsilon(
     return ds
 
 
+def _best_window_epsilon(ds: xr.Dataset) -> Optional[np.ndarray]:
+    """Per-window best epsilon combined from eps_1/eps_2 via _combine_eps_pair.
+
+    Falls back to the single available probe; None if neither exists.
+    """
+    have1 = "eps_1" in ds
+    have2 = "eps_2" in ds
+    if have1 and have2:
+        eps, _ = _combine_eps_pair(
+            ds["eps_1"].values,
+            ds["eps_2"].values,
+            ds["eps_1_qc"].values.astype("i1"),
+            ds["eps_2_qc"].values.astype("i1"),
+        )
+        return eps
+    if have1:
+        return ds["eps_1"].values
+    if have2:
+        return ds["eps_2"].values
+    return None
+
+
+def _attach_chi(
+    ds: xr.Dataset,
+    freq: np.ndarray,
+    spectra: dict[str, np.ndarray],
+    config: ProfileConfig,
+    params: dict,
+) -> xr.Dataset:
+    """Attach per-probe chi, chi_k_max, FM, and QC flags on the ``time`` dim.
+
+    chi is estimated from each temperature gradient spectrum with epsilon
+    taken as the per-window combined shear-probe estimate (see
+    :func:`_best_window_epsilon` and :func:`pyturb.temperature.estimate_chi`).
+    QC composition mirrors epsilon: speed, FM vs the Kraichnan model, and the
+    matching gradT despike fraction.
+    """
+    if not config.compute_chi:
+        return ds
+
+    eps_best = _best_window_epsilon(ds)
+    if eps_best is None:
+        _log.warning("compute_chi requested but no epsilon estimates available")
+        return ds
+
+    W = ds["W"].values
+    nu = ds["nu"].values
+    kappa_T = ds["kappa_T"].values
+    n = W.size
+
+    sqrt_dof = float(np.sqrt(_dof_spec(params)))
+    speed_bad = W < config.min_speed
+
+    for name in config.temperature_probes:
+        if name not in spectra:
+            continue
+        psd = spectra[name]
+        chi = np.full(n, np.nan)
+        k_max = np.full(n, np.nan)
+        mad = np.full(n, np.nan)
+        for i in range(n):
+            chi[i], k_max[i], mad[i] = estimate_chi(
+                freq,
+                psd[i],
+                W=W[i],
+                eps=eps_best[i],
+                nu=nu[i],
+                kappa_T=kappa_T[i],
+                tau0=config.fp07_tau0,
+                speed_exp=config.fp07_speed_exp,
+            )
+
+        probe_num = name[-1]
+        fm = mad * sqrt_dof
+        ds[f"chi_{probe_num}"] = ("time", chi.astype("f4"))
+        ds[f"chi_{probe_num}"].attrs = {
+            "long_name": f"Temperature variance dissipation rate from {name}",
+            "units": "K2 s-1",
+            "comment": (
+                "Integrated response-corrected temperature gradient spectrum, "
+                "corrected for unresolved variance with the Kraichnan "
+                "spectrum using the combined shear-probe epsilon."
+            ),
+        }
+        ds[f"chi_k_max_{probe_num}"] = ("time", k_max.astype("f4"))
+        ds[f"chi_{probe_num}_fm"] = ("time", fm.astype("f4"))
+        ds[f"chi_{probe_num}_fm"].attrs = {
+            "long_name": f"Figure of merit for chi_{probe_num} Kraichnan fit",
+            "units": "1",
+            "comment": (
+                "FM = mean(|log10(P_gradT / Kraichnan)|) * sqrt(dof_spec) "
+                "over the integration band. Lower is better."
+            ),
+        }
+        despike_frac_var = f"{name}_despike_frac"
+        if despike_frac_var in ds:
+            despike_frac = ds[despike_frac_var].values
+        else:
+            despike_frac = np.zeros(n, dtype="f4")
+        qc = _compose_qc(chi, fm, speed_bad, despike_frac, config)
+        qc_var = f"chi_{probe_num}_qc"
+        ds[qc_var] = ("time", qc)
+        ds[qc_var].attrs = {
+            "long_name": f"QC flag for chi_{probe_num}",
+            "flag_values": _QC_FLAG_VALUES,
+            "flag_meanings": _QC_FLAG_MEANINGS,
+            "valid_min": np.int8(0),
+            "valid_max": np.int8(9),
+            "comment": (
+                f"Composed from speed (min_speed={config.min_speed} m/s), "
+                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
+                f"and {name}_despike_frac "
+                f"(questionable>{config.despike_frac_questionable}, "
+                f"bad>{config.despike_frac_bad})."
+            ),
+        }
+
+    return ds
+
+
 def process_profile(
     ds: xr.Dataset,
     config: Optional[ProfileConfig] = None,
@@ -1565,4 +1741,5 @@ def process_profile(
     ds, params = _preprocess_for_spectra(ds, config)
     ds = _attach_window_scalars(ds, params, config)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
-    return _attach_epsilon(ds, freq, spectra, config, params)
+    ds = _attach_epsilon(ds, freq, spectra, config, params)
+    return _attach_chi(ds, freq, spectra, config, params)
