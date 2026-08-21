@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Generator, Literal, Optional
+from typing import Any, Callable, Generator, Literal, Optional
 
 import gsw  # type: ignore[import]
 import numpy as np
@@ -11,8 +11,10 @@ import xarray as xr
 import yaml
 from profinder import find_profiles  # type: ignore[import]
 
+from .conductivity import match_conductivity_to_temperature
 from .shear import estimate_epsilon
 from .signal import (
+    block_mean,
     clean_spec,
     despike_mask_name,
     despike_variables,
@@ -96,6 +98,19 @@ class ProfileConfig:
     # Requires real (non-default) temperature and salinity to be available.
     compute_thermo: bool = False
 
+    # === JAC-CT conductivity matching ===
+    match_conductivity: bool = True  # lag/low-pass match JAC_C to temperature
+    jac_lag: float = 0.0234  # seconds, at jac_reference_speed
+    jac_f_tc: float = 0.73  # Hz, at jac_reference_speed
+    jac_reference_speed: float = 0.62  # m/s
+
+    # === High-resolution CTD output ===
+    # CTD scalars (pressure, temperature, salinity, conductivity, density)
+    # aren't limited by the FFT/dissipation window, so also attach them on a
+    # finer ctd_time axis (suffix "_hires"), alongside the dissipation-bin
+    # versions. Set <= 0 to disable.
+    ctd_bin_sec: float = 0.25
+
     # === Auxiliary dataset variable names ===
     aux_time: str = "time"  # Time variable in auxiliary dataset
     aux_latitude: str = "lat"  # Latitude variable in auxiliary dataset
@@ -107,6 +122,12 @@ class ProfileConfig:
         None  # Salinity variable in auxiliary dataset (opt-in)
     )
     aux_density: Optional[str] = None  # Density variable in auxiliary dataset (opt-in)
+
+    # Platforms that don't move horizontally during a cast (VMP, etc.) get one
+    # lat/lon per profile instead of a per-window/bin interpolated position.
+    # None = auto-detect from the instrument_vehicle attribute (see
+    # _STATIONARY_VEHICLES); True/False overrides detection.
+    stationary_platform: Optional[bool] = None
 
     # === Processing options ===
     chop_start: bool = True
@@ -888,7 +909,7 @@ def _preprocess_for_spectra(
 def _derive_thermo(
     ds: xr.Dataset,
     means: dict,
-    params: dict,
+    aux_mean: Callable[[np.ndarray], np.ndarray],
     config: ProfileConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
     """Resolve window-mean T, S, density, and the temperature used for viscosity.
@@ -898,6 +919,8 @@ def _derive_thermo(
       - salinity:     aux_salinity     > derived from JAC_C if valid     > default
       - density:      aux_density      > derived from JAC-derived S + T  > default
       - T for nu:     aux_temperature if present, else CT/default ``T_mean``
+
+    ``aux_mean`` averages a raw aux_* array to the same resolution as ``means``.
 
     Returns (T_mean, S_mean, rho_mean, T_visc, salinity_from_jac).
     """
@@ -911,7 +934,7 @@ def _derive_thermo(
 
     salinity_from_jac = False
     if "aux_salinity" in ds:
-        S_mean = _window_mean_slow(ds["aux_salinity"].values, params)
+        S_mean = aux_mean(ds["aux_salinity"].values)
     elif "JAC_C" in means and config.temperature in means:
         # JAC_C is in mS/cm (matching MATLAB ODAS output). Only trust values
         # in the seawater range.
@@ -931,7 +954,7 @@ def _derive_thermo(
         S_mean = np.full(n_windows, config.default_salinity)
 
     if "aux_density" in ds:
-        rho_mean = _window_mean_slow(ds["aux_density"].values, params)
+        rho_mean = aux_mean(ds["aux_density"].values)
     elif salinity_from_jac:
         lon = (
             float(np.nanmean(ds["aux_longitude"].values))
@@ -952,11 +975,304 @@ def _derive_thermo(
         rho_mean = np.full(n_windows, config.default_density)
 
     if "aux_temperature" in ds:
-        T_visc = _window_mean_slow(ds["aux_temperature"].values, params)
+        T_visc = aux_mean(ds["aux_temperature"].values)
     else:
         T_visc = T_mean
 
     return T_mean, S_mean, rho_mean, T_visc, salinity_from_jac
+
+
+def _apply_conductivity_matching(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Lag/low-pass match JAC_C to temperature, on the raw signal before window-averaging."""
+    if not config.match_conductivity:
+        return ds
+    if "JAC_C" not in ds or config.temperature not in ds:
+        return ds
+
+    speed = float(np.nanmean(np.abs(ds[config.speed_smooth].values)))
+    matched = match_conductivity_to_temperature(
+        ds["JAC_C"].values,
+        float(ds.fs_slow),
+        speed,
+        lag=config.jac_lag,
+        f_tc=config.jac_f_tc,
+        reference_speed=config.jac_reference_speed,
+    )
+    ds = ds.copy()
+    ds["JAC_C"] = ("t_slow", matched.astype(ds["JAC_C"].values.dtype))
+    return ds
+
+
+def _first_valid(x: np.ndarray) -> float:
+    """First finite value in x; falls back to x[0] if none are finite."""
+    finite = np.flatnonzero(np.isfinite(x))
+    idx = int(finite[0]) if finite.size else 0
+    return float(x[idx])
+
+
+# Vehicle types (from the p-file's [instrument_info] vehicle field, stored as
+# ds.attrs["instrument_vehicle"]) that stay at essentially one horizontal
+# position for the duration of a cast. Matches ODAS's own vmp/rvmp/xmp
+# grouping in default_vehicle_attributes.ini.
+_STATIONARY_VEHICLES = frozenset({"vmp", "rvmp", "xmp"})
+
+
+def _is_stationary_platform(ds: xr.Dataset, config: ProfileConfig) -> bool:
+    """Whether to use one lat/lon per profile instead of per-window/bin."""
+    if config.stationary_platform is not None:
+        return config.stationary_platform
+    vehicle = str(ds.attrs.get("instrument_vehicle", "")).strip().lower()
+    return vehicle in _STATIONARY_VEHICLES
+
+
+def _build_ctd_vars(
+    ds: xr.Dataset,
+    means: dict,
+    aux_mean: Callable[[np.ndarray], np.ndarray],
+    config: ProfileConfig,
+    include_kinematics: bool = True,
+) -> dict[str, tuple[np.ndarray, dict]]:
+    """Compute pressure, z, temperature, salinity, density, conductivity,
+    and (if config.compute_thermo) absolute_salinity, conservative_temperature,
+    potential_density from window means. Also computes W and nu when
+    ``include_kinematics`` is True.
+
+    On a stationary platform (see :func:`_is_stationary_platform`), lat/lon
+    are used internally (for z and the thermo calc) but not included in the
+    returned dict -- they're attached once, as scalars, by
+    :func:`_attach_scalar_position`. On a moving platform, "lat"/"lon" are
+    included in the returned dict like any other per-window variable.
+
+    ``means`` and ``aux_mean`` must be at the same time resolution. Returns
+    ``{var_name: (array, attrs)}``; salinity/density/lat/lon are only
+    included when derived from a real source.
+    """
+    pressure_var = config.pressure_smooth
+    speed_var = config.speed_smooth
+    n_out = len(means["t_slow"])
+
+    out: dict[str, tuple[np.ndarray, dict]] = {}
+    out["pressure"] = (means.get(pressure_var, np.full(n_out, np.nan)), {})
+    if include_kinematics:
+        out["W"] = (means.get(speed_var, np.full(n_out, np.nan)), {})
+
+    T_mean, S_mean, rho_mean, T_visc, salinity_from_jac = _derive_thermo(
+        ds, means, aux_mean, config
+    )
+
+    if "aux_salinity" in ds or salinity_from_jac:
+        out["salinity"] = (S_mean, {})
+    if "aux_density" in ds or salinity_from_jac:
+        out["density"] = (rho_mean, {})
+
+    out["temperature"] = (T_visc if "aux_temperature" in ds else T_mean, {})
+
+    if include_kinematics:
+        nu, _ = viscosity(S_mean, T_visc, rho_mean)
+        out["nu"] = (nu, {})
+
+    stationary = _is_stationary_platform(ds, config)
+    lat_arr = lon_arr = None
+    if "aux_latitude" in ds:
+        if stationary:
+            lat_arr = np.full(n_out, _first_valid(ds["aux_latitude"].values))
+        else:
+            lat_arr = aux_mean(ds["aux_latitude"].values)
+            out["lat"] = (lat_arr, {})
+    if "aux_longitude" in ds:
+        if stationary:
+            lon_arr = np.full(n_out, _first_valid(ds["aux_longitude"].values))
+        else:
+            lon_arr = aux_mean(ds["aux_longitude"].values)
+            out["lon"] = (lon_arr, {})
+    if "JAC_C" in means:
+        out["conductivity"] = (means["JAC_C"], {})
+
+    lat_for_gsw = (
+        lat_arr if lat_arr is not None else np.full(n_out, config.default_latitude)
+    )
+    lon_for_gsw = (
+        lon_arr if lon_arr is not None else np.full(n_out, config.default_longitude)
+    )
+
+    z = gsw.z_from_p(out["pressure"][0], lat_for_gsw)
+    out["z"] = (
+        z,
+        {
+            "long_name": "Height (negative below sea surface)",
+            "standard_name": "height",
+            "units": "m",
+            "comment": "gsw.z_from_p(pressure, lat)",
+        },
+    )
+
+    has_real_temperature = config.temperature in means or "aux_temperature" in ds
+    has_real_salinity = "salinity" in out
+    if config.compute_thermo and has_real_temperature and has_real_salinity:
+        P_dbar = out["pressure"][0]
+        SP = out["salinity"][0]
+        T_insitu = out["temperature"][0]
+
+        SA = gsw.SA_from_SP(SP, P_dbar, lon_for_gsw, lat_for_gsw)
+        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
+        potential_density = gsw.sigma0(SA, CT) + 1000.0
+
+        out["absolute_salinity"] = (
+            SA,
+            {
+                "long_name": "Absolute Salinity",
+                "standard_name": "sea_water_absolute_salinity",
+                "units": "g kg-1",
+            },
+        )
+        out["conservative_temperature"] = (
+            CT,
+            {
+                "long_name": "Conservative Temperature",
+                "standard_name": "sea_water_conservative_temperature",
+                "units": "degC",
+            },
+        )
+        out["potential_density"] = (
+            potential_density,
+            {
+                "long_name": "Potential density referenced to 0 dbar",
+                "standard_name": "sea_water_potential_density",
+                "units": "kg m-3",
+                "comment": "gsw.sigma0(SA, CT) + 1000",
+            },
+        )
+
+    return out
+
+
+def _attach_scalar_position(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Attach a single scalar lat/lon (no dimension) for a stationary platform.
+
+    No-op for a moving platform, where lat/lon already vary per window/bin
+    and are attached by :func:`_build_ctd_vars` instead.
+    """
+    if not _is_stationary_platform(ds, config):
+        return ds
+    if "aux_latitude" in ds:
+        ds["lat"] = float(_first_valid(ds["aux_latitude"].values))
+        ds["lat"].attrs = {"long_name": "Latitude", "units": "degree_north"}
+    if "aux_longitude" in ds:
+        ds["lon"] = float(_first_valid(ds["aux_longitude"].values))
+        ds["lon"].attrs = {"long_name": "Longitude", "units": "degree_east"}
+    return ds
+
+
+def _attach_buoyancy_frequency(
+    ds: xr.Dataset, config: ProfileConfig, suffix: str = ""
+) -> xr.Dataset:
+    """Attach N2 (buoyancy frequency squared) from the bin-averaged
+    absolute_salinity/conservative_temperature/pressure at one resolution.
+
+    ``suffix=""`` computes ``N2`` from the dissipation-window means (on
+    ``time``); ``suffix="_hires"`` computes ``N2_hires`` from the CTD hires
+    bins (on ``ctd_time``, see :func:`_attach_hires_ctd_vars`). gsw.Nsquared
+    returns values at the midpoints between adjacent bins; computing it from
+    the already bin-averaged (not raw) profile reduces noise. The result is
+    then interpolated from that mid-pressure grid back onto each bin's own
+    pressure value. No-op unless config.compute_thermo produced
+    absolute_salinity/conservative_temperature at this resolution.
+    """
+    dim = "ctd_time" if suffix else "time"
+    sa_name, ct_name, p_name = (
+        f"{v}{suffix}"
+        for v in ("absolute_salinity", "conservative_temperature", "pressure")
+    )
+    if not all(v in ds for v in (sa_name, ct_name, p_name)):
+        return ds
+
+    SA = np.asarray(ds[sa_name].values, dtype=float)
+    CT = np.asarray(ds[ct_name].values, dtype=float)
+    P = np.asarray(ds[p_name].values, dtype=float)
+    valid = np.isfinite(SA) & np.isfinite(CT) & np.isfinite(P)
+    if valid.sum() < 2:
+        return ds
+
+    lat_name = f"lat{suffix}"
+    if lat_name in ds:
+        lat_val = ds[lat_name].values
+        lat_arg = float(lat_val) if lat_val.ndim == 0 else np.asarray(lat_val)[valid]
+    elif "lat" in ds and ds["lat"].ndim == 0:
+        lat_arg = float(ds["lat"].values)
+    else:
+        lat_arg = config.default_latitude
+
+    N2_mid, P_mid = gsw.Nsquared(SA[valid], CT[valid], P[valid], lat=lat_arg)
+
+    order = np.argsort(P_mid)
+    N2 = np.full(len(P), np.nan)
+    N2[valid] = np.interp(
+        P[valid], P_mid[order], N2_mid[order], left=np.nan, right=np.nan
+    )
+
+    source = "CTD hires bins" if suffix else "dissipation-window means"
+    ds[f"N2{suffix}"] = (dim, N2.astype("f4"))
+    ds[f"N2{suffix}"].attrs = {
+        "long_name": "Buoyancy frequency squared",
+        "standard_name": "square_of_brunt_vaisala_frequency_in_sea_water",
+        "units": "s-2",
+        "comment": (
+            "gsw.Nsquared(absolute_salinity, conservative_temperature, "
+            f"pressure) from the {source}, interpolated from gsw's "
+            "mid-pressure grid back onto pressure."
+        ),
+    }
+    return ds
+
+
+def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Attach CTD scalars on a finer ``ctd_time`` axis (suffix ``_hires``).
+
+    Excludes W and nu, which are only meaningful at dissipation-window
+    resolution. Bin width is ``config.ctd_bin_sec``, independent of the
+    FFT/dissipation window. No-op if disabled, ``fs_slow`` is unavailable, or
+    there isn't a full bin's worth of data.
+    """
+    if config.ctd_bin_sec <= 0 or not hasattr(ds, "fs_slow"):
+        return ds
+    if config.temperature not in ds and "JAC_C" not in ds:
+        return ds
+
+    n_ctd = max(1, round(config.ctd_bin_sec * float(ds.fs_slow)))
+    if ds.sizes["t_slow"] < n_ctd:
+        return ds
+
+    vars_to_mean = [
+        "t_slow",
+        config.pressure_smooth,
+        config.speed_smooth,
+        config.temperature,
+        "JAC_C",
+    ]
+    means_ctd = {v: block_mean(ds[v].values, n_ctd) for v in vars_to_mean if v in ds}
+    if len(means_ctd.get("t_slow", [])) == 0:
+        return ds
+
+    ctd_vars = _build_ctd_vars(
+        ds,
+        means_ctd,
+        lambda x: block_mean(x, n_ctd),
+        config,
+        include_kinematics=False,
+    )
+
+    ds = ds.assign_coords(ctd_time=("ctd_time", means_ctd["t_slow"]))
+    if "units" in ds.t_slow.attrs:
+        ds.ctd_time.attrs["units"] = ds.t_slow.attrs["units"]
+    ds.ctd_time.attrs["long_name"] = "Time (CTD bins)"
+
+    for name, (arr, attrs) in ctd_vars.items():
+        out_name = f"{name}_hires"
+        ds[out_name] = ("ctd_time", arr.astype("f4"))
+        if attrs:
+            ds[out_name].attrs = attrs
+
+    return ds
 
 
 def _attach_window_scalars(
@@ -964,14 +1280,20 @@ def _attach_window_scalars(
 ) -> xr.Dataset:
     """Compute window-mean scalars and attach them on the output ``time`` axis.
 
-    Adds: ``time`` coord, ``pressure``, ``W``, ``temperature``, ``nu``;
-    plus ``salinity``, ``density``, ``lat``, ``lon``, ``conductivity`` when
-    the relevant inputs are available; plus ``absolute_salinity``,
-    ``conservative_temperature``, ``potential_density`` when
-    ``config.compute_thermo`` is set and real temperature/salinity exist.
+    Adds: ``time`` coord, ``pressure``, ``z``, ``W``, ``temperature``, ``nu``;
+    plus ``salinity``, ``density``, ``conductivity``, and (on a moving
+    platform) ``lat``/``lon`` when the relevant inputs are available; plus
+    ``absolute_salinity``, ``conservative_temperature``, ``potential_density``,
+    ``N2`` when ``config.compute_thermo`` is set and real temperature/salinity
+    exist. On a stationary platform, a single scalar ``lat``/``lon`` is
+    attached instead (see :func:`_attach_scalar_position`). Also attaches
+    ``_hires`` versions of the CTD scalars (including ``N2_hires``) on a
+    finer ``ctd_time`` axis (see :func:`_attach_hires_ctd_vars`).
     """
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
+
+    ds = _apply_conductivity_matching(ds, config)
 
     means = compute_window_means(
         ds,
@@ -979,90 +1301,24 @@ def _attach_window_scalars(
         params,
     )
 
-    n_windows = len(means["t_slow"])
     ds = ds.assign_coords(time=("time", means["t_slow"]))
     if "units" in ds.t_slow.attrs:
         ds.time.attrs["units"] = ds.t_slow.attrs["units"]
     if "long_name" in ds.t_slow.attrs:
         ds.time.attrs["long_name"] = "Time (dissipation windows)"
 
-    ds["pressure"] = (
-        "time",
-        means.get(pressure_var, np.full(n_windows, np.nan)).astype("f4"),
+    ctd_vars = _build_ctd_vars(
+        ds, means, lambda x: _window_mean_slow(x, params), config
     )
-    ds["W"] = ("time", means.get(speed_var, np.full(n_windows, np.nan)).astype("f4"))
+    for name, (arr, attrs) in ctd_vars.items():
+        ds[name] = ("time", arr.astype("f4"))
+        if attrs:
+            ds[name].attrs = attrs
 
-    T_mean, S_mean, rho_mean, T_visc, salinity_from_jac = _derive_thermo(
-        ds, means, params, config
-    )
-
-    # Only attach S and rho if they come from a real source (not the default).
-    if "aux_salinity" in ds or salinity_from_jac:
-        ds["salinity"] = ("time", S_mean.astype("f4"))
-    if "aux_density" in ds or salinity_from_jac:
-        ds["density"] = ("time", rho_mean.astype("f4"))
-
-    if "aux_temperature" in ds:
-        ds["temperature"] = ("time", T_visc.astype("f4"))
-    else:
-        ds["temperature"] = ("time", T_mean.astype("f4"))
-
-    nu, _ = viscosity(S_mean, T_visc, rho_mean)
-    ds["nu"] = ("time", nu.astype("f4"))
-
-    if "aux_latitude" in ds:
-        ds["lat"] = (
-            "time",
-            _window_mean_slow(ds["aux_latitude"].values, params).astype("f4"),
-        )
-    if "aux_longitude" in ds:
-        ds["lon"] = (
-            "time",
-            _window_mean_slow(ds["aux_longitude"].values, params).astype("f4"),
-        )
-    if "JAC_C" in means:
-        ds["conductivity"] = ("time", means["JAC_C"].astype("f4"))
-
-    has_real_temperature = config.temperature in means or "aux_temperature" in ds
-    has_real_salinity = "salinity" in ds
-    if config.compute_thermo and has_real_temperature and has_real_salinity:
-        lat = (
-            ds["lat"].values
-            if "lat" in ds
-            else np.full(n_windows, config.default_latitude)
-        )
-        lon = (
-            ds["lon"].values
-            if "lon" in ds
-            else np.full(n_windows, config.default_longitude)
-        )
-        P_dbar = ds["pressure"].values
-        SP = ds["salinity"].values
-        T_insitu = ds["temperature"].values
-
-        SA = gsw.SA_from_SP(SP, P_dbar, lon, lat)
-        CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
-        potential_density = gsw.sigma0(SA, CT) + 1000.0
-
-        ds["absolute_salinity"] = ("time", SA.astype("f4"))
-        ds["absolute_salinity"].attrs = {
-            "long_name": "Absolute Salinity",
-            "standard_name": "sea_water_absolute_salinity",
-            "units": "g kg-1",
-        }
-        ds["conservative_temperature"] = ("time", CT.astype("f4"))
-        ds["conservative_temperature"].attrs = {
-            "long_name": "Conservative Temperature",
-            "standard_name": "sea_water_conservative_temperature",
-            "units": "degC",
-        }
-        ds["potential_density"] = ("time", potential_density.astype("f4"))
-        ds["potential_density"].attrs = {
-            "long_name": "Potential density referenced to 0 dbar",
-            "standard_name": "sea_water_potential_density",
-            "units": "kg m-3",
-            "comment": "gsw.sigma0(SA, CT) + 1000",
-        }
+    ds = _attach_scalar_position(ds, config)
+    ds = _attach_buoyancy_frequency(ds, config)
+    ds = _attach_hires_ctd_vars(ds, config)
+    ds = _attach_buoyancy_frequency(ds, config, suffix="_hires")
 
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]

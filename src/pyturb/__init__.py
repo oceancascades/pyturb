@@ -14,6 +14,7 @@ except PackageNotFoundError:
 
 from . import (
     auxiliary,
+    conductivity,
     io,
     merge,
     pfile,
@@ -27,6 +28,7 @@ from . import (
 __all__ = [
     "__version__",
     "auxiliary",
+    "conductivity",
     "io",
     "merge",
     "pfile",

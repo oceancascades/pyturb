@@ -463,6 +463,37 @@ def eps(
             show_default=True,
         ),
     ] = False,
+    match_conductivity: Annotated[
+        bool,
+        typer.Option(
+            "--match-conductivity/--no-match-conductivity",
+            help="Lag and low-pass match JAC_C to JAC_T before window-averaging",
+            show_default=True,
+        ),
+    ] = True,
+    ctd_bin_sec: Annotated[
+        float,
+        typer.Option(
+            "--ctd-bin-sec",
+            help=(
+                "Bin width in seconds for high-resolution CTD output "
+                "(pressure, temperature, salinity, conductivity, density) "
+                "on a separate ctd_time axis. Set to 0 to disable."
+            ),
+            show_default=True,
+        ),
+    ] = 0.25,
+    stationary_platform: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--stationary-platform/--moving-platform",
+            help=(
+                "Use one lat/lon per profile instead of interpolating a "
+                "position onto every window/bin. Default: auto-detect from "
+                "the p-file's vehicle field (vmp/rvmp/xmp are stationary)."
+            ),
+        ),
+    ] = None,
     n_workers: Annotated[
         int | None,
         typer.Option(
@@ -532,6 +563,9 @@ def eps(
         accel_clean=accel_clean,
         emc_clean=emc_clean,
         compute_thermo=thermo,
+        match_conductivity=match_conductivity,
+        ctd_bin_sec=ctd_bin_sec,
+        stationary_platform=stationary_platform,
     )
     # Only override the despike defaults — and force re-despike — when the
     # user explicitly passed --despike. Otherwise embedded <probe>_clean
@@ -682,8 +716,7 @@ def profiles(
 ):
     """Detect profiles in converted NetCDF files and write a boundary index.
 
-    Detection only touches the slow-channel pressure record, so this is much
-    cheaper than `eps`. Output files are named {stem}_profiles.nc and record
+    Output files are named {stem}_profiles.nc and record
     each profile's start/end indices, times, and direction, plus the
     detection config used.
 
@@ -765,6 +798,16 @@ def bin(
             show_default=True,
         ),
     ] = 2.0,
+    ctd_bin_width: Annotated[
+        Optional[float],
+        typer.Option(
+            "--ctd-bin-width",
+            help=(
+                "Also bin higher-resolution CTD variables onto a finer grid of this width (m)."
+                "Variables appear on a separate ctd_depth coordinate."
+            ),
+        ),
+    ] = None,
     default_latitude: Annotated[
         float,
         typer.Option(
@@ -773,15 +816,6 @@ def bin(
             show_default=True,
         ),
     ] = 45.0,
-    bin_by_pressure: Annotated[
-        bool,
-        typer.Option(
-            "--pressure",
-            "-p",
-            help="Bin by pressure (dbar) instead of depth (m)",
-            show_default=True,
-        ),
-    ] = False,
     variables: Annotated[
         str | None,
         typer.Option(
@@ -789,8 +823,8 @@ def bin(
             "-v",
             help=(
                 "Comma-separated list of variables to bin (default: "
-                "eps_1,eps_2,W,temperature,salinity,density,absolute_salinity,"
-                "conservative_temperature,potential_density,nu,lat,lon)"
+                "eps_1,eps_2,W,temperature,salinity,density,z,absolute_salinity,"
+                "conservative_temperature,potential_density,N2,nu,lat,lon)"
             ),
         ),
     ] = None,
@@ -826,13 +860,11 @@ def bin(
 ):
     """Bin epsilon profiles by depth and concatenate into a single file.
 
-    By default, bins by depth calculated from pressure using gsw.
-    Use --pressure to bin by pressure instead.
+    Depth is calculated from pressure using gsw.
 
     Examples:
         pyturb bin ./eps_output/*.nc -o binned.nc
         pyturb bin ./eps_output/*.nc -b 5.0 --dmax 500
-        pyturb bin ./eps_output/*.nc --pressure --dmin 0 --dmax 500
         pyturb bin ./eps_output/*.nc --qc-thresh 5e-10
     """
     if not input_files:
@@ -854,10 +886,10 @@ def bin(
         bin_width=bin_width,
         variables=var_list,
         default_latitude=default_latitude,
-        bin_by_pressure=bin_by_pressure,
         n_workers=n_workers,
         questionable_thresh=qc_opts.get("questionable", 1e-7),
         bad_thresh=qc_opts.get("bad", 1e-9),
+        ctd_bin_width=ctd_bin_width,
     )
 
     if result is None:

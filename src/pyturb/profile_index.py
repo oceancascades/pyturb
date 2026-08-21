@@ -164,9 +164,8 @@ def _materialize_profiles(
 ) -> list[tuple[Path, Optional[str]]]:
     """Write each indexed profile's full-resolution data to its own NetCDF file.
 
-    Output files are named ``{stem}_p{NNNN}_hires.nc`` -- distinct from
-    ``eps``'s ``{stem}_p{NNNN}.nc`` so the two can share an output directory.
-    Returns a list of (output_file, error) tuples, one per detected profile.
+    Output files are named ``{stem}_p{NNNN}_hires.nc``. Returns a list of
+    (output_file, error) tuples, one per detected profile.
     """
     results: list[tuple[Path, Optional[str]]] = []
     for i in range(idx_ds.sizes["profile"]):
@@ -221,9 +220,6 @@ def _process_file_for_index(
         idx_ds = build_profile_index(prepared, config)
 
         if idx_ds.sizes["profile"] == 0:
-            # Mirrors eps's fallback (processing.py's _process_file): treat
-            # an undetectable file as one whole-file profile rather than
-            # silently producing an empty index.
             _log.info("No profiles detected; indexing the whole file as one profile.")
             n_slow = prepared.sizes["t_slow"]
             idx_ds = _index_from_segments(prepared, config, [(0, n_slow - 1)])
@@ -284,8 +280,7 @@ def batch_index_profiles(
         Whether to overwrite an existing index or hires file. Default False.
     materialize : bool, optional
         Also write each detected profile's full-resolution data to its own
-        ``{stem}_p{NNNN}_hires.nc`` file, in the same pass (no second load of
-        the source file). Default False.
+        ``{stem}_p{NNNN}_hires.nc`` file. Default False.
     compress : bool, optional
         Compress materialized profile NetCDF output. Only used when
         ``materialize`` is True. Default False.
