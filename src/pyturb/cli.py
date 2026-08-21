@@ -838,7 +838,7 @@ def bin(
                 "Comma-separated list of variables to bin (default: "
                 "eps_1,eps_2,chi_1,chi_2,W,temperature,salinity,density,z,"
                 "absolute_salinity,conservative_temperature,potential_density,"
-                "N2,nu,lat,lon)"
+                "N2,nu,kappa_T,lat,lon)"
             ),
         ),
     ] = None,

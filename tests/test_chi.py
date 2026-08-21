@@ -11,7 +11,7 @@ from pyturb.pfile import load_pfile_phys
 from pyturb.processing import _write_epsilon_profile, bin_profiles
 from pyturb.profile import ProfileConfig, _combine_eps_pair, process_profile
 from pyturb.temperature import (
-    double_pole_correction,
+    single_pole_correction,
     estimate_chi,
     kraichnan_spectrum,
     resolved_kraichnan_fraction,
@@ -60,22 +60,22 @@ class TestThermalDiffusivity:
         assert warm > cold
 
 
-class TestDoublePoleCorrection:
+class TestSinglePoleCorrection:
     def test_unity_at_zero_frequency(self):
-        corr = double_pole_correction(np.array([0.0, 10.0]), W=0.6)
+        corr = single_pole_correction(np.array([0.0, 10.0]), W=0.6)
         assert corr[0] == 1.0
         assert corr[1] > 1.0
 
     def test_slower_speed_larger_correction(self):
         f = np.array([20.0])
-        assert double_pole_correction(f, W=0.3) > double_pole_correction(f, W=1.0)
+        assert single_pole_correction(f, W=0.3) > single_pole_correction(f, W=1.0)
 
 
 class TestEstimateChi:
     def _synthetic_spectrum(self, eps, W=0.6):
         f = np.arange(1, 512) * 98.0 / 512
         psi = kraichnan_spectrum(f / W, CHI, eps, NU, KAPPA)
-        P_f = psi / W / double_pole_correction(f, W)
+        P_f = psi / W / single_pole_correction(f, W)
         return f, P_f
 
     @pytest.mark.parametrize("eps", [1e-10, 1e-9, 1e-7])
@@ -182,6 +182,13 @@ class TestChiPipeline:
     def test_chi_qc_valid_flags(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)
         assert set(np.unique(written["chi_1_qc"].values)) <= {0, 1, 2, 4, 9}
+
+    def test_kappa_t_written(self, chi_eps_file):
+        written = xr.load_dataset(chi_eps_file, decode_times=False)
+        assert "kappa_T" in written
+        assert written["kappa_T"].dims == ("time",)
+        vals = written["kappa_T"].values
+        assert np.all((vals > 1e-7) & (vals < 2e-7))
 
     def test_on_by_default(self):
         assert ProfileConfig().compute_chi is True

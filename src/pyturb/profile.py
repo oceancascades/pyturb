@@ -100,7 +100,7 @@ class ProfileConfig:
 
     # === Temperature variance dissipation (chi) ===
     compute_chi: bool = True
-    # FP07 double-pole response: tau = fp07_tau0 * W^fp07_speed_exp.
+    # FP07 single-pole response: tau = fp07_tau0 * W^fp07_speed_exp.
     fp07_tau0: float = 0.010
     fp07_speed_exp: float = -0.5
 
@@ -1076,6 +1076,15 @@ def _build_ctd_vars(
     if include_kinematics:
         nu, _ = viscosity(S_mean, T_visc, rho_mean)
         out["nu"] = (nu, {})
+        kappa_T = thermal_diffusivity(S_mean, T_visc, rho_mean, out["pressure"][0])
+        out["kappa_T"] = (
+            kappa_T,
+            {
+                "long_name": "Molecular thermal diffusivity",
+                "units": "m2 s-1",
+                "comment": "Caldwell (1974) conductivity / (rho * cp0)",
+            },
+        )
 
     stationary = _is_stationary_platform(ds, config)
     lat_arr = lon_arr = None
@@ -1631,18 +1640,8 @@ def _attach_chi(
 
     W = ds["W"].values
     nu = ds["nu"].values
-    T = ds["temperature"].values
-    n = T.size
-    S = (
-        ds["salinity"].values
-        if "salinity" in ds
-        else np.full(n, config.default_salinity)
-    )
-    rho = (
-        ds["density"].values if "density" in ds else np.full(n, config.default_density)
-    )
-    P = ds["pressure"].values
-    kappa_T = thermal_diffusivity(S, T, rho, P)
+    kappa_T = ds["kappa_T"].values
+    n = W.size
 
     sqrt_dof = float(np.sqrt(_dof_spec(params)))
     speed_bad = W < config.min_speed

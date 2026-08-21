@@ -109,7 +109,7 @@ The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectr
 
 With `--chi`, the dissipation rate of temperature variance is estimated from the FP07 temperature gradient spectra:
 
-1. Spectra are corrected for the thermistor frequency response using a double-pole transfer function with a speed-dependent time constant (Vachon & Lueck).
+1. Spectra are corrected for the thermistor frequency response using a single-pole transfer function with a speed-dependent time constant (Lueck).
 2. Chi is computed by integrating the corrected spectrum over the resolved wavenumber band, with the upper limit set by the anti-alias cutoff, the spectral noise minimum, and the 95%-variance wavenumber.
 3. Epsilon is taken as the per-window combination of the shear-probe estimates (mean if within a factor of 10, minimum otherwise), fixing the Batchelor wavenumber.
 4. Unresolved variance is corrected using the closed-form integral of the Kraichnan spectrum.

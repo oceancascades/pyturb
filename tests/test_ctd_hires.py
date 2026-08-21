@@ -59,9 +59,11 @@ class TestHiresCtdVars:
 
         assert "W_hires" not in out
         assert "nu_hires" not in out
+        assert "kappa_T_hires" not in out
         # Still present at the main (dissipation-window) resolution.
         assert "W" in out
         assert "nu" in out
+        assert "kappa_T" in out
 
     def test_ctd_time_much_finer_than_time(self):
         ds = _make_ds()

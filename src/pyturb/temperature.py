@@ -77,15 +77,15 @@ def resolved_kraichnan_fraction(
     return 1.0 - (1.0 + x) * np.exp(-x)
 
 
-def double_pole_correction(
+def single_pole_correction(
     f: np.ndarray, W: float, tau0: float = 0.010, speed_exp: float = -0.5
 ) -> np.ndarray:
-    """FP07 double-pole response correction H^-2 = (1 + (2 pi f tau)^2)^2.
+    """FP07 single-pole response correction H^-2 = 1 + (2 pi f tau)^2.
 
-    tau = tau0 * W^speed_exp (Vachon & Lueck style speed dependence).
+    tau = tau0 * W^speed_exp (Lueck style speed dependence).
     """
     tau = tau0 * W**speed_exp
-    return (1.0 + (2 * np.pi * f * tau) ** 2) ** 2
+    return 1.0 + (2 * np.pi * f * tau) ** 2
 
 
 def _mad_vs_kraichnan(
@@ -141,7 +141,7 @@ def estimate_chi(
     nu   : kinematic viscosity (m^2/s)
     kappa_T : molecular thermal diffusivity (m^2/s)
     f_AA : anti-alias cutoff (Hz)
-    tau0, speed_exp : FP07 response parameters (see double_pole_correction)
+    tau0, speed_exp : FP07 response parameters (see single_pole_correction)
     fit_order : polynomial order for the spectral-minimum search
 
     Returns
@@ -166,7 +166,7 @@ def estimate_chi(
         return float("nan"), float("nan"), float("nan")
 
     k = f / W
-    phi = P_f * W * double_pole_correction(f, W, tau0, speed_exp)
+    phi = P_f * W * single_pole_correction(f, W, tau0, speed_exp)
 
     k_B = (eps / (nu * kappa_T**2)) ** 0.25
     k_95 = _X95 * k_B / (np.sqrt(6 * Q_KRAICHNAN) * 2 * np.pi)

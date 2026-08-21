@@ -788,6 +788,7 @@ def bin_profiles(
             "potential_density",
             "N2",
             "nu",
+            "kappa_T",
             "lat",
             "lon",
         ]
