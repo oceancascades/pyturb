@@ -1166,7 +1166,8 @@ def calibrate_fp07_apply(
         typer.echo("Error: No input files specified.", err=True)
         raise typer.Exit(1)
     _require_output_target(output_dir, overwrite)
-    _apply_fits_to_files(fits, files, output_dir)
+    if not _apply_fits_to_files(fits, files, output_dir):
+        raise typer.Exit(1)
 
 
 def _require_output_target(output_dir: Path | None, overwrite: bool) -> None:
@@ -1185,22 +1186,34 @@ def _require_output_target(output_dir: Path | None, overwrite: bool) -> None:
 
 def _apply_fits_to_files(
     fits: list, files: list[Path], output_dir: Path | None
-) -> None:
-    """Apply every fit to every file, writing in place or to output_dir."""
+) -> bool:
+    """Apply every fit to every file, writing in place or to output_dir.
+
+    Returns False if any file raised while being calibrated. A single bad
+    file must not abort the whole batch (a multi-hour, multi-file run) --
+    but callers should surface the failure as a nonzero exit so it isn't
+    mistaken for a clean run by an unattended script.
+    """
+    ok = True
     for f in files:
-        ds = load_profile_nc(f)
-        applied_any = False
-        for fit in fits:
-            before = ds
-            ds = apply_probe_calibration(ds, fit)
-            if ds is not before:
-                applied_any = True
-        if not applied_any:
-            typer.echo(f"{f.name}: no matching probe SN, skipped")
-            continue
-        out_path = (output_dir / f.name) if output_dir is not None else f
-        ds.to_netcdf(out_path)
-        typer.echo(f"{f.name}: calibrated -> {out_path}")
+        try:
+            ds = load_profile_nc(f)
+            applied_any = False
+            for fit in fits:
+                before = ds
+                ds = apply_probe_calibration(ds, fit)
+                if ds is not before:
+                    applied_any = True
+            if not applied_any:
+                typer.echo(f"{f.name}: no matching probe SN, skipped")
+                continue
+            out_path = (output_dir / f.name) if output_dir is not None else f
+            ds.to_netcdf(out_path)
+            typer.echo(f"{f.name}: calibrated -> {out_path}")
+        except Exception as e:
+            ok = False
+            typer.echo(f"{f.name}: FAILED to calibrate ({e}), left untouched", err=True)
+    return ok
 
 
 def _scan_probe_groups(
@@ -1234,6 +1247,15 @@ def _scan_probe_groups(
     return groups
 
 
+# A confident lag estimate: observed good fits land at lag_corr >= 0.92;
+# observed bad ones (the cross-correlation search finding no real peak,
+# often landing right at its search boundary) land at <= 0.52.
+_MIN_LAG_CORR = 0.7
+# How many of a file's detected profiles (best reference-range first) to
+# try before moving to the next candidate file.
+_MAX_PROFILES_PER_FILE = 3
+
+
 def _fit_from_middle_of_group(
     group_files: list[Path],
     probe: str,
@@ -1244,9 +1266,14 @@ def _fit_from_middle_of_group(
 ) -> Optional[ProbeCalibrationFit]:
     """Fit from a profile in the file at the middle of the (sorted) group.
 
-    Picks, within that file, the detected profile with the largest
-    reference-temperature range. Falls back to files progressively further
-    from the middle if the middle file yields no usable fit.
+    Within each candidate file, tries the detected profiles in descending
+    order of reference-temperature range, accepting the first fit whose lag
+    estimate is confident (see _MIN_LAG_CORR) -- a wide temperature range
+    doesn't guarantee the cross-correlation lag search finds a real peak.
+    Falls back to files progressively further from the middle if nothing in
+    a file qualifies. If no candidate ever qualifies, returns the one with
+    the strongest lag correlation seen, with a warning, rather than giving
+    up entirely.
     """
     group_files = sorted(group_files)
     mid = len(group_files) // 2
@@ -1257,36 +1284,58 @@ def _fit_from_middle_of_group(
         if mid - delta >= 0:
             candidate_order.append(mid - delta)
 
+    best_fit: Optional[ProbeCalibrationFit] = None
     for idx in candidate_order:
         f = group_files[idx]
         try:
             ds = prepare_profile(load_profile_nc(f), config)
             profile_list = list(split_into_profiles(ds, config)) or [(0, ds)]
-            best = None
-            for pidx, profile_ds in profile_list:
-                if reference not in profile_ds:
-                    continue
-                values = profile_ds[reference].values
-                t_range = float(np.nanmax(values) - np.nanmin(values))
-                if best is None or t_range > best[0]:
-                    best = (t_range, pidx, profile_ds)
-            if best is None:
-                continue
-            _, pidx, profile_ds = best
-            return fit_probe_calibration(
-                profile_ds,
-                probe,
-                config,
-                fit_file=f.name,
-                profile_index=pidx,
-                ref=reference,
-                order=order,
-                min_range_c=min_range,
-            )
         except Exception as e:
-            _log.debug(f"{probe}: fit attempt on {f.name} failed: {e}")
+            _log.debug(f"{probe}: could not prepare {f.name}: {e}")
             continue
-    return None
+
+        ranked = sorted(
+            (
+                (
+                    float(np.nanmax(profile_ds[reference].values))
+                    - float(np.nanmin(profile_ds[reference].values)),
+                    pidx,
+                    profile_ds,
+                )
+                for pidx, profile_ds in profile_list
+                if reference in profile_ds
+            ),
+            key=lambda item: -item[0],
+        )
+
+        for _, pidx, profile_ds in ranked[:_MAX_PROFILES_PER_FILE]:
+            try:
+                fit = fit_probe_calibration(
+                    profile_ds,
+                    probe,
+                    config,
+                    fit_file=f.name,
+                    profile_index=pidx,
+                    ref=reference,
+                    order=order,
+                    min_range_c=min_range,
+                )
+            except Exception as e:
+                _log.debug(f"{probe}: fit attempt on {f.name}:p{pidx} failed: {e}")
+                continue
+            if abs(fit.lag_corr) >= _MIN_LAG_CORR:
+                return fit
+            if best_fit is None or abs(fit.lag_corr) > abs(best_fit.lag_corr):
+                best_fit = fit
+
+    if best_fit is not None:
+        typer.echo(
+            f"{probe} (instrument {best_fit.instrument_sn}, SN {best_fit.sn}): "
+            f"no candidate profile gave a confident lag estimate (best "
+            f"lag_corr={best_fit.lag_corr:.2f}); using it anyway.",
+            err=True,
+        )
+    return best_fit
 
 
 @calibrate_fp07_app.command("auto")
@@ -1391,4 +1440,5 @@ def calibrate_fp07_auto(
         typer.echo(f"\nWrote calibration report to '{report}'")
 
     typer.echo("")
-    _apply_fits_to_files(fits, files, output_dir)
+    if not _apply_fits_to_files(fits, files, output_dir):
+        raise typer.Exit(1)

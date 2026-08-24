@@ -313,6 +313,34 @@ def fit_probe_calibration(
     )
 
 
+# Broad, globally-safe bounds on seawater temperature. A corrected value
+# outside this range indicates an extrapolation failure (e.g. a profile
+# with raw counts far outside the fitted range) rather than real data, and
+# is masked to NaN rather than propagated.
+_MIN_SANE_TEMP_C = -3.0
+_MAX_SANE_TEMP_C = 40.0
+
+
+def _rebuild_T_from_raw(
+    ds: xr.Dataset, fit: ProbeCalibrationFit, params: dict
+) -> NDArray:
+    """Recompute the standalone T1/T2 temperature from raw counts with the
+    new coefficients (no clip -- see log_r_from_counts)."""
+    counts_name = f"{fit.probe}_counts"
+    if counts_name not in ds:
+        raise ValueError(
+            f"{fit.probe}: '{counts_name}' not found; reconvert with the "
+            "current p2nc to enable in-situ calibration."
+        )
+    a, b, g, e_b, _, adc_bits = _electronics(params)
+    adc_fs = float(params["adc_fs"])
+    log_R = log_r_from_counts(ds[counts_name].values, a, b, g, e_b, adc_fs, adc_bits)
+    return (
+        steinhart_hart_forward(log_R, fit.new_T_0, fit.new_beta_1, fit.new_beta_2)
+        - 273.15
+    )
+
+
 def _rebuild_gradT_from_raw(
     ds: xr.Dataset, fit: ProbeCalibrationFit, params: dict
 ) -> NDArray:
@@ -345,11 +373,16 @@ def _rebuild_gradT_from_raw(
 
 
 def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Dataset:
-    """Apply a fitted calibration to a converted file's gradT signal, in place.
+    """Apply a fitted calibration to a converted file, in place.
 
-    Recomputes ``gradT1``/``gradT2`` from raw counts with the new
-    coefficients (exact, no data loss), shifts it by the fitted lag, and
-    stamps provenance attributes. No-ops unless both the probe SN and the
+    Recomputes both the standalone temperature (``T1``/``T2``) and the
+    gradient (``gradT1``/``gradT2``) from raw counts with the new
+    coefficients (exact, no data loss), shifts each by the fitted lag, and
+    masks samples outside a physically sane temperature range
+    (_MIN_SANE_TEMP_C to _MAX_SANE_TEMP_C) to NaN -- extrapolating the fit
+    to raw counts far outside its fitted range (e.g. an anomalous profile)
+    can otherwise produce nonsense rather than merely inaccurate values.
+    Stamps provenance attributes. No-ops unless both the probe SN and the
     instrument SN match ``fit.sn``/``fit.instrument_sn`` -- a probe SN alone
     isn't a safe match key (e.g. generic/placeholder SNs are occasionally
     reused across probes/instruments).
@@ -375,32 +408,73 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
         )
         return ds
 
-    grad = _rebuild_gradT_from_raw(ds, fit, params)
+    fs_slow = float(ds.fs_slow)
     fs_fast = float(ds.fs_fast)
+
+    T = _rebuild_T_from_raw(ds, fit, params)
+    T = _shift(T, -fit.lag_s * fs_slow)
+    bad_slow = ~np.isfinite(T) | (T < _MIN_SANE_TEMP_C) | (T > _MAX_SANE_TEMP_C)
+    n_bad = int(bad_slow.sum())
+    if n_bad:
+        _log.warning(
+            f"{fit.probe}: {n_bad}/{bad_slow.size} ({n_bad / bad_slow.size:.1%}) "
+            f"corrected samples fell outside [{_MIN_SANE_TEMP_C}, {_MAX_SANE_TEMP_C}] C "
+            f"(extrapolation beyond the fitted range); setting {fit.probe}/{grad_name} "
+            "to NaN there."
+        )
+    T[bad_slow] = np.nan
+
+    grad = _rebuild_gradT_from_raw(ds, fit, params)
     grad = _shift(grad, -fit.lag_s * fs_fast)
+    bad_fast = (
+        np.interp(ds["t_fast"].values, ds["t_slow"].values, bad_slow.astype(float)) > 0
+    )
+    grad[bad_fast] = np.nan
 
     old_T_0, old_beta_1, old_beta_2 = _coefficients(params)
+    # Save attrs before the bare (dims, data) assignments below, which would
+    # otherwise silently wipe them -- including the cal_* attrs that a later
+    # fit's SN-mismatch check (_channel_params, above) depends on. Losing
+    # them mid-run raised an uncaught ValueError on the next fit for the
+    # same probe, killing 'calibrate-fp07 auto' partway through a batch with
+    # no indication beyond the traceback -- and since callers loop through
+    # every fit against every file relying on the mismatch check to no-op,
+    # the very first successful match for a probe silently broke every
+    # subsequent fit attempt for that same probe.
+    probe_attrs = dict(ds[fit.probe].attrs)
+    grad_attrs = dict(ds[grad_name].attrs)
     ds = ds.copy()
+    ds[fit.probe] = (ds[fit.probe].dims, T.astype(ds[fit.probe].values.dtype))
     ds[grad_name] = (ds[grad_name].dims, grad.astype(ds[grad_name].values.dtype))
-    ds[grad_name].attrs[f"{fit.probe}_fp07_recalibrated"] = np.int8(1)
-    ds[grad_name].attrs[f"{fit.probe}_fp07_old_T_0"] = old_T_0
-    ds[grad_name].attrs[f"{fit.probe}_fp07_old_beta_1"] = old_beta_1
-    ds[grad_name].attrs[f"{fit.probe}_fp07_new_T_0"] = fit.new_T_0
-    ds[grad_name].attrs[f"{fit.probe}_fp07_new_beta_1"] = fit.new_beta_1
-    ds[grad_name].attrs[f"{fit.probe}_fp07_new_beta_2"] = (
-        fit.new_beta_2 if fit.new_beta_2 is not None else np.nan
-    )
-    ds[grad_name].attrs[f"{fit.probe}_fp07_lag_s"] = fit.lag_s
-    ds[grad_name].attrs[f"{fit.probe}_fp07_cal_date"] = fit.fit_date
-    ds[grad_name].attrs[f"{fit.probe}_fp07_cal_source"] = (
-        f"{fit.fit_file}:p{fit.profile_index}"
-    )
+    ds[fit.probe].attrs.update(probe_attrs)
+    ds[grad_name].attrs.update(grad_attrs)
+    for name in (fit.probe, grad_name):
+        ds[name].attrs[f"{fit.probe}_fp07_recalibrated"] = np.int8(1)
+        ds[name].attrs[f"{fit.probe}_fp07_old_T_0"] = old_T_0
+        ds[name].attrs[f"{fit.probe}_fp07_old_beta_1"] = old_beta_1
+        ds[name].attrs[f"{fit.probe}_fp07_new_T_0"] = fit.new_T_0
+        ds[name].attrs[f"{fit.probe}_fp07_new_beta_1"] = fit.new_beta_1
+        ds[name].attrs[f"{fit.probe}_fp07_new_beta_2"] = (
+            fit.new_beta_2 if fit.new_beta_2 is not None else np.nan
+        )
+        ds[name].attrs[f"{fit.probe}_fp07_lag_s"] = fit.lag_s
+        ds[name].attrs[f"{fit.probe}_fp07_cal_date"] = fit.fit_date
+        ds[name].attrs[f"{fit.probe}_fp07_cal_source"] = (
+            f"{fit.fit_file}:p{fit.profile_index}"
+        )
+        ds[name].attrs[f"{fit.probe}_fp07_n_out_of_range"] = n_bad
     return ds
 
 
 def write_report(fits: list[ProbeCalibrationFit], path: Path) -> None:
-    """Write a calibration report (parameters + fit-quality comparison) as YAML."""
-    data = {fit.probe: asdict(fit) for fit in fits}
+    """Write a calibration report (parameters + fit-quality comparison) as YAML.
+
+    A plain list, keyed by nothing -- multiple fits can share the same
+    ``probe`` (e.g. the same channel calibrated separately per instrument/SN
+    by 'calibrate-fp07 auto'), so a dict keyed by probe would silently drop
+    all but one.
+    """
+    data = [asdict(fit) for fit in fits]
     Path(path).write_text(
         yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
     )
@@ -409,4 +483,4 @@ def write_report(fits: list[ProbeCalibrationFit], path: Path) -> None:
 def read_report(path: Path) -> list[ProbeCalibrationFit]:
     """Read a calibration report written by :func:`write_report`."""
     data = yaml.safe_load(Path(path).read_text())
-    return [ProbeCalibrationFit(**entry) for entry in data.values()]
+    return [ProbeCalibrationFit(**entry) for entry in data]

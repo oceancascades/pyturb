@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from pyturb._pfile import to_xarray
 from pyturb.fp07_calibration import (
@@ -112,6 +113,45 @@ class TestReportIO:
         (loaded,) = read_report(path)
         assert loaded == fit
 
+    def test_preserves_multiple_fits_with_the_same_probe_name(self, tmp_path):
+        # calibrate-fp07 auto can fit the same channel (e.g. "T1") separately
+        # per instrument/SN group -- a report keyed by probe name alone would
+        # silently drop all but one of them.
+        base = dict(
+            probe="T1",
+            reference="JAC_T",
+            order=1,
+            old_T_0=289.301,
+            old_beta_1=3143.55,
+            old_beta_2=None,
+            new_T_0=290.0,
+            new_beta_1=3150.0,
+            new_beta_2=None,
+            lag_s=-0.05,
+            lag_corr=0.95,
+            n_points=1000,
+            temperature_range_c=10.0,
+            rms_diff_old_c=1.0,
+            rms_diff_new_c=0.02,
+            max_abs_diff_old_c=1.2,
+            max_abs_diff_new_c=0.05,
+            mean_bias_old_c=0.9,
+            mean_bias_new_c=0.01,
+            residual_std_c=0.01,
+            fit_date="2026-01-01T00:00:00+00:00",
+        )
+        fit_a = ProbeCalibrationFit(
+            sn="SNA", instrument_sn="142", fit_file="a.nc", profile_index=0, **base
+        )
+        fit_b = ProbeCalibrationFit(
+            sn="SNB", instrument_sn="194", fit_file="b.nc", profile_index=0, **base
+        )
+        path = tmp_path / "report.yaml"
+        write_report([fit_a, fit_b], path)
+        loaded = read_report(path)
+        assert len(loaded) == 2
+        assert {f.instrument_sn for f in loaded} == {"142", "194"}
+
 
 @pytest.fixture(scope="module")
 def prepared_profile():
@@ -165,6 +205,19 @@ class TestApplyProbeCalibration:
         assert not np.isnan(applied["gradT1"].values).any()
         assert not np.allclose(applied["gradT1"].values, raw["gradT1"].values)
 
+    def test_also_rebuilds_standalone_temperature(self, prepared_profile):
+        # apply_probe_calibration must correct T1/T2 itself, not just
+        # gradT1/gradT2 -- T1/T2 feed the binned temperature output directly.
+        ds_prepared, config = prepared_profile
+        fit = fit_probe_calibration(
+            ds_prepared, "T1", config, fit_file=PFILE.name, profile_index=0, order=1
+        )
+        raw = to_xarray(load_pfile_phys(PFILE))
+        applied = apply_probe_calibration(raw, fit)
+        assert "T1_fp07_recalibrated" in applied["T1"].attrs
+        assert not np.allclose(applied["T1"].values, raw["T1"].values)
+        assert np.allclose(applied["T1"].values, applied["JAC_T"].values, atol=0.2)
+
     def test_matches_independent_manual_replication(self, prepared_profile):
         from pyturb._pfile import deconvolve, make_gradT
         from pyturb.conductivity import _lag_filter
@@ -214,6 +267,27 @@ class TestApplyProbeCalibration:
         applied = apply_probe_calibration(raw, mismatched)
         assert applied is raw
 
+    def test_preserves_cal_attrs_after_a_successful_apply(self, prepared_profile):
+        # A successful apply must not wipe the probe's cal_* attrs -- a
+        # later mismatched fit for the same probe relies on _channel_params
+        # reading them to decide to skip. Losing them (a bare (dims, data)
+        # reassignment discards existing attrs) turned a routine "batch
+        # scan every fit against every file" loop into an uncaught
+        # ValueError on the second fit attempt, killing a whole
+        # 'calibrate-fp07 auto' run partway through.
+        ds_prepared, config = prepared_profile
+        fit = fit_probe_calibration(
+            ds_prepared, "T1", config, fit_file=PFILE.name, profile_index=0, order=1
+        )
+        raw = to_xarray(load_pfile_phys(PFILE))
+        applied = apply_probe_calibration(raw, fit)
+        assert applied["T1"].attrs.get("cal_sn") == fit.sn
+
+        mismatched = fit.__class__(**{**fit.__dict__, "sn": "not-a-real-sn"})
+        again = apply_probe_calibration(applied, mismatched)
+        assert again is applied
+        assert again["T1"].attrs.get("cal_sn") == fit.sn
+
     def test_skips_on_instrument_sn_mismatch(self, prepared_profile):
         # Same probe SN, different instrument -- must not apply. Guards
         # against generic/placeholder probe SNs being reused across probes.
@@ -235,5 +309,87 @@ class TestApplyProbeCalibration:
         )
         raw = to_xarray(load_pfile_phys(PFILE))
         legacy = raw.drop_vars(["T1_dT1", "T1_counts"])
-        with pytest.raises(ValueError, match="T1_dT1"):
+        with pytest.raises(ValueError, match="T1_counts"):
             apply_probe_calibration(legacy, fit)
+
+
+class TestSanityGuard:
+    """A calibration extrapolated to raw counts far outside its fitted range
+    (e.g. an anomalous profile) must be masked to NaN, not propagated -- see
+    the whole-file validation in the session that added this guard."""
+
+    def _make_ds(self, counts: np.ndarray) -> xr.Dataset:
+        n = counts.size
+        cal_attrs = {
+            "cal_a": str(A),
+            "cal_b": str(B),
+            "cal_g": str(G),
+            "cal_e_b": str(E_B),
+            "cal_adc_fs": str(ADC_FS),
+            "cal_adc_bits": str(ADC_BITS),
+            "cal_t_0": str(T_0),
+            "cal_beta_1": str(BETA_1),
+            "cal_sn": "SYN1",
+        }
+        ds = xr.Dataset(
+            {
+                "T1": ("t_slow", np.full(n, 10.0), cal_attrs),
+                "T1_counts": ("t_slow", counts),
+                "T1_dT1": ("t_fast", counts, {**cal_attrs, "cal_diff_gain": "0.9"}),
+                "gradT1": ("t_fast", np.zeros(n)),
+                "JAC_T": ("t_slow", np.full(n, 10.0)),
+                "fs_slow": 64.0,
+                "fs_fast": 64.0,
+            },
+            coords={"t_slow": np.arange(n) / 64.0, "t_fast": np.arange(n) / 64.0},
+            attrs={"instrument_sn": "142"},
+        )
+        return ds
+
+    def _make_fit(self) -> ProbeCalibrationFit:
+        return ProbeCalibrationFit(
+            probe="T1",
+            sn="SYN1",
+            instrument_sn="142",
+            fit_file="synthetic",
+            profile_index=0,
+            reference="JAC_T",
+            order=1,
+            old_T_0=T_0,
+            old_beta_1=BETA_1,
+            old_beta_2=None,
+            new_T_0=T_0,
+            new_beta_1=BETA_1,
+            new_beta_2=None,
+            lag_s=0.0,
+            lag_corr=1.0,
+            n_points=100,
+            temperature_range_c=10.0,
+            rms_diff_old_c=0.0,
+            rms_diff_new_c=0.0,
+            max_abs_diff_old_c=0.0,
+            max_abs_diff_new_c=0.0,
+            mean_bias_old_c=0.0,
+            mean_bias_new_c=0.0,
+            residual_std_c=0.0,
+            fit_date="2026-01-01T00:00:00+00:00",
+        )
+
+    def test_masks_extrapolation_blowup(self):
+        n = 3000
+        # -4000 counts -> ~9.8C (sane); 20000 counts -> ~59.6C (insane).
+        counts = np.full(n, -4000.0)
+        counts[1000:1100] = 20000.0
+        ds = self._make_ds(counts)
+        fit = self._make_fit()
+
+        applied = apply_probe_calibration(ds, fit)
+        T1 = applied["T1"].values
+        gradT1 = applied["gradT1"].values
+
+        assert np.isnan(T1[1000:1100]).all()
+        assert np.isnan(gradT1[1000:1100]).all()
+        assert not np.isnan(T1[:1000]).any()
+        assert not np.isnan(T1[1100:]).any()
+        assert np.all((T1[:1000] > 0) & (T1[:1000] < 20))
+        assert applied["T1"].attrs["T1_fp07_n_out_of_range"] == 100

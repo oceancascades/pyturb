@@ -41,7 +41,7 @@ Each converted variable also carries the setup-string calibration parameters act
 
 ### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
 
-The embedded FP07 calibration coefficients (`T_0`, `beta_1`, `beta_2`) are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T`) and rebuilds `gradT1`/`gradT2`.
+The embedded FP07 calibration coefficients (`T_0`, `beta_1`, `beta_2`) are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T`, from the same, deepest available profile) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2` from the raw counts. Corrected samples that fall outside the temperature range -3 to 40 C are set to NaN.
 
 ```bash
 # Fit from one representative profile; writes a report with old-vs-new
