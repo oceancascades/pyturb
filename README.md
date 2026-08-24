@@ -86,6 +86,8 @@ A selection of the option:
 
 CTD scalars (pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2`) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`, `T1_hires`), alongside the dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
+The per-window power spectra are also written out (`S_sh1`/`S_sh2`, `S_gradT1`/`S_gradT2`, on the `frequency` coordinate), already response-corrected -- not the raw Welch PSD -- so they can be compared directly against a Nasmyth/Kraichnan model without an extra correction step. `S_gradT1`/`S_gradT2` are corrected for the FP07 single-pole frequency response (Lueck); `S_sh1`/`S_sh2` are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function (Macoun & Lueck; Rockland Technical Note 026). Each variable's `comment` attr documents the exact correction formula and parameters used.
+
 See `pyturb eps --help` formore details. 
 
 Example processing just up casts:

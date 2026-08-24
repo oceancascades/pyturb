@@ -13,6 +13,7 @@ from profinder import find_profiles  # type: ignore[import]
 
 from .conductivity import match_conductivity_to_temperature
 from .shear import estimate_epsilon, viscosity
+from .shear import single_pole_correction as shear_response_correction
 from .signal import (
     block_mean,
     clean_spec,
@@ -22,6 +23,7 @@ from .signal import (
     window_psd,
 )
 from .temperature import estimate_chi, thermal_diffusivity
+from .temperature import single_pole_correction as gradT_response_correction
 
 _log = logging.getLogger(__name__)
 
@@ -831,7 +833,11 @@ def compute_epsilon(
 
         for i in range(n_windows):
             eps[i], k_max[i], mad[i] = estimate_epsilon(
-                frequency, psd[i], W=speed[i], nu=nu[i]
+                frequency,
+                psd[i],
+                W=speed[i],
+                nu=nu[i],
+                apply_single_pole_correction=False,
             )
 
         results[name] = (eps, k_max, mad)
@@ -1445,18 +1451,55 @@ def _compute_shear_spectra_with_cleaning(
             )
 
     # Convert spectra so that they represent shear variance [s-2/Hz]
+    W = ds["W"].values
     with np.errstate(divide="ignore", invalid="ignore"):
-        inv_W2 = 1 / ds["W"].values ** 2
+        inv_W2 = 1 / W**2
         inv_W4 = inv_W2 * inv_W2
+        k = freq[None, :] / W[:, None]
+        # Shear probe spatial-averaging + anti-alias single-pole correction
+        # (Rockland TN026), and the FP07 thermistor's single-pole frequency
+        # response correction (Lueck) -- both applied here (once, per
+        # window) rather than inside estimate_epsilon/estimate_chi, so the
+        # saved S_sh1/S_sh2/S_gradT1/S_gradT2 are the corrected spectra
+        # actually used downstream, not raw ones a reader would otherwise
+        # have to correct themselves before comparing to a model spectrum.
+        shear_corr = shear_response_correction(k)
+        gradT_corr = gradT_response_correction(
+            freq[None, :], W[:, None], config.fp07_tau0, config.fp07_speed_exp
+        )
     for name in list(spectra):
         if name in config.shear_probes:
-            spectra[name] = spectra[name] * inv_W4[:, None]
+            spectra[name] = spectra[name] * inv_W4[:, None] * shear_corr
         elif name in config.temperature_probes:
-            spectra[name] = spectra[name] * inv_W2[:, None]
+            spectra[name] = spectra[name] * inv_W2[:, None] * gradT_corr
 
     ds = ds.assign_coords(frequency=("frequency", freq))
     for name, psd in spectra.items():
         ds[f"S_{name}"] = (("time", "frequency"), psd.astype("f4"))
+        if name in config.temperature_probes:
+            ds[f"S_{name}"].attrs = {
+                "long_name": f"Power spectral density of {name}",
+                "units": "K2 m-2 Hz-1",
+                "comment": (
+                    "Corrected for the FP07 thermistor's single-pole frequency "
+                    "response (Lueck), tau = fp07_tau0 * W^fp07_speed_exp "
+                    f"(fp07_tau0={config.fp07_tau0}, "
+                    f"fp07_speed_exp={config.fp07_speed_exp}); W is the "
+                    "per-window mean fall speed."
+                ),
+            }
+        elif name in config.shear_probes:
+            ds[f"S_{name}"].attrs = {
+                "long_name": f"Power spectral density of {name}",
+                "units": "s-2 Hz-1",
+                "comment": (
+                    "Corrected for the shear probe's spatial-averaging and "
+                    "anti-alias response with a single-pole transfer function "
+                    "(Macoun & Lueck; Rockland Technical Note 026): "
+                    "H^-2 = 1 + (k/48)^2 for k <= 150 cpm, else 1, with "
+                    "k = frequency / W (W = per-window mean fall speed)."
+                ),
+            }
     return ds, freq, spectra
 
 
@@ -1689,8 +1732,6 @@ def _attach_chi(
                 eps=eps_best[i],
                 nu=nu[i],
                 kappa_T=kappa_T[i],
-                tau0=config.fp07_tau0,
-                speed_exp=config.fp07_speed_exp,
             )
 
         probe_num = name[-1]

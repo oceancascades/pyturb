@@ -11,6 +11,7 @@ from pyturb.pfile import load_pfile_phys
 from pyturb.processing import _write_epsilon_profile, bin_profiles
 from pyturb.profile import ProfileConfig, _combine_eps_pair, process_profile
 from pyturb.temperature import (
+    batchelor_wavenumber,
     estimate_chi,
     kraichnan_spectrum,
     resolved_kraichnan_fraction,
@@ -26,15 +27,15 @@ CHI, EPS, NU, KAPPA = 1e-8, 1e-9, 1.3e-6, 1.4e-7
 class TestKraichnanSpectrum:
     def test_integral_identity(self):
         # int_0^inf psi dk = chi / (6 kappa_T)
-        k_B = (EPS / (NU * KAPPA**2)) ** 0.25
-        k = np.linspace(0, 5 * k_B / (2 * np.pi), 100000)
+        k_B = batchelor_wavenumber(EPS, NU, KAPPA)
+        k = np.linspace(0, 5 * k_B, 100000)
         integral = np.trapezoid(kraichnan_spectrum(k, CHI, EPS, NU, KAPPA), k)
         np.testing.assert_allclose(integral, CHI / (6 * KAPPA), rtol=1e-3)
 
     def test_resolved_fraction_matches_numeric_integral(self):
-        k_B = (EPS / (NU * KAPPA**2)) ** 0.25
-        k = np.linspace(0, 5 * k_B / (2 * np.pi), 100000)
-        k_u = 0.05 * k_B / (2 * np.pi)
+        k_B = batchelor_wavenumber(EPS, NU, KAPPA)
+        k = np.linspace(0, 5 * k_B, 100000)
+        k_u = 0.05 * k_B
         sub = k <= k_u
         numeric = np.trapezoid(kraichnan_spectrum(k[sub], CHI, EPS, NU, KAPPA), k[sub])
         numeric /= CHI / (6 * KAPPA)
@@ -42,9 +43,35 @@ class TestKraichnanSpectrum:
         np.testing.assert_allclose(closed, numeric, rtol=1e-2)
 
     def test_resolved_fraction_limits(self):
-        k_B = (EPS / (NU * KAPPA**2)) ** 0.25
+        k_B = batchelor_wavenumber(EPS, NU, KAPPA)
         assert resolved_kraichnan_fraction(100 * k_B, EPS, NU, KAPPA) > 0.999
         assert resolved_kraichnan_fraction(1e-4, EPS, NU, KAPPA) < 0.01
+
+    def test_matches_bogucki_1997_cyclic_form(self):
+        # Cross-checked against an independent implementation (mousebrains'
+        # odas_tpw.chi.batchelor.kraichnan_grad/batchelor_kB), which writes
+        # the equation directly in the cyclic-wavenumber form given by
+        # Bogucki, Domaradzki & Yeung (1997) eq. 11, with no explicit 2*pi
+        # factors -- unlike this module's previous radian-first derivation
+        # (algebraically equivalent, but not directly comparable to the
+        # paper). Reference values below are that implementation's output.
+        k = np.array([0.1, 1.0, 5.0, 20.0, 50.0, 100.0])
+        k_B = batchelor_wavenumber(EPS, NU, KAPPA)
+        np.testing.assert_allclose(k_B, 70.83864994288155, rtol=1e-12)
+
+        expected = np.array(
+            [
+                7.428019e-06,
+                6.916329e-05,
+                2.518138e-04,
+                3.065606e-04,
+                7.099214e-05,
+                2.692548e-06,
+            ]
+        )
+        np.testing.assert_allclose(
+            kraichnan_spectrum(k, CHI, EPS, NU, KAPPA), expected, rtol=1e-5
+        )
 
 
 class TestThermalDiffusivity:
@@ -73,9 +100,13 @@ class TestSinglePoleCorrection:
 
 class TestEstimateChi:
     def _synthetic_spectrum(self, eps, W=0.6):
+        # estimate_chi now expects an already response-corrected spectrum
+        # (see pyturb.profile, which applies single_pole_correction once at
+        # S_gradT1/S_gradT2 computation time), so this is the true spectrum
+        # with no additional attenuation applied.
         f = np.arange(1, 512) * 98.0 / 512
         psi = kraichnan_spectrum(f / W, CHI, eps, NU, KAPPA)
-        P_f = psi / W / single_pole_correction(f, W)
+        P_f = psi / W
         return f, P_f
 
     @pytest.mark.parametrize("eps", [1e-10, 1e-9, 1e-7])
@@ -182,6 +213,35 @@ class TestChiPipeline:
     def test_chi_qc_valid_flags(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)
         assert set(np.unique(written["chi_1_qc"].values)) <= {0, 1, 2, 4, 9}
+
+    def test_gradT_spectra_are_response_corrected_with_comment(self, chi_eps_file):
+        # S_gradT1/S_gradT2 must be the response-corrected spectra (chi's
+        # actual input), with metadata documenting the correction -- not
+        # the raw, uncorrected Welch PSD.
+        written = xr.load_dataset(chi_eps_file, decode_times=False)
+        for v in ["S_gradT1", "S_gradT2"]:
+            assert v in written, v
+            comment = written[v].attrs.get("comment", "")
+            assert "single-pole" in comment.lower()
+            assert "fp07_tau0" in comment
+            assert (
+                written[v].attrs.get("long_name")
+                == f"Power spectral density of {v[2:]}"
+            )
+
+    def test_shear_spectra_are_response_corrected_with_comment(self, chi_eps_file):
+        # S_sh1/S_sh2 must be the response-corrected spectra (epsilon's
+        # actual input), with metadata documenting the correction.
+        written = xr.load_dataset(chi_eps_file, decode_times=False)
+        for v in ["S_sh1", "S_sh2"]:
+            assert v in written, v
+            comment = written[v].attrs.get("comment", "")
+            assert "single-pole" in comment.lower()
+            assert "48" in comment
+            assert (
+                written[v].attrs.get("long_name")
+                == f"Power spectral density of {v[2:]}"
+            )
 
     def test_kappa_t_written(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)

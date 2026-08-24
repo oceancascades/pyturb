@@ -28,6 +28,16 @@ def thermal_diffusivity(
     return k / (rho * _CP0)
 
 
+def batchelor_wavenumber(
+    eps: float, nu: float = 1e-6, kappa_T: float = 1.4e-7
+) -> float:
+    """Batchelor wavenumber (cyclic, cpm): kB = (1 / 2pi) * (eps / (nu kappa_T^2))^(1/4).
+
+    Bogucki, Domaradzki & Yeung (1997), J. Fluid Mech. 343, 111-130.
+    """
+    return (1 / (2 * np.pi)) * (eps / (nu * kappa_T**2)) ** 0.25
+
+
 def kraichnan_spectrum(
     k: np.ndarray,
     chi: float,
@@ -38,6 +48,10 @@ def kraichnan_spectrum(
 ) -> np.ndarray:
     """Kraichnan 1-D temperature gradient spectrum psi(k) (cpm domain) [K2 m-2 cpm-1].
 
+    psi(k) = q_K * chi / (kappa_T * kB^2) * k * exp(-sqrt(6 q_K) * k / kB)
+
+    k, kB both cyclic (cpm) -- Bogucki, Domaradzki & Yeung (1997), eq. 11.
+
     k       : wavenumber (cpm)
     chi     : temperature variance dissipation (K2/s)
     eps     : TKE dissipation (W/kg)
@@ -47,17 +61,8 @@ def kraichnan_spectrum(
 
     Satisfies the integral constraint int_0^inf psi dk = chi / (6 kappa_T).
     """
-    k_B = (eps / (nu * kappa_T**2)) ** 0.25  # Batchelor wavenumber (rad/m)
-    k_rad = 2 * np.pi * k
-    return (
-        2
-        * np.pi
-        * q_K
-        * chi
-        * np.sqrt(nu / eps)
-        * k_rad
-        * np.exp(-np.sqrt(6 * q_K) * k_rad / k_B)
-    )
+    k_B = batchelor_wavenumber(eps, nu, kappa_T)
+    return q_K * chi / (kappa_T * k_B**2) * k * np.exp(-np.sqrt(6 * q_K) * k / k_B)
 
 
 def resolved_kraichnan_fraction(
@@ -69,11 +74,11 @@ def resolved_kraichnan_fraction(
 ) -> float:
     """Fraction of total Kraichnan gradient variance resolved in [0, k_max] (cpm).
 
-    Closed form of the normalized integral: 1 - (1 + a k) exp(-a k) with
-    a = sqrt(6 q_K) / k_B.
+    Closed form of the normalized integral: 1 - (1 + x) exp(-x) with
+    x = sqrt(6 q_K) * k_max / kB (k_max, kB both cyclic, cpm).
     """
-    k_B = (eps / (nu * kappa_T**2)) ** 0.25
-    x = np.sqrt(6 * q_K) * 2 * np.pi * k_max / k_B
+    k_B = batchelor_wavenumber(eps, nu, kappa_T)
+    x = np.sqrt(6 * q_K) * k_max / k_B
     return 1.0 - (1.0 + x) * np.exp(-x)
 
 
@@ -122,26 +127,26 @@ def estimate_chi(
     nu: float = 1e-6,
     kappa_T: float = 1.4e-7,
     f_AA: float = 98.0,
-    tau0: float = 0.010,
-    speed_exp: float = -0.5,
     fit_order: int = 3,
 ) -> tuple[float, float, float]:
     """Estimate chi from one temperature gradient spectrum with epsilon known.
 
-    Integrates the response-corrected observed spectrum over the resolved
-    wavenumber band and corrects for unresolved variance using the Kraichnan
-    spectrum shape set by eps.
+    Integrates the observed spectrum over the resolved wavenumber band and
+    corrects for unresolved variance using the Kraichnan spectrum shape set
+    by eps.
 
     Inputs
     ------
     f    : frequency vector (Hz)
-    P_f  : temperature gradient auto-spectrum ((K/m)^2 / Hz)
+    P_f  : temperature gradient auto-spectrum ((K/m)^2 / Hz), already
+        corrected for the FP07 single-pole frequency response (see
+        :func:`single_pole_correction`) -- as saved to ``S_gradT1``/
+        ``S_gradT2`` by :mod:`pyturb.profile`.
     W    : mean speed (m/s)
     eps  : TKE dissipation rate (W/kg), e.g. from the shear probes
     nu   : kinematic viscosity (m^2/s)
     kappa_T : molecular thermal diffusivity (m^2/s)
     f_AA : anti-alias cutoff (Hz)
-    tau0, speed_exp : FP07 response parameters (see single_pole_correction)
     fit_order : polynomial order for the spectral-minimum search
 
     Returns
@@ -166,10 +171,10 @@ def estimate_chi(
         return float("nan"), float("nan"), float("nan")
 
     k = f / W
-    phi = P_f * W * single_pole_correction(f, W, tau0, speed_exp)
+    phi = P_f * W
 
-    k_B = (eps / (nu * kappa_T**2)) ** 0.25
-    k_95 = _X95 * k_B / (np.sqrt(6 * Q_KRAICHNAN) * 2 * np.pi)
+    k_B = batchelor_wavenumber(eps, nu, kappa_T)
+    k_95 = _X95 * k_B / np.sqrt(6 * Q_KRAICHNAN)
     k_AA = f_AA / W
 
     valid_mask = k <= min(k_AA, k_95)
