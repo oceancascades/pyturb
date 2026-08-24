@@ -45,7 +45,7 @@ def _write_epsilon_profile(
     """Write a processed-profile dataset to NetCDF with stamped metadata.
 
     Keeps time- and ctd_time-dimensioned data variables, plus the scalar
-    ``lat``/``lon`` attached for a stationary platform (see
+    ``lat``/``lon`` attached for VMP-style GPS (see
     :func:`~pyturb.profile._attach_scalar_position`). Reattaches the
     ``frequency`` and ``k`` coordinates, carries over ``time``/``ctd_time``
     attrs, and stamps source file / profile / instrument metadata.
@@ -780,6 +780,8 @@ def bin_profiles(
             "W",
             "temperature",
             "conductivity",
+            "T1",
+            "T2",
             "salinity",
             "density",
             "z",

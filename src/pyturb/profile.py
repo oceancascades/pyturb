@@ -129,11 +129,12 @@ class ProfileConfig:
     )
     aux_density: Optional[str] = None  # Density variable in auxiliary dataset (opt-in)
 
-    # Platforms that don't move horizontally during a cast (VMP, etc.) get one
+    # VMP-style GPS: a vertical profiler tracked by a single ship/surface GPS
+    # fix per profile (not a continuously-tracked position), so it gets one
     # lat/lon per profile instead of a per-window/bin interpolated position.
     # None = auto-detect from the instrument_vehicle attribute (see
-    # _STATIONARY_VEHICLES); True/False overrides detection.
-    stationary_platform: Optional[bool] = None
+    # _VMP_STYLE_VEHICLES); True/False overrides detection.
+    vmp_style_gps: Optional[bool] = None
 
     # === Processing options ===
     chop_start: bool = True
@@ -1017,18 +1018,19 @@ def _first_valid(x: np.ndarray) -> float:
 
 
 # Vehicle types (from the p-file's [instrument_info] vehicle field, stored as
-# ds.attrs["instrument_vehicle"]) that stay at essentially one horizontal
-# position for the duration of a cast. Matches ODAS's own vmp/rvmp/xmp
-# grouping in default_vehicle_attributes.ini.
-_STATIONARY_VEHICLES = frozenset({"vmp", "rvmp", "xmp"})
+# ds.attrs["instrument_vehicle"]) tracked by a single ship/surface GPS fix
+# per cast (VMP-style), rather than a continuously-tracked position (e.g. a
+# glider's own navigation). Matches ODAS's own vmp/rvmp/xmp grouping in
+# default_vehicle_attributes.ini.
+_VMP_STYLE_VEHICLES = frozenset({"vmp", "rvmp", "xmp"})
 
 
-def _is_stationary_platform(ds: xr.Dataset, config: ProfileConfig) -> bool:
+def _is_vmp_style_gps(ds: xr.Dataset, config: ProfileConfig) -> bool:
     """Whether to use one lat/lon per profile instead of per-window/bin."""
-    if config.stationary_platform is not None:
-        return config.stationary_platform
+    if config.vmp_style_gps is not None:
+        return config.vmp_style_gps
     vehicle = str(ds.attrs.get("instrument_vehicle", "")).strip().lower()
-    return vehicle in _STATIONARY_VEHICLES
+    return vehicle in _VMP_STYLE_VEHICLES
 
 
 def _build_ctd_vars(
@@ -1043,11 +1045,12 @@ def _build_ctd_vars(
     potential_density from window means. Also computes W and nu when
     ``include_kinematics`` is True.
 
-    On a stationary platform (see :func:`_is_stationary_platform`), lat/lon
-    are used internally (for z and the thermo calc) but not included in the
-    returned dict -- they're attached once, as scalars, by
-    :func:`_attach_scalar_position`. On a moving platform, "lat"/"lon" are
-    included in the returned dict like any other per-window variable.
+    With VMP-style GPS (see :func:`_is_vmp_style_gps`), lat/lon are used
+    internally (for z and the thermo calc) but not included in the returned
+    dict -- they're attached once, as scalars, by
+    :func:`_attach_scalar_position`. With a continuously-tracked position
+    (e.g. a glider), "lat"/"lon" are included in the returned dict like any
+    other per-window variable.
 
     ``means`` and ``aux_mean`` must be at the same time resolution. Returns
     ``{var_name: (array, attrs)}``; salinity/density/lat/lon are only
@@ -1086,22 +1089,40 @@ def _build_ctd_vars(
             },
         )
 
-    stationary = _is_stationary_platform(ds, config)
+    vmp_style_gps = _is_vmp_style_gps(ds, config)
     lat_arr = lon_arr = None
     if "aux_latitude" in ds:
-        if stationary:
+        if vmp_style_gps:
             lat_arr = np.full(n_out, _first_valid(ds["aux_latitude"].values))
         else:
             lat_arr = aux_mean(ds["aux_latitude"].values)
             out["lat"] = (lat_arr, {})
     if "aux_longitude" in ds:
-        if stationary:
+        if vmp_style_gps:
             lon_arr = np.full(n_out, _first_valid(ds["aux_longitude"].values))
         else:
             lon_arr = aux_mean(ds["aux_longitude"].values)
             out["lon"] = (lon_arr, {})
     if "JAC_C" in means:
         out["conductivity"] = (means["JAC_C"], {})
+    if "T1" in means:
+        out["T1"] = (
+            means["T1"],
+            {
+                "long_name": "FP07 thermistor 1 temperature",
+                "standard_name": "sea_water_temperature",
+                "units": "degree_C",
+            },
+        )
+    if "T2" in means:
+        out["T2"] = (
+            means["T2"],
+            {
+                "long_name": "FP07 thermistor 2 temperature",
+                "standard_name": "sea_water_temperature",
+                "units": "degree_C",
+            },
+        )
 
     lat_for_gsw = (
         lat_arr if lat_arr is not None else np.full(n_out, config.default_latitude)
@@ -1162,12 +1183,13 @@ def _build_ctd_vars(
 
 
 def _attach_scalar_position(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Attach a single scalar lat/lon (no dimension) for a stationary platform.
+    """Attach a single scalar lat/lon (no dimension) for VMP-style GPS.
 
-    No-op for a moving platform, where lat/lon already vary per window/bin
-    and are attached by :func:`_build_ctd_vars` instead.
+    No-op with a continuously-tracked position (e.g. a glider), where
+    lat/lon already vary per window/bin and are attached by
+    :func:`_build_ctd_vars` instead.
     """
-    if not _is_stationary_platform(ds, config):
+    if not _is_vmp_style_gps(ds, config):
         return ds
     if "aux_latitude" in ds:
         ds["lat"] = float(_first_valid(ds["aux_latitude"].values))
@@ -1263,6 +1285,8 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
         config.speed_smooth,
         config.temperature,
         "JAC_C",
+        "T1",
+        "T2",
     ]
     means_ctd = {v: block_mean(ds[v].values, n_ctd) for v in vars_to_mean if v in ds}
     if len(means_ctd.get("t_slow", [])) == 0:
@@ -1296,14 +1320,15 @@ def _attach_window_scalars(
     """Compute window-mean scalars and attach them on the output ``time`` axis.
 
     Adds: ``time`` coord, ``pressure``, ``z``, ``W``, ``temperature``, ``nu``;
-    plus ``salinity``, ``density``, ``conductivity``, and (on a moving
-    platform) ``lat``/``lon`` when the relevant inputs are available; plus
-    ``absolute_salinity``, ``conservative_temperature``, ``potential_density``,
-    ``N2`` when ``config.compute_thermo`` is set and real temperature/salinity
-    exist. On a stationary platform, a single scalar ``lat``/``lon`` is
-    attached instead (see :func:`_attach_scalar_position`). Also attaches
-    ``_hires`` versions of the CTD scalars (including ``N2_hires``) on a
-    finer ``ctd_time`` axis (see :func:`_attach_hires_ctd_vars`).
+    plus ``salinity``, ``density``, ``conductivity``, ``T1``, ``T2``, and
+    (with a continuously-tracked position, e.g. a glider) ``lat``/``lon``
+    when the relevant inputs are available; plus ``absolute_salinity``,
+    ``conservative_temperature``, ``potential_density``, ``N2`` when
+    ``config.compute_thermo`` is set and real temperature/salinity exist.
+    With VMP-style GPS, a single scalar ``lat``/``lon`` is attached instead
+    (see :func:`_attach_scalar_position`). Also attaches ``_hires`` versions
+    of the CTD scalars (including ``N2_hires``) on a finer ``ctd_time`` axis
+    (see :func:`_attach_hires_ctd_vars`).
     """
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
@@ -1312,7 +1337,7 @@ def _attach_window_scalars(
 
     means = compute_window_means(
         ds,
-        ["t_slow", pressure_var, speed_var, config.temperature, "JAC_C"],
+        ["t_slow", pressure_var, speed_var, config.temperature, "JAC_C", "T1", "T2"],
         params,
     )
 
@@ -1321,6 +1346,10 @@ def _attach_window_scalars(
         ds.time.attrs["units"] = ds.t_slow.attrs["units"]
     if "long_name" in ds.t_slow.attrs:
         ds.time.attrs["long_name"] = "Time (dissipation windows)"
+
+    # Must run before the coarse loop below, which overwrites "T1"/"T2" with
+    # their window-mean values -- this reads them at full resolution first.
+    ds = _attach_hires_ctd_vars(ds, config)
 
     ctd_vars = _build_ctd_vars(
         ds, means, lambda x: _window_mean_slow(x, params), config
@@ -1332,7 +1361,6 @@ def _attach_window_scalars(
 
     ds = _attach_scalar_position(ds, config)
     ds = _attach_buoyancy_frequency(ds, config)
-    ds = _attach_hires_ctd_vars(ds, config)
     ds = _attach_buoyancy_frequency(ds, config, suffix="_hires")
 
     n_fft = params["n_fft"]

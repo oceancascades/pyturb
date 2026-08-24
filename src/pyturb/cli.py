@@ -4,17 +4,34 @@ import logging
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
+import numpy as np
 import typer
+import xarray as xr
 from typing_extensions import Annotated
 
 from . import __version__
+from .fp07_calibration import (
+    ProbeCalibrationFit,
+    _channel_params,
+    apply_probe_calibration,
+    fit_probe_calibration,
+    read_report,
+    write_report,
+)
+from .io import load_profile_nc, resolve_input_files
 from .merge import merge_netcdf
 from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
-from .profile import ProfileConfig
+from .profile import ProfileConfig, prepare_profile, split_into_profiles
 from .profile_index import batch_index_profiles
 
 app = typer.Typer()
+calibrate_fp07_app = typer.Typer(
+    help="In-situ recalibration of FP07 thermistor probes against a reference thermometer."
+)
+app.add_typer(calibrate_fp07_app, name="calibrate-fp07")
+
+_log = logging.getLogger(__name__)
 
 # Map string log levels to logging constants
 LOG_LEVELS = {
@@ -495,14 +512,16 @@ def eps(
             show_default=True,
         ),
     ] = 0.25,
-    stationary_platform: Annotated[
+    vmp_style_gps: Annotated[
         Optional[bool],
         typer.Option(
-            "--stationary-platform/--moving-platform",
+            "--vmp-style-gps/--no-vmp-style-gps",
             help=(
-                "Use one lat/lon per profile instead of interpolating a "
-                "position onto every window/bin. Default: auto-detect from "
-                "the p-file's vehicle field (vmp/rvmp/xmp are stationary)."
+                "Use one lat/lon per profile (a single ship/surface GPS fix "
+                "per cast) instead of interpolating a continuously-tracked "
+                "position (e.g. a glider's own navigation) onto every "
+                "window/bin. Default: auto-detect from the p-file's vehicle "
+                "field (vmp/rvmp/xmp are VMP-style)."
             ),
         ),
     ] = None,
@@ -578,7 +597,7 @@ def eps(
         compute_chi=chi,
         match_conductivity=match_conductivity,
         ctd_bin_sec=ctd_bin_sec,
-        stationary_platform=stationary_platform,
+        vmp_style_gps=vmp_style_gps,
     )
     # Only override the despike defaults — and force re-despike — when the
     # user explicitly passed --despike. Otherwise embedded <probe>_clean
@@ -836,9 +855,9 @@ def bin(
             "-v",
             help=(
                 "Comma-separated list of variables to bin (default: "
-                "eps_1,eps_2,chi_1,chi_2,W,temperature,salinity,density,z,"
-                "absolute_salinity,conservative_temperature,potential_density,"
-                "N2,nu,kappa_T,lat,lon)"
+                "eps_1,eps_2,chi_1,chi_2,W,temperature,conductivity,T1,T2,"
+                "salinity,density,z,absolute_salinity,conservative_temperature,"
+                "potential_density,N2,nu,kappa_T,lat,lon)"
             ),
         ),
     ] = None,
@@ -985,3 +1004,391 @@ def merge(
         raise typer.Exit(1)
 
     typer.echo(f"Successfully merged {len(file_list)} files into '{output_file}'")
+
+
+def _print_fit_report(fits: list) -> None:
+    """Print a human-readable old-vs-new parameter and data comparison."""
+    for fit in fits:
+        typer.echo(
+            f"\n{fit.probe} (instrument {fit.instrument_sn}, SN {fit.sn}, "
+            f"order {fit.order}, {fit.n_points} pts):"
+        )
+        typer.echo("  parameter    old            new")
+        typer.echo(f"  T_0          {fit.old_T_0:<14.4f} {fit.new_T_0:.4f}")
+        typer.echo(f"  beta_1       {fit.old_beta_1:<14.4f} {fit.new_beta_1:.4f}")
+        old_b2 = f"{fit.old_beta_2:.4f}" if fit.old_beta_2 is not None else "-"
+        new_b2 = f"{fit.new_beta_2:.4f}" if fit.new_beta_2 is not None else "-"
+        typer.echo(f"  beta_2       {old_b2:<14} {new_b2}")
+        typer.echo(f"  lag          {fit.lag_s:+.4f} s (corr {fit.lag_corr:.3f})")
+        typer.echo(f"  vs {fit.reference:<9}    old            new")
+        typer.echo(
+            f"  mean bias    {fit.mean_bias_old_c:<14.4f} {fit.mean_bias_new_c:.4f}"
+        )
+        typer.echo(
+            f"  RMS diff     {fit.rms_diff_old_c:<14.4f} {fit.rms_diff_new_c:.4f}"
+        )
+        typer.echo(
+            f"  max |diff|   {fit.max_abs_diff_old_c:<14.4f} {fit.max_abs_diff_new_c:.4f}"
+        )
+
+
+@calibrate_fp07_app.command("fit")
+def calibrate_fp07_fit(
+    converted_file: Annotated[
+        Path, typer.Argument(help="A converted (p2nc) NetCDF file to fit from")
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output", "-o", help="Path to write the calibration report (YAML)"
+        ),
+    ],
+    profile: Annotated[
+        int,
+        typer.Option(
+            "--profile",
+            help=(
+                "0-based profile index within the file, matching eps's "
+                "_p{NNNN} output numbering"
+            ),
+            show_default=True,
+        ),
+    ] = 0,
+    probes: Annotated[
+        str,
+        typer.Option("--probe", help="Comma-separated probe channel names"),
+    ] = "T1,T2",
+    reference: Annotated[
+        str, typer.Option("--ref", help="Reference temperature variable")
+    ] = "JAC_T",
+    order: Annotated[
+        int,
+        typer.Option(
+            "--order", help="Steinhart-Hart fit order (1 or 2)", show_default=True
+        ),
+    ] = 2,
+    min_range: Annotated[
+        float,
+        typer.Option(
+            "--min-range",
+            help="Minimum reference temperature range (C) required for an order-2 fit",
+            show_default=True,
+        ),
+    ] = 8.0,
+):
+    """Fit in-situ FP07 calibration coefficients against a reference thermometer.
+
+    Selects one profile from a converted file, regresses each probe's
+    resistance-ratio against the reference, and writes a report (old vs new
+    parameters, and old vs new agreement with the reference) usable by
+    'calibrate-fp07 apply'.
+
+    Examples:
+        pyturb calibrate-fp07 fit converted/RIOT_VMP194_0003.nc --profile 0 -o cal.yaml
+    """
+    ds = load_profile_nc(converted_file)
+    config = ProfileConfig()
+    ds = prepare_profile(ds, config)
+    profile_list = list(split_into_profiles(ds, config)) or [(0, ds)]
+    if not (0 <= profile < len(profile_list)):
+        typer.echo(
+            f"Error: profile {profile} out of range "
+            f"(file has {len(profile_list)} detected profiles).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    _, profile_ds = profile_list[profile]
+
+    fits = []
+    for probe in [p.strip() for p in probes.split(",")]:
+        try:
+            fit = fit_probe_calibration(
+                profile_ds,
+                probe,
+                config,
+                fit_file=converted_file.name,
+                profile_index=profile,
+                ref=reference,
+                order=order,
+                min_range_c=min_range,
+            )
+        except (ValueError, KeyError) as e:
+            typer.echo(f"Error fitting {probe}: {e}", err=True)
+            raise typer.Exit(1)
+        fits.append(fit)
+
+    write_report(fits, output)
+    _print_fit_report(fits)
+    typer.echo(f"\nWrote calibration report to '{output}'")
+
+
+@calibrate_fp07_app.command("apply")
+def calibrate_fp07_apply(
+    report: Annotated[
+        Path, typer.Argument(help="Calibration report from 'calibrate-fp07 fit'")
+    ],
+    input_files: Annotated[
+        list[Path], typer.Argument(help="Converted NetCDF files to correct")
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write corrected files here instead of overwriting in place",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Required to overwrite files in place (ignored with --output)",
+            show_default=True,
+        ),
+    ] = False,
+):
+    """Apply a fitted FP07 calibration to converted files' gradT signal.
+
+    For each file, rebuilds gradT1/gradT2 from raw counts with the new
+    coefficients for any probe whose instrument SN and probe SN both match
+    an entry in the report (a probe SN alone isn't a safe match key --
+    files without a matching instrument+probe SN pair are skipped).
+    Requires files converted with the current p2nc (retains raw counts).
+
+    Examples:
+        pyturb calibrate-fp07 apply cal.yaml converted/RIOT_VMP194_*.nc --overwrite
+        pyturb calibrate-fp07 apply cal.yaml converted/*.nc -o converted_calibrated/
+    """
+    fits = read_report(report)
+    files = resolve_input_files(input_files, "*.nc")
+    if not files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+    _require_output_target(output_dir, overwrite)
+    _apply_fits_to_files(fits, files, output_dir)
+
+
+def _require_output_target(output_dir: Path | None, overwrite: bool) -> None:
+    """Exit with an error unless the caller opted into in-place overwrite or
+    a separate output directory."""
+    if output_dir is None and not overwrite:
+        typer.echo(
+            "Error: pass --overwrite to correct files in place, or --output "
+            "to write corrected copies elsewhere.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _apply_fits_to_files(
+    fits: list, files: list[Path], output_dir: Path | None
+) -> None:
+    """Apply every fit to every file, writing in place or to output_dir."""
+    for f in files:
+        ds = load_profile_nc(f)
+        applied_any = False
+        for fit in fits:
+            before = ds
+            ds = apply_probe_calibration(ds, fit)
+            if ds is not before:
+                applied_any = True
+        if not applied_any:
+            typer.echo(f"{f.name}: no matching probe SN, skipped")
+            continue
+        out_path = (output_dir / f.name) if output_dir is not None else f
+        ds.to_netcdf(out_path)
+        typer.echo(f"{f.name}: calibrated -> {out_path}")
+
+
+def _scan_probe_groups(
+    files: list[Path], probes: list[str]
+) -> dict[str, dict[tuple[str, str], list[Path]]]:
+    """Group files by (instrument_sn, probe_sn), per probe channel.
+
+    Opens each file without loading data, just to read its instrument SN
+    and each probe's calibration attrs.
+    """
+    groups: dict[str, dict[tuple[str, str], list[Path]]] = {p: {} for p in probes}
+    for f in files:
+        try:
+            ds = xr.open_dataset(f, decode_times=False)
+        except Exception as e:
+            typer.echo(f"{f.name}: failed to open ({e}), skipping in scan", err=True)
+            continue
+        try:
+            instrument_sn = str(ds.attrs.get("instrument_sn", "unknown"))
+            for probe in probes:
+                if probe not in ds:
+                    continue
+                try:
+                    params = _channel_params(ds, probe)
+                except ValueError:
+                    continue
+                sn = str(params.get("sn", "unknown"))
+                groups[probe].setdefault((instrument_sn, sn), []).append(f)
+        finally:
+            ds.close()
+    return groups
+
+
+def _fit_from_middle_of_group(
+    group_files: list[Path],
+    probe: str,
+    config: ProfileConfig,
+    reference: str,
+    order: int,
+    min_range: float,
+) -> Optional[ProbeCalibrationFit]:
+    """Fit from a profile in the file at the middle of the (sorted) group.
+
+    Picks, within that file, the detected profile with the largest
+    reference-temperature range. Falls back to files progressively further
+    from the middle if the middle file yields no usable fit.
+    """
+    group_files = sorted(group_files)
+    mid = len(group_files) // 2
+    candidate_order = [mid]
+    for delta in range(1, len(group_files)):
+        if mid + delta < len(group_files):
+            candidate_order.append(mid + delta)
+        if mid - delta >= 0:
+            candidate_order.append(mid - delta)
+
+    for idx in candidate_order:
+        f = group_files[idx]
+        try:
+            ds = prepare_profile(load_profile_nc(f), config)
+            profile_list = list(split_into_profiles(ds, config)) or [(0, ds)]
+            best = None
+            for pidx, profile_ds in profile_list:
+                if reference not in profile_ds:
+                    continue
+                values = profile_ds[reference].values
+                t_range = float(np.nanmax(values) - np.nanmin(values))
+                if best is None or t_range > best[0]:
+                    best = (t_range, pidx, profile_ds)
+            if best is None:
+                continue
+            _, pidx, profile_ds = best
+            return fit_probe_calibration(
+                profile_ds,
+                probe,
+                config,
+                fit_file=f.name,
+                profile_index=pidx,
+                ref=reference,
+                order=order,
+                min_range_c=min_range,
+            )
+        except Exception as e:
+            _log.debug(f"{probe}: fit attempt on {f.name} failed: {e}")
+            continue
+    return None
+
+
+@calibrate_fp07_app.command("auto")
+def calibrate_fp07_auto(
+    input_files: Annotated[
+        list[Path], typer.Argument(help="Converted NetCDF files to scan and correct")
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write corrected files here instead of overwriting in place",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Required to overwrite files in place (ignored with --output)",
+            show_default=True,
+        ),
+    ] = False,
+    probes: Annotated[
+        str,
+        typer.Option("--probe", help="Comma-separated probe channel names"),
+    ] = "T1,T2",
+    reference: Annotated[
+        str, typer.Option("--ref", help="Reference temperature variable")
+    ] = "JAC_T",
+    order: Annotated[
+        int,
+        typer.Option(
+            "--order", help="Steinhart-Hart fit order (1 or 2)", show_default=True
+        ),
+    ] = 2,
+    min_range: Annotated[
+        float,
+        typer.Option(
+            "--min-range",
+            help="Minimum reference temperature range (C) required for an order-2 fit",
+            show_default=True,
+        ),
+    ] = 8.0,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", "-r", help="Also write the combined report as YAML"),
+    ] = None,
+):
+    """Scan, fit, and apply FP07 in-situ calibration across a set of files.
+
+    Groups the input files by (instrument, probe serial number), fits each
+    group once from the detected profile with the widest reference-
+    temperature range in the file nearest the middle of that group (falling
+    back to neighboring files if needed), then applies every fit to every
+    matching input file. A convenience wrapper around 'calibrate-fp07 fit'
+    + 'apply' for a whole deployment at once; use those directly for manual
+    control over which file/profile to fit from.
+
+    Examples:
+        pyturb calibrate-fp07 auto converted/*.nc --overwrite
+        pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
+    """
+    files = resolve_input_files(input_files, "*.nc")
+    if not files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+    _require_output_target(output_dir, overwrite)
+
+    probe_list = [p.strip() for p in probes.split(",")]
+    groups = _scan_probe_groups(files, probe_list)
+    config = ProfileConfig()
+
+    fits: list[ProbeCalibrationFit] = []
+    for probe, sn_groups in groups.items():
+        for (instrument_sn, sn), group_files in sn_groups.items():
+            fit = _fit_from_middle_of_group(
+                group_files, probe, config, reference, order, min_range
+            )
+            if fit is None:
+                typer.echo(
+                    f"{probe} (instrument {instrument_sn}, SN {sn}): could not "
+                    f"fit from any of its {len(group_files)} file(s), skipping",
+                    err=True,
+                )
+                continue
+            typer.echo(
+                f"Fitted {probe} (instrument {instrument_sn}, SN {sn}) from "
+                f"{fit.fit_file}:p{fit.profile_index} ({len(group_files)} file(s) "
+                "in this group)"
+            )
+            fits.append(fit)
+
+    if not fits:
+        typer.echo("Error: No probes could be calibrated.", err=True)
+        raise typer.Exit(1)
+
+    _print_fit_report(fits)
+    if report is not None:
+        write_report(fits, report)
+        typer.echo(f"\nWrote calibration report to '{report}'")
+
+    typer.echo("")
+    _apply_fits_to_files(fits, files, output_dir)

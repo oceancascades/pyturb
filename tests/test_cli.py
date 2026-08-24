@@ -93,3 +93,125 @@ class TestVersionFlag:
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
         assert "pyturb version" in result.output
+
+
+class TestCalibrateFp07Commands:
+    """Test the calibrate-fp07 fit/apply/auto CLI commands."""
+
+    # A different test p-file: this one is pre-trimmed to a single clean
+    # detectable profile under the default ProfileConfig, unlike PFILE above.
+    CAL_PFILE = Path(__file__).parent / "data" / "RIOTSHAKE_VMP142_0010_cut.p"
+
+    def _convert(self, tmp_path: Path, name: str = "converted.nc") -> Path:
+        runner.invoke(app, ["p2nc", "--output", str(tmp_path), str(self.CAL_PFILE)])
+        src = tmp_path / f"{self.CAL_PFILE.stem}.nc"
+        dst = tmp_path / name
+        if dst != src:
+            dst.write_bytes(src.read_bytes())
+        return dst
+
+    def test_fit_writes_report(self, tmp_path):
+        converted = self._convert(tmp_path)
+        report = tmp_path / "cal.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert report.exists()
+        assert "T1" in report.read_text()
+
+    def test_fit_then_apply_changes_gradT(self, tmp_path):
+        converted = self._convert(tmp_path)
+        report = tmp_path / "cal.yaml"
+        runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+            ],
+        )
+        before = xr.load_dataset(converted, decode_times=False)["gradT1"].values.copy()
+
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "apply",
+                str(report),
+                str(converted),
+                "--overwrite",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        after = xr.load_dataset(converted, decode_times=False)["gradT1"].values
+        assert not (before == after).all()
+
+    def test_apply_requires_overwrite_or_output(self, tmp_path):
+        converted = self._convert(tmp_path)
+        report = tmp_path / "cal.yaml"
+        runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+            ],
+        )
+        result = runner.invoke(
+            app, ["calibrate-fp07", "apply", str(report), str(converted)]
+        )
+        assert result.exit_code != 0
+
+    def test_auto_groups_and_applies_across_files(self, tmp_path):
+        file_a = self._convert(tmp_path, "a.nc")
+        file_b = self._convert(tmp_path, "b.nc")
+        before_a = xr.load_dataset(file_a, decode_times=False)["gradT1"].values.copy()
+        before_b = xr.load_dataset(file_b, decode_times=False)["gradT1"].values.copy()
+
+        report = tmp_path / "auto_cal.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "auto",
+                str(file_a),
+                str(file_b),
+                "--order",
+                "1",
+                "--overwrite",
+                "-r",
+                str(report),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert report.exists()
+        assert "T1" in report.read_text() and "T2" in report.read_text()
+
+        after_a = xr.load_dataset(file_a, decode_times=False)["gradT1"].values
+        after_b = xr.load_dataset(file_b, decode_times=False)["gradT1"].values
+        assert not (before_a == after_a).all()
+        assert not (before_b == after_b).all()

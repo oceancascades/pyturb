@@ -428,6 +428,12 @@ def convert_all_channels(
     # Store raw deconvolved results (in counts) keyed by pre-emphasis channel name
     deconvolved = {}
     deconvolved_raw = {}
+    # Base channels (e.g. "T1") used as a low-res deconvolve() reference for a
+    # pre-emphasized companion (e.g. "T1_dT1"). Their raw counts are needed to
+    # exactly redo the deconvolution/conversion later (e.g. with corrected
+    # calibration coefficients), so they're kept alongside the normal
+    # physical-unit output as "<name>_counts".
+    base_channels_needing_counts = set()
     for section in channel_sections:
         params = section["params"]
         ch_name = params.get("name")
@@ -440,6 +446,7 @@ def convert_all_channels(
             match = re.match(r"(\w+)_d\1", ch_name)
             if match:
                 base_name = match.group(1)
+                base_channels_needing_counts.add(base_name)
                 try:
                     # Determine this channel's actual sampling rate using fs_fast * count(id in matrix) / n_rows
                     ch_id = int(params.get("id", -1))
@@ -478,6 +485,13 @@ def convert_all_channels(
             result[ch_name] = data[ch_name]
             result["units"][ch_name] = "counts"
             continue
+
+        # Keep raw counts for channels used as a deconvolve() reference (see
+        # base_channels_needing_counts above), before conversion overwrites
+        # the physical-unit result under the same name.
+        if ch_name in base_channels_needing_counts:
+            result[f"{ch_name}_counts"] = data[ch_name]
+            result["units"][f"{ch_name}_counts"] = "counts"
 
         try:
             result[ch_name], result["units"][ch_name] = convert_channel(

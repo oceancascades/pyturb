@@ -37,6 +37,30 @@ Note that unlike the ODAS toolbox, this conversion does not apply a velocity sca
 
 The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where profiles are split across multiple files and per-file processing would result in incomplete profiles.
 
+Each converted variable also carries the setup-string calibration parameters actually used for it, as `cal_<key>` attrs (e.g. `T1.attrs["cal_t_0"]`, `T1.attrs["cal_beta_1"]`) -- easier to consume downstream than re-parsing the full embedded `pfile_configuration` string. Thermistor channels (`T1`, `T2`) additionally retain their raw ADC counts (`T1_counts`, `T2_counts`) alongside the usual physical-unit output, since the FP07 conversion's internal `Z` clip means the converted value can saturate; the raw counts let `calibrate-fp07` (below) rebuild a corrected signal exactly, without needing to reconvert from the original `.p` file.
+
+### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
+
+The embedded FP07 calibration coefficients (`T_0`, `beta_1`, `beta_2`) are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T`) and rebuilds `gradT1`/`gradT2`.
+
+```bash
+# Fit from one representative profile; writes a report with old-vs-new
+# parameters and old-vs-new agreement with the reference.
+pyturb calibrate-fp07 fit converted/RIOT_VMP194_0003.nc --profile 0 -o cal.yaml
+
+# Apply that fit to every converted file from the same instrument with a
+# matching probe serial number. Files that don't match both are skipped.
+pyturb calibrate-fp07 apply cal.yaml converted/RIOT_VMP194_*.nc -o converted_calibrated/
+
+# Or do both at once across a whole dataset: scans the input files, groups
+# them by (instrument, probe serial number), fits each group from a
+# representative profile in the file nearest the middle of that group, and
+# applies every fit to every matching file.
+pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
+```
+
+`--profile` is 0-based and matches `eps`'s `_p{NNNN}` output numbering, so `--profile 0` corresponds to what would become `..._p0000.nc`. Run `pyturb calibrate-fp07 fit`/`apply`/`auto --help` for all options.
+
 ### `eps` - calculate the dissipation rate
 
 Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:
@@ -58,9 +82,9 @@ A selection of the option:
 - `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).
 - `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
-- `--stationary-platform`/`--moving-platform`: Use one lat/lon per profile instead of interpolating a position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as stationary; anything else is treated as moving, e.g. gliders). For a stationary platform, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); for a moving platform they vary with `time`/`ctd_time` as before.
+- `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile (a single ship/surface GPS fix per cast) instead of interpolating a continuously-tracked position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked, e.g. gliders). With VMP-style GPS, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); with a continuously-tracked position they vary with `time`/`ctd_time`.
 
-CTD scalars (pressure, temperature, salinity, conductivity, density) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`), alongside the usual dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+CTD scalars (pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2`) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`, `T1_hires`), alongside the dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
 See `pyturb eps --help` formore details. 
 

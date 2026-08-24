@@ -1,4 +1,4 @@
-"""Tests for per-platform lat/lon handling (stationary vs moving)."""
+"""Tests for per-platform lat/lon handling (VMP-style GPS vs continuously tracked)."""
 
 import numpy as np
 import xarray as xr
@@ -18,8 +18,8 @@ _PARAMS = {
 
 def _make_ds(vehicle: str | None = None, n=3000) -> xr.Dataset:
     t = np.arange(n) / FS_SLOW
-    # Drifting position over the profile: a stationary platform must collapse
-    # this to a single value; a moving platform should track it per-window.
+    # Drifting position over the profile: VMP-style GPS must collapse this to
+    # a single value; a continuously-tracked position should track it per-window.
     lat = -45.0 + 0.01 * t
     lon = 170.0 + 0.02 * t
     ds = xr.Dataset(
@@ -39,7 +39,7 @@ def _make_ds(vehicle: str | None = None, n=3000) -> xr.Dataset:
     return ds
 
 
-class TestStationaryPlatformDetection:
+class TestVmpStyleGpsDetection:
     def test_vmp_gets_scalar_lat_lon(self):
         ds = _make_ds(vehicle="VMP")
         config = ProfileConfig(match_conductivity=False)
@@ -69,22 +69,22 @@ class TestStationaryPlatformDetection:
         assert "lat_hires" in out
         assert np.unique(out["lat_hires"].values).size > 1
 
-    def test_unknown_vehicle_defaults_to_moving(self):
+    def test_unknown_vehicle_defaults_to_continuous_tracking(self):
         ds = _make_ds(vehicle=None)
         config = ProfileConfig(match_conductivity=False)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert out["lat"].dims == ("time",)
         assert np.unique(out["lat"].values).size > 1
 
-    def test_explicit_override_forces_stationary(self):
+    def test_explicit_override_forces_vmp_style(self):
         ds = _make_ds(vehicle="slocum_glider")
-        config = ProfileConfig(match_conductivity=False, stationary_platform=True)
+        config = ProfileConfig(match_conductivity=False, vmp_style_gps=True)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert out["lat"].dims == ()
 
-    def test_explicit_override_forces_moving(self):
+    def test_explicit_override_forces_continuous_tracking(self):
         ds = _make_ds(vehicle="VMP")
-        config = ProfileConfig(match_conductivity=False, stationary_platform=False)
+        config = ProfileConfig(match_conductivity=False, vmp_style_gps=False)
         out = _attach_window_scalars(ds, _PARAMS, config)
         assert out["lat"].dims == ("time",)
         assert np.unique(out["lat"].values).size > 1

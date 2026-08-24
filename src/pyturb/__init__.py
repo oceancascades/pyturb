@@ -15,6 +15,7 @@ except PackageNotFoundError:
 from . import (
     auxiliary,
     conductivity,
+    fp07_calibration,
     io,
     merge,
     pfile,
@@ -29,6 +30,7 @@ __all__ = [
     "__version__",
     "auxiliary",
     "conductivity",
+    "fp07_calibration",
     "io",
     "merge",
     "pfile",

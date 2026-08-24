@@ -1,5 +1,5 @@
-"""Tests that scalar lat/lon (stationary platforms), z, and N2 survive the
-netCDF round-trip through _write_epsilon_profile, and flow through bin_profiles.
+"""Tests that scalar lat/lon (VMP-style GPS), z, and N2 survive the netCDF
+round-trip through _write_epsilon_profile, and flow through bin_profiles.
 """
 
 from pathlib import Path
@@ -20,7 +20,7 @@ DEPTH_MIN, DEPTH_MAX = 90.0, 130.0
 @pytest.fixture(scope="module")
 def eps_file_with_position(tmp_path_factory):
     """A real, processed VMP profile with a synthetic drifting aux track,
-    written to disk. instrument_vehicle="VMP" -> stationary -> scalar lat/lon.
+    written to disk. instrument_vehicle="VMP" -> VMP-style GPS -> scalar lat/lon.
     """
     raw = to_xarray(load_pfile_phys(PFILE))
     assert raw.attrs.get("instrument_vehicle") == "VMP"
