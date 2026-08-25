@@ -12,6 +12,7 @@ from pyturb.fp07_calibration import (
     apply_probe_calibration,
     find_lag,
     fit_probe_calibration,
+    fit_probe_calibration_multi,
     log_r_from_counts,
     read_report,
     steinhart_hart_forward,
@@ -189,6 +190,72 @@ class TestFitProbeCalibrationRealData:
             )
 
 
+@pytest.fixture(scope="module")
+def two_profile_list(prepared_profile):
+    """Split the single real prepared profile into two halves and treat
+    them as if they were two separate profiles -- real data, just chunked,
+    enough to exercise fit_probe_calibration_multi's aggregation (median
+    lag, concatenated regression) without needing a p-file with multiple
+    naturally-detected profiles."""
+    ds, config = prepared_profile
+    n_slow = ds.sizes["t_slow"]
+    n_fast = ds.sizes["t_fast"]
+    ratio = n_fast // n_slow
+    mid_slow = n_slow // 2
+    mid_fast = mid_slow * ratio
+    half_a = ds.isel(t_slow=slice(0, mid_slow), t_fast=slice(0, mid_fast))
+    half_b = ds.isel(t_slow=slice(mid_slow, n_slow), t_fast=slice(mid_fast, n_fast))
+    return [(0, half_a), (1, half_b)], config
+
+
+class TestFitProbeCalibrationMulti:
+    def test_fits_without_error(self, two_profile_list):
+        profile_list, config = two_profile_list
+        fit = fit_probe_calibration_multi(
+            profile_list, "T1", config, fit_file=PFILE.name, order=1
+        )
+        assert fit.probe == "T1"
+        assert fit.sn == "T1592"
+        assert fit.profile_index == -1  # sentinel: aggregate fit
+        assert np.isfinite(fit.new_T_0)
+        assert np.isfinite(fit.new_beta_1)
+
+    def test_aggregates_points_from_every_profile(self, two_profile_list):
+        profile_list, config = two_profile_list
+        fit = fit_probe_calibration_multi(
+            profile_list, "T1", config, fit_file=PFILE.name, order=1
+        )
+        expected = sum(pds.sizes["t_slow"] for _, pds in profile_list)
+        assert fit.n_points == expected
+
+    def test_lag_is_median_of_per_profile_lags(self, two_profile_list):
+        profile_list, config = two_profile_list
+        single_fits = [
+            fit_probe_calibration(
+                pds, "T1", config, fit_file=PFILE.name, profile_index=pidx, order=1
+            )
+            for pidx, pds in profile_list
+        ]
+        agg_fit = fit_probe_calibration_multi(
+            profile_list, "T1", config, fit_file=PFILE.name, order=1
+        )
+        expected_median = float(np.median([f.lag_s for f in single_fits]))
+        np.testing.assert_allclose(agg_fit.lag_s, expected_median)
+
+    def test_improves_agreement_with_reference(self, two_profile_list):
+        profile_list, config = two_profile_list
+        fit = fit_probe_calibration_multi(
+            profile_list, "T1", config, fit_file=PFILE.name, order=1
+        )
+        assert fit.rms_diff_new_c <= fit.rms_diff_old_c
+
+    def test_raises_with_no_usable_profiles(self, two_profile_list):
+        profile_list, config = two_profile_list
+        stripped = [(pidx, pds.drop_vars(["T1_counts"])) for pidx, pds in profile_list]
+        with pytest.raises(ValueError, match="no usable profiles"):
+            fit_probe_calibration_multi(stripped, "T1", config, fit_file=PFILE.name)
+
+
 class TestApplyProbeCalibration:
     def test_rebuilds_gradT_exactly(self, prepared_profile):
         ds_prepared, config = prepared_profile
@@ -313,10 +380,12 @@ class TestApplyProbeCalibration:
             apply_probe_calibration(legacy, fit)
 
 
-class TestSanityGuard:
-    """A calibration extrapolated to raw counts far outside its fitted range
-    (e.g. an anomalous profile) must be masked to NaN, not propagated -- see
-    the whole-file validation in the session that added this guard."""
+class TestNoMaskingOnExtrapolation:
+    """apply_probe_calibration applies the best available calibration as-is
+    and does not mask/NaN implausible (e.g. extrapolated) values -- that
+    would silently destroy data. Flagging physically implausible T1/T2 or
+    chi is the eps step's job (see profile.py's range-based QC), not this
+    conversion step's."""
 
     def _make_ds(self, counts: np.ndarray) -> xr.Dataset:
         n = counts.size
@@ -375,9 +444,10 @@ class TestSanityGuard:
             fit_date="2026-01-01T00:00:00+00:00",
         )
 
-    def test_masks_extrapolation_blowup(self):
+    def test_does_not_mask_extrapolation_blowup(self):
         n = 3000
-        # -4000 counts -> ~9.8C (sane); 20000 counts -> ~59.6C (insane).
+        # -4000 counts -> ~9.8C (sane); 20000 counts -> ~59.6C (physically
+        # implausible for seawater, but must be left as computed here).
         counts = np.full(n, -4000.0)
         counts[1000:1100] = 20000.0
         ds = self._make_ds(counts)
@@ -387,9 +457,8 @@ class TestSanityGuard:
         T1 = applied["T1"].values
         gradT1 = applied["gradT1"].values
 
-        assert np.isnan(T1[1000:1100]).all()
-        assert np.isnan(gradT1[1000:1100]).all()
-        assert not np.isnan(T1[:1000]).any()
-        assert not np.isnan(T1[1100:]).any()
+        assert not np.isnan(T1).any()
+        assert not np.isnan(gradT1).any()
         assert np.all((T1[:1000] > 0) & (T1[:1000] < 20))
-        assert applied["T1"].attrs["T1_fp07_n_out_of_range"] == 100
+        assert np.all(T1[1000:1100] > 40)  # implausible, but present
+        assert "T1_fp07_n_out_of_range" not in applied["T1"].attrs

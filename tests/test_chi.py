@@ -362,3 +362,68 @@ class TestChiPipeline:
         for v in ["chi_1", "chi_2", "chi", "chi_qc", "chi_1_qc", "chi_2_qc"]:
             assert v in binned, v
         assert np.isfinite(binned["chi"].values).any()
+
+
+class TestTemperatureRangeQC:
+    """apply_probe_calibration no longer masks physically implausible T1/T2
+    (e.g. from a calibration extrapolated beyond its fitted range) -- that's
+    flagged via QC at the eps step instead (see _temperature_range_mask /
+    _compose_range_qc / process_profile in profile.py), per policy: don't
+    destroy data, mark it untrustworthy and let the consumer decide.
+    """
+
+    def _process_with_corrupted_t1(self, frac_corrupted=1 / 3):
+        raw = to_xarray(load_pfile_phys(PFILE)).copy(deep=True)
+        n = raw["T1"].values.size
+        corrupted = raw["T1"].values.copy()
+        n_bad = int(n * frac_corrupted)
+        corrupted[:n_bad] = 999.0  # far outside [-3, 40] C
+        raw["T1"] = (raw["T1"].dims, corrupted, raw["T1"].attrs)
+
+        config = ProfileConfig(
+            shear_probes=("sh1", "sh2"),
+            accel_channels=("Ax", "Ay"),
+            diss_len_sec=4.0,
+            fft_len_sec=1.0,
+            compute_chi=True,
+        )
+        return process_profile(raw, config), config
+
+    def test_t1_value_not_masked(self):
+        result, _ = self._process_with_corrupted_t1()
+        assert not np.isnan(result["T1"].values).any()
+        assert (result["T1"].values > 40).any()
+
+    def test_t1_qc_flags_bad_windows(self):
+        result, _ = self._process_with_corrupted_t1()
+        assert "T1_qc" in result
+        assert "T1_range_frac" in result
+        qc = result["T1_qc"].values
+        frac = result["T1_range_frac"].values
+        assert set(np.unique(qc)) <= {0, 1, 2, 4, 9}
+        assert (qc[frac > 0.2] == 4).all()
+        assert (qc[frac == 0] == 1).all()
+
+    def test_t2_unaffected(self):
+        # Only T1 was corrupted -- T2_qc must stay good throughout.
+        result, _ = self._process_with_corrupted_t1()
+        assert (result["T2_qc"].values == 1).all()
+        assert (result["T2_range_frac"].values == 0).all()
+
+    def test_chi_1_qc_reflects_t1_range_but_not_chi_2_qc(self):
+        # Chi's own QC should be dragged bad by the same probe's range
+        # issue (T1 -> gradT1 -> chi_1), but chi_2 (from T2, unaffected)
+        # must not be contaminated by it.
+        result, _ = self._process_with_corrupted_t1()
+        range_frac_1 = result["T1_range_frac"].values
+        chi_1_qc = result["chi_1_qc"].values
+        chi_2_qc = result["chi_2_qc"].values
+        assert (chi_1_qc[range_frac_1 > 0.2] == 4).all()
+        # T2 was untouched, so chi_2_qc should have some good windows even
+        # where chi_1_qc was forced bad by the corrupted T1.
+        assert (chi_2_qc[range_frac_1 > 0.2] != 4).any()
+
+    def test_no_effect_when_t1_always_sane(self):
+        result, _ = self._process_with_corrupted_t1(frac_corrupted=0.0)
+        assert (result["T1_qc"].values == 1).all()
+        assert (result["T1_range_frac"].values == 0).all()

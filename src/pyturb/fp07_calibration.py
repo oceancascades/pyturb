@@ -33,6 +33,7 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "ProbeCalibrationFit",
     "fit_probe_calibration",
+    "fit_probe_calibration_multi",
     "apply_probe_calibration",
     "write_report",
     "read_report",
@@ -214,12 +215,20 @@ def fit_probe_calibration(
     min_range_c: float = 8.0,
     f_tc: float = 0.73,
     reference_speed: float = 0.62,
+    min_pressure_dbar: float = 1.0,
 ) -> ProbeCalibrationFit:
     """Fit ``probe``'s (e.g. ``"T1"``) in-situ calibration against ``ref``.
 
     ``profile_ds`` must be a single profile segment with smoothed speed (see
     :func:`pyturb.profile.prepare_profile`/``split_into_profiles``) and the
     probe's raw counts (``<probe>_counts``).
+
+    The regression itself only uses samples with pressure (``config.
+    pressure_smooth``) above ``min_pressure_dbar`` -- a profile segment
+    starts at the surface, before the vehicle reaches depth, and near-
+    surface/out-of-water samples shouldn't be allowed to pull the fit
+    (lag-finding still uses the full segment, which needs continuous data
+    for its cross-correlation/filtering to be meaningful).
     """
     counts_name = f"{probe}_counts"
     if counts_name not in profile_ds:
@@ -262,7 +271,17 @@ def fit_probe_calibration(
     log_R_aligned = _shift(log_R, lag_samples)
     T_stored_aligned = _shift(T_stored, lag_samples)
 
-    t_range = float(np.nanmax(T_ref_aligned) - np.nanmin(T_ref_aligned))
+    if config.pressure_smooth in profile_ds:
+        deep_mask = (
+            np.asarray(profile_ds[config.pressure_smooth].values, dtype=float)
+            > min_pressure_dbar
+        )
+    else:
+        deep_mask = np.ones_like(log_R_aligned, dtype=bool)
+    log_R_fit = log_R_aligned[deep_mask]
+    T_ref_fit = T_ref_aligned[deep_mask]
+
+    t_range = float(np.nanmax(T_ref_fit) - np.nanmin(T_ref_fit))
     fit_order = order
     if t_range < min_range_c and order > 1:
         _log.warning(
@@ -272,7 +291,7 @@ def fit_probe_calibration(
         fit_order = 1
 
     new_T_0, new_beta_1, new_beta_2, residual_std = steinhart_hart_regress(
-        log_R_aligned, T_ref_aligned, fit_order
+        log_R_fit, T_ref_fit, fit_order
     )
 
     T_new = steinhart_hart_forward(log_R, new_T_0, new_beta_1, new_beta_2) - 273.15
@@ -313,12 +332,178 @@ def fit_probe_calibration(
     )
 
 
-# Broad, globally-safe bounds on seawater temperature. A corrected value
-# outside this range indicates an extrapolation failure (e.g. a profile
-# with raw counts far outside the fitted range) rather than real data, and
-# is masked to NaN rather than propagated.
-_MIN_SANE_TEMP_C = -3.0
-_MAX_SANE_TEMP_C = 40.0
+def fit_probe_calibration_multi(
+    profile_list: list[tuple[int, xr.Dataset]],
+    probe: str,
+    config: ProfileConfig,
+    fit_file: str = "",
+    ref: str = "JAC_T",
+    order: int = 2,
+    min_range_c: float = 8.0,
+    f_tc: float = 0.73,
+    reference_speed: float = 0.62,
+    min_pressure_dbar: float = 1.0,
+) -> ProbeCalibrationFit:
+    """Fit ``probe``'s in-situ calibration aggregated across every profile in
+    ``profile_list``, instead of a single best one.
+
+    Mirrors the mousebrains/``odas_tpw`` package's approach: median lag
+    across every profile in a file, then a single Steinhart-Hart regression
+    on the concatenated data from all of them, rather than pyturb's older
+    single-best-profile fit. The median is far less sensitive to any one
+    profile's noisy lag estimate than trusting a single profile's search
+    outright, and concatenating data from profiles spanning different
+    depths/conditions gives the regression a wider, better-conditioned
+    ``log_R`` range to fit -- directly countering the narrow/offset-window
+    fragility a single profile's fit can have (see the session
+    investigation into VMP412 T1 SN T2146/T1592). Verified at least as
+    accurate as the single-profile fit on every well-behaved probe tested,
+    so this is now the only fitting strategy ``calibrate-fp07 auto`` uses.
+
+    The regression itself only uses samples with pressure (``config.
+    pressure_smooth``) above ``min_pressure_dbar`` from each profile -- a
+    profile segment starts at the surface, before the vehicle reaches
+    depth, and near-surface/out-of-water samples shouldn't be allowed to
+    pull the fit (lag-finding still uses each full segment, which needs
+    continuous data for its cross-correlation/filtering to be meaningful).
+
+    ``profile_list`` is e.g. the output of
+    :func:`pyturb.profile.split_into_profiles`. ``profile_index`` on the
+    returned fit is ``-1``, a sentinel meaning "aggregate of multiple
+    profiles" (see :func:`apply_probe_calibration`'s provenance attrs).
+    """
+    counts_name = f"{probe}_counts"
+
+    params: Optional[dict] = None
+    sn = instrument_sn = "unknown"
+    old_T_0 = old_beta_1 = old_beta_2 = None
+    a = b = g = e_b = adc_fs = adc_bits = None
+
+    # (log_R, T_ref, T_stored, fs, fc, P) per usable profile.
+    per_profile: list[tuple[NDArray, NDArray, NDArray, float, float, NDArray]] = []
+    lags: list[float] = []
+    corrs: list[float] = []
+
+    for _, profile_ds in profile_list:
+        if counts_name not in profile_ds or ref not in profile_ds:
+            continue
+        if params is None:
+            params = _channel_params(profile_ds, probe)
+            sn = str(params.get("sn", "unknown"))
+            instrument_sn = str(profile_ds.attrs.get("instrument_sn", "unknown"))
+            a, b, g, e_b, _, adc_bits = _electronics(params)
+            adc_fs = float(params["adc_fs"])
+            old_T_0, old_beta_1, old_beta_2 = _coefficients(params)
+
+        log_R = log_r_from_counts(
+            profile_ds[counts_name].values, a, b, g, e_b, adc_fs, adc_bits
+        )
+        T_unclipped = (
+            steinhart_hart_forward(log_R, old_T_0, old_beta_1, old_beta_2) - 273.15
+        )
+        T_stored = np.asarray(profile_ds[probe].values, dtype=float)
+        T_ref = np.asarray(profile_ds[ref].values, dtype=float)
+        W = np.asarray(profile_ds[config.speed_smooth].values, dtype=float)
+        fs = float(profile_ds.fs_slow)
+        P = (
+            np.asarray(profile_ds[config.pressure_smooth].values, dtype=float)
+            if config.pressure_smooth in profile_ds
+            else np.full(log_R.shape, np.inf)
+        )
+
+        W_mean = float(np.nanmean(np.abs(W)))
+        fc = f_tc * np.sqrt(W_mean / reference_speed)
+        T_filtered = _matching_filter(T_unclipped, fs, fc)
+
+        lag_s, lag_corr = find_lag(T_filtered, T_ref, fs)
+        # A flatlined/non-finite segment gives a non-finite lag; drop it so
+        # it cannot poison the median.
+        if not np.isfinite(lag_s):
+            continue
+        lags.append(lag_s)
+        corrs.append(lag_corr)
+        per_profile.append((log_R, T_ref, T_stored, fs, fc, P))
+
+    if params is None or not lags:
+        raise ValueError(
+            f"{probe}: no usable profiles (need '{counts_name}' and '{ref}') "
+            "to fit an aggregate calibration."
+        )
+
+    median_lag_s = float(np.median(lags))
+    median_corr = float(np.median(corrs))
+
+    log_R_parts, T_ref_parts, T_stored_parts = [], [], []
+    log_R_fit_parts, T_ref_fit_parts = [], []
+    for log_R, T_ref, T_stored, fs, _fc, P in per_profile:
+        lag_samples = -median_lag_s * fs
+        T_ref_aligned = T_ref if lag_samples > 0 else _lag_filter(T_ref, -lag_samples)
+        log_R_aligned_p = _shift(log_R, lag_samples)
+        log_R_parts.append(log_R_aligned_p)
+        T_ref_parts.append(T_ref_aligned)
+        T_stored_parts.append(_shift(T_stored, lag_samples))
+
+        deep_mask = P > min_pressure_dbar
+        log_R_fit_parts.append(log_R_aligned_p[deep_mask])
+        T_ref_fit_parts.append(T_ref_aligned[deep_mask])
+
+    log_R_aligned = np.concatenate(log_R_parts)
+    T_ref_aligned = np.concatenate(T_ref_parts)
+    T_stored_aligned = np.concatenate(T_stored_parts)
+    log_R_fit = np.concatenate(log_R_fit_parts)
+    T_ref_fit = np.concatenate(T_ref_fit_parts)
+
+    t_range = float(np.nanmax(T_ref_fit) - np.nanmin(T_ref_fit))
+    fit_order = order
+    if t_range < min_range_c and order > 1:
+        _log.warning(
+            f"{probe}: aggregate temperature range {t_range:.1f}C < "
+            f"{min_range_c:.1f}C; falling back to a first-order fit."
+        )
+        fit_order = 1
+
+    new_T_0, new_beta_1, new_beta_2, residual_std = steinhart_hart_regress(
+        log_R_fit, T_ref_fit, fit_order
+    )
+
+    T_new_parts = []
+    for log_R, _T_ref, _T_stored, fs, fc, _P in per_profile:
+        T_new = steinhart_hart_forward(log_R, new_T_0, new_beta_1, new_beta_2) - 273.15
+        T_new_filtered = _matching_filter(T_new, fs, fc)
+        lag_samples = -median_lag_s * fs
+        T_new_parts.append(_shift(T_new_filtered, lag_samples))
+    T_new_aligned = np.concatenate(T_new_parts)
+
+    diff_old = T_stored_aligned - T_ref_aligned
+    diff_new = T_new_aligned - T_ref_aligned
+
+    return ProbeCalibrationFit(
+        probe=probe,
+        sn=sn,
+        instrument_sn=instrument_sn,
+        fit_file=fit_file,
+        profile_index=-1,
+        reference=ref,
+        order=fit_order,
+        old_T_0=old_T_0,
+        old_beta_1=old_beta_1,
+        old_beta_2=old_beta_2,
+        new_T_0=new_T_0,
+        new_beta_1=new_beta_1,
+        new_beta_2=new_beta_2,
+        lag_s=median_lag_s,
+        lag_corr=median_corr,
+        n_points=int(log_R_aligned.size),
+        temperature_range_c=t_range,
+        rms_diff_old_c=float(np.sqrt(np.nanmean(diff_old**2))),
+        rms_diff_new_c=float(np.sqrt(np.nanmean(diff_new**2))),
+        max_abs_diff_old_c=float(np.nanmax(np.abs(diff_old))),
+        max_abs_diff_new_c=float(np.nanmax(np.abs(diff_new))),
+        mean_bias_old_c=float(np.nanmean(diff_old)),
+        mean_bias_new_c=float(np.nanmean(diff_new)),
+        residual_std_c=residual_std,
+        fit_date=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
 
 
 def _rebuild_T_from_raw(
@@ -377,15 +562,17 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
 
     Recomputes both the standalone temperature (``T1``/``T2``) and the
     gradient (``gradT1``/``gradT2``) from raw counts with the new
-    coefficients (exact, no data loss), shifts each by the fitted lag, and
-    masks samples outside a physically sane temperature range
-    (_MIN_SANE_TEMP_C to _MAX_SANE_TEMP_C) to NaN -- extrapolating the fit
-    to raw counts far outside its fitted range (e.g. an anomalous profile)
-    can otherwise produce nonsense rather than merely inaccurate values.
-    Stamps provenance attributes. No-ops unless both the probe SN and the
-    instrument SN match ``fit.sn``/``fit.instrument_sn`` -- a probe SN alone
-    isn't a safe match key (e.g. generic/placeholder SNs are occasionally
-    reused across probes/instruments).
+    coefficients (exact, no data loss) and shifts each by the fitted lag.
+    Applies the best available calibration as-is, with no NaN-masking or
+    other data destruction here -- a fit extrapolated to raw counts far
+    outside its fitted range (e.g. an anomalous profile) can still produce
+    physically implausible values, but flagging that is the ``eps`` step's
+    job (it checks the raw T1/T2 range and the chi fit quality per window
+    and marks QC there), not this conversion step's. Stamps provenance
+    attributes. No-ops unless both the probe SN and the instrument SN match
+    ``fit.sn``/``fit.instrument_sn`` -- a probe SN alone isn't a safe match
+    key (e.g. generic/placeholder SNs are occasionally reused across
+    probes/instruments).
     """
     grad_name = f"grad{fit.probe}"
     if fit.probe not in ds or grad_name not in ds:
@@ -413,23 +600,9 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
 
     T = _rebuild_T_from_raw(ds, fit, params)
     T = _shift(T, -fit.lag_s * fs_slow)
-    bad_slow = ~np.isfinite(T) | (T < _MIN_SANE_TEMP_C) | (T > _MAX_SANE_TEMP_C)
-    n_bad = int(bad_slow.sum())
-    if n_bad:
-        _log.warning(
-            f"{fit.probe}: {n_bad}/{bad_slow.size} ({n_bad / bad_slow.size:.1%}) "
-            f"corrected samples fell outside [{_MIN_SANE_TEMP_C}, {_MAX_SANE_TEMP_C}] C "
-            f"(extrapolation beyond the fitted range); setting {fit.probe}/{grad_name} "
-            "to NaN there."
-        )
-    T[bad_slow] = np.nan
 
     grad = _rebuild_gradT_from_raw(ds, fit, params)
     grad = _shift(grad, -fit.lag_s * fs_fast)
-    bad_fast = (
-        np.interp(ds["t_fast"].values, ds["t_slow"].values, bad_slow.astype(float)) > 0
-    )
-    grad[bad_fast] = np.nan
 
     old_T_0, old_beta_1, old_beta_2 = _coefficients(params)
     # Save attrs before the bare (dims, data) assignments below, which would
@@ -462,7 +635,6 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
         ds[name].attrs[f"{fit.probe}_fp07_cal_source"] = (
             f"{fit.fit_file}:p{fit.profile_index}"
         )
-        ds[name].attrs[f"{fit.probe}_fp07_n_out_of_range"] = n_bad
     return ds
 
 

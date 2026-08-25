@@ -41,7 +41,7 @@ Each converted variable also carries the setup-string calibration parameters act
 
 ### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
 
-The embedded FP07 calibration coefficients are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T` sensor) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2`. Corrected samples that fall outside the temperature range -3 to 40 C are set to NaN.
+The embedded FP07 calibration coefficients are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T` sensor) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2`, applying the best available fit. `pyturb eps` checks the raw `T1`/`T2` range and attaches `T1_qc`/`T2_qc` and folds the same check into `chi_1_qc`/`chi_2_qc`.
 
 ```bash
 # Fit from one representative profile and write a calibration report
@@ -56,6 +56,8 @@ pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
 ```
 
 `--profile` is 0-based and matches `eps`'s `_p{NNNN}` output numbering, so `--profile 0` corresponds to what would become `..._p0000.nc`. Run `pyturb calibrate-fp07 fit`/`apply`/`auto --help` for all options.
+
+For each candidate file, `auto` fits by aggregating across every one of that file's profiles: median lag across all of them. Before accepting a candidate file's aggregate fit, `auto` also drops any profile whose raw counts are pinned near the ADC's saturation limit and checks the fitted `T_0`/`beta_1` land in a physically plausible range.
 
 ### `eps` - calculate the dissipation rate
 
@@ -81,6 +83,8 @@ A selection of options:
 - `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile instead of interpolating a continuously-tracked position onto every bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked).
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+
+`T1`/`T2` each get a `T1_qc`/`T2_qc` flag (same 0/1/2/4/9 convention as `eps_N_qc`/`chi_N_qc`), composed from the fraction of raw samples in that window outside a physically sane seawater temperature range (`T1_range_frac`/`T2_range_frac`) -- catches a calibration extrapolated beyond its fitted range without discarding the underlying value. The same range fraction also feeds into `chi_1_qc`/`chi_2_qc`, since a bad calibration corrupts the gradient the same way a despiked-out transient does.
 
 The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
 

@@ -1322,7 +1322,10 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
 
 
 def _attach_window_scalars(
-    ds: xr.Dataset, params: dict, config: ProfileConfig
+    ds: xr.Dataset,
+    params: dict,
+    config: ProfileConfig,
+    range_masks: Optional[dict] = None,
 ) -> xr.Dataset:
     """Compute window-mean scalars and attach them on the output ``time`` axis.
 
@@ -1386,6 +1389,36 @@ def _attach_window_scalars(
             "valid_max": np.float32(1.0),
         }
         ds = ds.drop_vars(mask_name)
+
+    for probe, mask_slow in (range_masks or {}).items():
+        if probe not in ds:
+            continue
+        frac = _window_mean_slow(mask_slow.astype("f4"), params)
+        ds[f"{probe}_range_frac"] = ("time", frac.astype("f4"))
+        ds[f"{probe}_range_frac"].attrs = {
+            "long_name": f"Fraction of {probe} raw samples outside "
+            f"[{_MIN_SANE_TEMP_C}, {_MAX_SANE_TEMP_C}] C",
+            "units": "1",
+            "valid_min": np.float32(0.0),
+            "valid_max": np.float32(1.0),
+        }
+        qc_var = f"{probe}_qc"
+        ds[qc_var] = ("time", _compose_range_qc(frac, config))
+        ds[qc_var].attrs = {
+            "long_name": f"QC flag for {probe}",
+            "flag_values": _QC_FLAG_VALUES,
+            "flag_meanings": _QC_FLAG_MEANINGS,
+            "valid_min": np.int8(0),
+            "valid_max": np.int8(9),
+            "comment": (
+                f"Composed from {probe}_range_frac -- the fraction of raw "
+                f"{probe} samples outside a physically sane seawater "
+                "temperature range in this window, e.g. from a calibration "
+                "extrapolated beyond its fitted range "
+                f"(questionable>{config.despike_frac_questionable}, "
+                f"bad>{config.despike_frac_bad})."
+            ),
+        }
 
     return ds
 
@@ -1508,6 +1541,37 @@ _QC_FLAG_VALUES = np.array([0, 1, 2, 4, 9], dtype="i1")
 _QC_FLAG_MEANINGS = "unknown good questionable bad missing"
 _QC_MISSING = np.int8(9)
 _EPS_AGREEMENT_FACTOR = 10.0
+
+# Broad, globally-safe bounds on seawater temperature. A T1/T2 value outside
+# this range usually indicates a calibration extrapolated beyond its fitted
+# range (e.g. applied to an anomalous profile) rather than real data.
+# calibrate-fp07's apply_probe_calibration applies the best available fit
+# as-is and does not mask this -- flagged via QC here instead, at the eps
+# step, per policy: don't destroy data, mark it untrustworthy and let the
+# consumer decide.
+_MIN_SANE_TEMP_C = -3.0
+_MAX_SANE_TEMP_C = 40.0
+
+
+def _temperature_range_mask(T: np.ndarray) -> np.ndarray:
+    """True where T is missing or outside the physically sane seawater range."""
+    return ~np.isfinite(T) | (T < _MIN_SANE_TEMP_C) | (T > _MAX_SANE_TEMP_C)
+
+
+def _compose_range_qc(range_frac: np.ndarray, config: ProfileConfig) -> np.ndarray:
+    """QC flag from the fraction of a temperature probe's raw samples that
+    fell outside the physically sane range within a window.
+
+      * range_frac > despike_frac_bad          -> 4 (bad)
+      * range_frac > despike_frac_questionable -> 2 (questionable)
+      * range_frac is NaN (no raw samples)     -> 9 (missing)
+      * otherwise                              -> 1 (good)
+    """
+    qc = np.ones(range_frac.shape, dtype="i1")
+    qc[range_frac > config.despike_frac_questionable] = 2
+    qc[range_frac > config.despike_frac_bad] = 4
+    qc[np.isnan(range_frac)] = 9
+    return qc
 
 
 def _combine_eps_pair(
@@ -1777,7 +1841,17 @@ def _attach_chi(
             despike_frac = ds[despike_frac_var].values
         else:
             despike_frac = np.zeros(n, dtype="f4")
-        qc = _compose_qc(chi, fm, speed_bad, despike_frac, config)
+        # Fold in the probe's own out-of-range fraction (see
+        # _attach_window_scalars/_compose_range_qc) -- a calibration
+        # extrapolated beyond its fitted range corrupts gradT the same way
+        # a despiked-out transient does, so it's treated the same way here.
+        range_frac_var = f"{probe}_range_frac"
+        if range_frac_var in ds:
+            range_frac = np.nan_to_num(ds[range_frac_var].values, nan=0.0)
+        else:
+            range_frac = np.zeros(n, dtype="f4")
+        bad_frac = np.clip(despike_frac + range_frac, 0.0, 1.0)
+        qc = _compose_qc(chi, fm, speed_bad, bad_frac, config)
         qc_var = f"chi_{probe_num}_qc"
         ds[qc_var] = ("time", qc)
         ds[qc_var].attrs = {
@@ -1789,7 +1863,7 @@ def _attach_chi(
             "comment": (
                 f"Composed from speed (min_speed={config.min_speed} m/s), "
                 f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
-                f"and {name}_despike_frac "
+                f"and {name}_despike_frac + {probe}_range_frac "
                 f"(questionable>{config.despike_frac_questionable}, "
                 f"bad>{config.despike_frac_bad})."
             ),
@@ -1824,15 +1898,21 @@ def process_profile(
         config = ProfileConfig()
 
     # Grabbed before _attach_window_scalars overwrites T1/T2 with their
-    # window-mean values (dropping the cal_* attrs) -- see _attach_chi.
+    # window-mean values (dropping the cal_* attrs and the raw samples
+    # range_masks needs) -- see _attach_chi and _attach_window_scalars.
     cal_params = {
         probe: p
         for probe in ("T1", "T2")
         if (p := _channel_calibration_params(ds, probe))
     }
+    range_masks = {
+        probe: _temperature_range_mask(ds[probe].values)
+        for probe in ("T1", "T2")
+        if probe in ds
+    }
 
     ds, params = _preprocess_for_spectra(ds, config)
-    ds = _attach_window_scalars(ds, params, config)
+    ds = _attach_window_scalars(ds, params, config, range_masks)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
     ds = _attach_epsilon(ds, freq, spectra, config, params)
     return _attach_chi(ds, freq, spectra, config, params, cal_params)
