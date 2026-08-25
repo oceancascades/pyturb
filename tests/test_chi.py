@@ -7,10 +7,12 @@ import pytest
 import xarray as xr
 
 from pyturb._pfile import to_xarray
+from pyturb.noise import _channel_calibration_params
 from pyturb.pfile import load_pfile_phys
 from pyturb.processing import _write_epsilon_profile, bin_profiles
 from pyturb.profile import ProfileConfig, _combine_eps_pair, process_profile
 from pyturb.temperature import (
+    _noise_crossing_k,
     batchelor_wavenumber,
     estimate_chi,
     kraichnan_spectrum,
@@ -136,6 +138,72 @@ class TestEstimateChi:
         assert np.isnan(chi_hat)
 
 
+class TestNoiseFloorCap:
+    """estimate_chi's optional phi_noise cap -- added because the
+    polynomial spectral-minimum search alone can land past where the
+    spectrum is actually noise-dominated (seen investigating real and
+    synthetic Kraichnan+noise spectra in this session); this caps k_max at
+    the wavenumber where the (smoothed) signal first drops to/below a
+    supplied noise floor, in addition to the existing k_95/k_AA/polyfit
+    limits.
+    """
+
+    def test_noise_crossing_k_finds_interpolated_crossing(self):
+        k = np.linspace(1, 100, 200)
+        phi = 1e-4 / k  # monotonically decreasing "signal"
+        noise = np.full_like(k, 1e-6)  # flat noise floor; true crossing k=100
+        k_cross = _noise_crossing_k(k, phi, noise)
+        assert 90 < k_cross <= 100 + 1e-6
+
+    def test_noise_crossing_k_nan_when_no_crossing(self):
+        k = np.linspace(1, 100, 200)
+        phi = np.full_like(k, 1e-3)  # always well above the noise floor
+        noise = np.full_like(k, 1e-6)
+        assert np.isnan(_noise_crossing_k(k, phi, noise))
+
+    def test_caps_k_max_when_noise_crosses_early(self):
+        # A noise floor added to a clean Kraichnan spectrum can fool the
+        # polynomial spectral-minimum search into extending k_max well
+        # past where the signal is actually resolved. phi_noise must not
+        # let k_max exceed roughly where signal meets noise, and the
+        # resulting chi should be no worse (usually better) than uncapped.
+        W = 0.6
+        f = np.arange(1, 512) * 98.0 / 512
+        k = f / W
+        phi_signal = kraichnan_spectrum(k, CHI, EPS, NU, KAPPA)
+        phi_noise = 1e-7 * (k / 10) ** 1.5  # steadily rising, RSI-electronics-like
+        rng = np.random.default_rng(1)
+        realization = rng.chisquare(13.3, size=k.shape) / 13.3
+        P_f = (phi_signal + phi_noise) * realization / W
+
+        chi_uncapped, k_max_uncapped, _ = estimate_chi(
+            f, P_f, W=W, eps=EPS, nu=NU, kappa_T=KAPPA
+        )
+        chi_capped, k_max_capped, _ = estimate_chi(
+            f, P_f, W=W, eps=EPS, nu=NU, kappa_T=KAPPA, phi_noise=phi_noise
+        )
+        assert k_max_capped <= k_max_uncapped
+        assert (
+            abs(np.log10(chi_capped / CHI)) <= abs(np.log10(chi_uncapped / CHI)) + 0.05
+        )
+
+    def test_no_effect_when_signal_always_above_noise(self):
+        f, P_f = self._synthetic_spectrum(EPS)
+        phi_noise = np.full_like(f, 1e-30)  # negligible everywhere
+        chi_a, k_max_a, _ = estimate_chi(f, P_f, W=0.6, eps=EPS, nu=NU, kappa_T=KAPPA)
+        chi_b, k_max_b, _ = estimate_chi(
+            f, P_f, W=0.6, eps=EPS, nu=NU, kappa_T=KAPPA, phi_noise=phi_noise
+        )
+        np.testing.assert_allclose(k_max_a, k_max_b)
+        np.testing.assert_allclose(chi_a, chi_b)
+
+    def _synthetic_spectrum(self, eps, W=0.6):
+        f = np.arange(1, 512) * 98.0 / 512
+        psi = kraichnan_spectrum(f / W, CHI, eps, NU, KAPPA)
+        P_f = psi / W
+        return f, P_f
+
+
 class TestCombineEpsPair:
     def test_mean_within_factor_ten(self):
         e1 = np.array([1e-9])
@@ -213,6 +281,24 @@ class TestChiPipeline:
     def test_chi_qc_valid_flags(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)
         assert set(np.unique(written["chi_1_qc"].values)) <= {0, 1, 2, 4, 9}
+
+    def test_noise_floor_cap_is_exercised_and_sane(self, chi_eps_file):
+        # This real PFILE does carry cal_* attrs, so process_profile's
+        # noise-floor cap (see _attach_chi/thermistor_noise_phi) is
+        # actually engaged for this fixture, not silently skipped -- and
+        # k_max should never exceed the anti-alias cutoff it's capped by
+        # regardless (f_AA=98 Hz default / W).
+        raw = to_xarray(load_pfile_phys(PFILE))
+        assert _channel_calibration_params(raw, "T1")
+        assert _channel_calibration_params(raw, "T2")
+
+        written = xr.load_dataset(chi_eps_file, decode_times=False)
+        W = written["W"].values
+        for probe_num in (1, 2):
+            k_max = written[f"chi_k_max_{probe_num}"].values
+            finite = np.isfinite(k_max) & np.isfinite(W) & (W > 0)
+            assert finite.any()
+            assert np.all(k_max[finite] <= 98.0 / W[finite] + 1e-6)
 
     def test_gradT_spectra_are_response_corrected_with_comment(self, chi_eps_file):
         # S_gradT1/S_gradT2 must be the response-corrected spectra (chi's

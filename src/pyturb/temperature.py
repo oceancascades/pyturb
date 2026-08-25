@@ -1,5 +1,7 @@
 # Methods for computing the dissipation rate of temperature variance (chi)
 
+from typing import Optional
+
 import numpy as np
 
 from .shear import polynomial_spectral_min_search
@@ -119,6 +121,46 @@ def _mad_vs_kraichnan(
     return float(np.mean(np.abs(np.log10(spec[valid] / model[valid]))))
 
 
+def _noise_crossing_k(
+    k: np.ndarray, phi: np.ndarray, phi_noise: np.ndarray, smooth_win: int = 5
+) -> float:
+    """Smallest k (ascending) where a smoothed ``phi`` drops to/below
+    ``phi_noise``; NaN if there's no crossing in range.
+
+    Smoothing (a centered rolling median) keeps a single noisy bin from
+    triggering a false early crossing -- the noise floor should cap k_max
+    where the spectrum's trend meets the noise, not where one point does.
+    """
+    valid = (k > 0) & np.isfinite(phi) & np.isfinite(phi_noise) & (phi_noise > 0)
+    if valid.sum() < smooth_win:
+        return float("nan")
+    order = np.argsort(k[valid])
+    k_v = k[valid][order]
+    phi_v = phi[valid][order]
+    noise_v = phi_noise[valid][order]
+
+    if smooth_win >= 3 and smooth_win % 2 == 1 and phi_v.size >= smooth_win:
+        pad = smooth_win // 2
+        padded = np.pad(phi_v, pad, mode="edge")
+        phi_v = np.array(
+            [np.median(padded[i : i + smooth_win]) for i in range(phi_v.size)]
+        )
+
+    ratio = phi_v / noise_v
+    below = ratio <= 1.0
+    if not below.any():
+        return float("nan")
+    idx = int(np.argmax(below))
+    if idx == 0 or ratio[idx - 1] <= ratio[idx]:
+        return float(k_v[idx])
+
+    # log-log interpolation between the bracketing points for a smoother estimate
+    logr1, logr2 = np.log(ratio[idx - 1]), np.log(ratio[idx])
+    frac = logr1 / (logr1 - logr2)
+    log_k1, log_k2 = np.log(k_v[idx - 1]), np.log(k_v[idx])
+    return float(np.exp(log_k1 + frac * (log_k2 - log_k1)))
+
+
 def estimate_chi(
     f: np.ndarray,
     P_f: np.ndarray,
@@ -128,6 +170,7 @@ def estimate_chi(
     kappa_T: float = 1.4e-7,
     f_AA: float = 98.0,
     fit_order: int = 3,
+    phi_noise: Optional[np.ndarray] = None,
 ) -> tuple[float, float, float]:
     """Estimate chi from one temperature gradient spectrum with epsilon known.
 
@@ -148,6 +191,13 @@ def estimate_chi(
     kappa_T : molecular thermal diffusivity (m^2/s)
     f_AA : anti-alias cutoff (Hz)
     fit_order : polynomial order for the spectral-minimum search
+    phi_noise : predicted electronic noise floor phi(k) [K2 m-2 cpm-1], same
+        length/domain as ``f`` (e.g. from
+        :func:`pyturb.noise.thermistor_noise_phi`). If given, k_max is also
+        capped at the wavenumber where the (smoothed) observed spectrum
+        first drops to/below this curve -- the spectral-minimum search
+        alone can land past that point, integrating pure noise into chi.
+        Optional; skipped if None.
 
     Returns
     -------
@@ -186,7 +236,13 @@ def estimate_chi(
     except RuntimeError:
         pr1 = np.log10(k_95)
 
-    k_limit = 10 ** min(pr1, np.log10(k_95), np.log10(k_AA))
+    log_limits = [pr1, np.log10(k_95), np.log10(k_AA)]
+    if phi_noise is not None:
+        k_noise = _noise_crossing_k(k, phi, phi_noise)
+        if np.isfinite(k_noise):
+            log_limits.append(np.log10(k_noise))
+
+    k_limit = 10 ** min(log_limits)
 
     range_mask = k <= k_limit
     if range_mask.sum() < 3:

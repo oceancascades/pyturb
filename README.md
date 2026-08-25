@@ -41,21 +41,17 @@ Each converted variable also carries the setup-string calibration parameters act
 
 ### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
 
-The embedded FP07 calibration coefficients (`T_0`, `beta_1`, `beta_2`) are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T`, from the same, deepest available profile) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2` from the raw counts. Corrected samples that fall outside the temperature range -3 to 40 C are set to NaN.
+The embedded FP07 calibration coefficients are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T` sensor) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2`. Corrected samples that fall outside the temperature range -3 to 40 C are set to NaN.
 
 ```bash
-# Fit from one representative profile; writes a report with old-vs-new
-# parameters and old-vs-new agreement with the reference.
+# Fit from one representative profile and write a calibration report
 pyturb calibrate-fp07 fit converted/RIOT_VMP194_0003.nc --profile 0 -o cal.yaml
 
-# Apply that fit to every converted file from the same instrument with a
-# matching probe serial number. Files that don't match both are skipped.
+# Apply a fit to every converted file from the same instrument with a
+# matching probe serial number.
 pyturb calibrate-fp07 apply cal.yaml converted/RIOT_VMP194_*.nc -o converted_calibrated/
 
-# Or do both at once across a whole dataset: scans the input files, groups
-# them by (instrument, probe serial number), fits each group from a
-# representative profile in the file nearest the middle of that group, and
-# applies every fit to every matching file.
+# Automatically apply the first two steps across multiple instruments and sensors.
 pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
 ```
 
@@ -71,7 +67,7 @@ pyturb eps ./converted/*.nc -o ./eps_output/
 
 The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a Slocum glider and used to esimate viscosity. Velocity from a calibrated glider flight model may also be used.
 
-A selection of the option:
+A selection of options:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
@@ -82,11 +78,11 @@ A selection of the option:
 - `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).
 - `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
-- `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile (a single ship/surface GPS fix per cast) instead of interpolating a continuously-tracked position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked, e.g. gliders). With VMP-style GPS, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); with a continuously-tracked position they vary with `time`/`ctd_time`.
+- `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile instead of interpolating a continuously-tracked position onto every bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked).
 
-CTD scalars (pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2`) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`, `T1_hires`), alongside the dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
-The per-window power spectra are also written out (`S_sh1`/`S_sh2`, `S_gradT1`/`S_gradT2`, on the `frequency` coordinate), already response-corrected -- not the raw Welch PSD -- so they can be compared directly against a Nasmyth/Kraichnan model without an extra correction step. `S_gradT1`/`S_gradT2` are corrected for the FP07 single-pole frequency response (Lueck); `S_sh1`/`S_sh2` are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function (Macoun & Lueck; Rockland Technical Note 026). Each variable's `comment` attr documents the exact correction formula and parameters used.
+The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
 
 See `pyturb eps --help` formore details. 
 
@@ -135,9 +131,9 @@ The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectr
 
 With `--chi`, the dissipation rate of temperature variance is estimated from the FP07 temperature gradient spectra:
 
-1. Spectra are corrected for the thermistor frequency response using a single-pole transfer function with a speed-dependent time constant (Lueck).
-2. Chi is computed by integrating the corrected spectrum over the resolved wavenumber band, with the upper limit set by the anti-alias cutoff, the spectral noise minimum, and the 95%-variance wavenumber.
-3. Epsilon is taken as the per-window combination of the shear-probe estimates (mean if within a factor of 10, minimum otherwise), fixing the Batchelor wavenumber.
-4. Unresolved variance is corrected using the closed-form integral of the Kraichnan spectrum.
-5. Molecular thermal diffusivity is computed from an empirical conductivity formula (Caldwell 1974).
-6. A figure of merit against the Kraichnan spectrum and a QC flag are attached, mirroring the epsilon QC.
+1. Spectra are corrected for the thermistor frequency response using a single-pole transfer function with a speed-dependent time constant.
+2. Chi is computed by integrating the corrected spectrum over the resolved wavenumber band, with the upper limit set by the anti-alias cutoff, the spectral noise minimum, the 95%-variance wavenumber, and (when the channel carries calibration attrs) the wavenumber where the spectrum crosses a predicted electronics noise floor.
+3. Epsilon is taken as the per-window combination of the shear-probe estimates, fixing the Batchelor wavenumber.
+4. Unresolved variance is corrected using the Kraichnan spectrum.
+5. Molecular thermal diffusivity is computed from an empirical conductivity formula.
+6. A figure of merit against the Kraichnan spectrum and a QC flag are attached.

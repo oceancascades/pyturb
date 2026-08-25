@@ -12,6 +12,7 @@ import yaml
 from profinder import find_profiles  # type: ignore[import]
 
 from .conductivity import match_conductivity_to_temperature
+from .noise import _channel_calibration_params, thermistor_noise_phi
 from .shear import estimate_epsilon, viscosity
 from .shear import single_pole_correction as shear_response_correction
 from .signal import (
@@ -1692,6 +1693,7 @@ def _attach_chi(
     spectra: dict[str, np.ndarray],
     config: ProfileConfig,
     params: dict,
+    cal_params: dict,
 ) -> xr.Dataset:
     """Attach per-probe chi, chi_k_max, FM, and QC flags on the ``time`` dim.
 
@@ -1700,6 +1702,12 @@ def _attach_chi(
     :func:`_best_window_epsilon` and :func:`pyturb.temperature.estimate_chi`).
     QC composition mirrors epsilon: speed, FM vs the Kraichnan model, and the
     matching gradT despike fraction.
+
+    ``cal_params`` (from :func:`process_profile`, keyed by probe e.g.
+    ``"T1"``) lets each window's predicted electronics noise floor (see
+    :func:`pyturb.noise.thermistor_noise_phi`) cap chi's k_max in addition
+    to the spectral-minimum search -- skipped (falls back to the
+    spectral-minimum search alone) for a probe with no calibration attrs.
     """
     if not config.compute_chi:
         return ds
@@ -1713,6 +1721,7 @@ def _attach_chi(
     nu = ds["nu"].values
     kappa_T = ds["kappa_T"].values
     n = W.size
+    fs_fast = float(ds.fs_fast)
 
     sqrt_dof = float(np.sqrt(_dof_spec(params)))
     speed_bad = W < config.min_speed
@@ -1720,11 +1729,17 @@ def _attach_chi(
     for name in config.temperature_probes:
         if name not in spectra:
             continue
+        probe = name.removeprefix("grad")
+        cal = cal_params.get(probe)
+        T_probe = ds[probe].values if cal and probe in ds else None
         psd = spectra[name]
         chi = np.full(n, np.nan)
         k_max = np.full(n, np.nan)
         mad = np.full(n, np.nan)
         for i in range(n):
+            phi_noise = None
+            if T_probe is not None and np.isfinite(T_probe[i]) and W[i] > 0:
+                phi_noise = thermistor_noise_phi(freq, W[i], T_probe[i], cal, fs_fast)
             chi[i], k_max[i], mad[i] = estimate_chi(
                 freq,
                 psd[i],
@@ -1732,6 +1747,7 @@ def _attach_chi(
                 eps=eps_best[i],
                 nu=nu[i],
                 kappa_T=kappa_T[i],
+                phi_noise=phi_noise,
             )
 
         probe_num = name[-1]
@@ -1807,8 +1823,16 @@ def process_profile(
     if config is None:
         config = ProfileConfig()
 
+    # Grabbed before _attach_window_scalars overwrites T1/T2 with their
+    # window-mean values (dropping the cal_* attrs) -- see _attach_chi.
+    cal_params = {
+        probe: p
+        for probe in ("T1", "T2")
+        if (p := _channel_calibration_params(ds, probe))
+    }
+
     ds, params = _preprocess_for_spectra(ds, config)
     ds = _attach_window_scalars(ds, params, config)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
     ds = _attach_epsilon(ds, freq, spectra, config, params)
-    return _attach_chi(ds, freq, spectra, config, params)
+    return _attach_chi(ds, freq, spectra, config, params, cal_params)
