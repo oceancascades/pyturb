@@ -1014,6 +1014,117 @@ def merge(
     typer.echo(f"Successfully merged {len(file_list)} files into '{output_file}'")
 
 
+@app.command("calibrate-jac-c")
+def calibrate_jac_c(
+    instrument_sn: Annotated[
+        str,
+        typer.Argument(
+            help="Instrument serial number to correct (matches each file's "
+            "'instrument_sn' attribute exactly). Files from other "
+            "instruments are left untouched."
+        ),
+    ],
+    input_files: Annotated[
+        list[Path], typer.Argument(help="Converted (p2nc) NetCDF files to correct")
+    ],
+    offset: Annotated[
+        float,
+        typer.Option(
+            "--offset",
+            help="Constant conductivity offset to add to JAC_C, in mS/cm "
+            "(JAC_C's own units -- e.g. --offset -0.05 to subtract 0.05 "
+            "mS/cm). An option rather than a positional argument so "
+            "negative values aren't mistaken for a flag.",
+        ),
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write corrected files here instead of overwriting in place",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Required to overwrite files in place (ignored with --output)",
+            show_default=True,
+        ),
+    ] = False,
+):
+    """Apply a constant offset to the JAC_C conductivity channel.
+
+    A fixed additive offset is mathematically equivalent to shifting the
+    conductivity conversion's constant coefficient, but JAC_C's raw counts
+    aren't retained in converted files (unlike T1/T2), so this adds the
+    offset directly to the converted JAC_C values instead.
+
+    Run this on p2nc-converted files, before `eps` -- salinity and density
+    are derived from JAC_C during `eps`, so correcting it beforehand carries
+    the offset through the rest of the pipeline. Only files whose
+    `instrument_sn` attribute matches exactly are modified; all others are
+    left untouched (or copied through unmodified into --output).
+
+    Examples:
+        pyturb calibrate-jac-c 194 converted/*.nc --offset -0.05 --overwrite
+        pyturb calibrate-jac-c 194 converted/*.nc --offset -0.05 -o converted_calibrated/
+    """
+    files = resolve_input_files(input_files, "*.nc")
+    if not files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+    _require_output_target(output_dir, overwrite)
+
+    ok = True
+    n_applied = 0
+    for f in files:
+        try:
+            ds = load_profile_nc(f)
+            file_sn = str(ds.attrs.get("instrument_sn", "unknown"))
+            if file_sn != instrument_sn:
+                typer.echo(
+                    f"{f.name}: instrument_sn '{file_sn}' != '{instrument_sn}', skipped"
+                )
+                continue
+            if "JAC_C" not in ds:
+                typer.echo(f"{f.name}: no JAC_C variable, skipped")
+                continue
+
+            prior_offset = ds["JAC_C"].attrs.get("JAC_C_offset_applied")
+            if prior_offset is not None:
+                typer.echo(
+                    f"{f.name}: WARNING -- JAC_C already has a "
+                    f"{float(prior_offset):+g} mS/cm offset applied; "
+                    f"applying another {offset:+g} mS/cm on top",
+                    err=True,
+                )
+
+            attrs = dict(ds["JAC_C"].attrs)
+            ds = ds.copy()
+            corrected = ds["JAC_C"].values + offset
+            ds["JAC_C"] = (ds["JAC_C"].dims, corrected.astype(ds["JAC_C"].values.dtype))
+            ds["JAC_C"].attrs = attrs
+            ds["JAC_C"].attrs["JAC_C_offset_applied"] = np.float32(offset)
+
+            out_path = (output_dir / f.name) if output_dir is not None else f
+            ds.to_netcdf(out_path)
+            typer.echo(f"{f.name}: applied {offset:+g} mS/cm offset -> {out_path}")
+            n_applied += 1
+        except Exception as e:
+            ok = False
+            typer.echo(f"{f.name}: FAILED to calibrate ({e}), left untouched", err=True)
+
+    if n_applied == 0:
+        typer.echo(
+            f"Warning: no files matched instrument_sn '{instrument_sn}'.", err=True
+        )
+    if not ok:
+        raise typer.Exit(1)
+
+
 def _print_fit_report(fits: list) -> None:
     """Print a human-readable old-vs-new parameter and data comparison."""
     for fit in fits:
