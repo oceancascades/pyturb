@@ -227,8 +227,7 @@ class TestCalibrateFp07Commands:
 class TestIsRailed:
     """A probe channel that dies mid-deployment (broken connection, shorted
     or open thermistor) rails its raw counts to the ADC's saturation limit
-    -- must never be picked as a fit source (see VMP412 T1 SN T2146, which
-    railed partway through its deployment but kept reporting the same SN)."""
+    -- must never be picked as a fit source."""
 
     def test_flags_counts_pinned_near_negative_rail(self):
         counts = np.full(1000, -32378.0)
@@ -260,10 +259,7 @@ class TestFitFromMiddleOfGroupSkipsRailedCandidates:
     """Integration test: a railed candidate profile must be skipped in
     favor of a healthy one elsewhere in the group, not accepted just
     because it happens to have a confident lag/low residual on its own
-    (collapsed) segment -- see the session investigation into VMP412 T1
-    SN T2146, whose fit profile wasn't itself railed but still produced an
-    unphysical coefficient set from a poorly-conditioned regression;
-    _is_railed catches the more clear-cut railed-data case."""
+    (collapsed) segment."""
 
     CAL_PFILE = Path(__file__).parent / "data" / "RIOTSHAKE_VMP142_0010_cut.p"
 
@@ -389,12 +385,11 @@ class TestFitFromMiddleOfGroupSkipsImplausibleFits:
 
 
 class TestFitFromMiddleOfGroupUsesAggregateOnly:
-    """calibrate-fp07 auto's candidate search now fits exclusively via
-    fit_probe_calibration_multi -- verified (this session) to match or beat
-    the best single-profile fit on every well-behaved probe tried, and to
-    be what rescues a probe whose per-profile lag search is individually
-    too noisy to trust. There's no single-profile fallback path left to
-    exercise."""
+    """calibrate-fp07 auto's candidate search fits exclusively via
+    fit_probe_calibration_multi, which matches or beats the best
+    single-profile fit and rescues a probe whose per-profile lag search is
+    individually too noisy to trust. There's no single-profile fallback
+    path left to exercise."""
 
     def test_accepts_a_confident_plausible_aggregate_fit(self, tmp_path, monkeypatch):
         file_a = tmp_path / "a.nc"

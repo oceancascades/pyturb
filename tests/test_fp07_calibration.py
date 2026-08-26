@@ -69,9 +69,8 @@ def _make_fit(**overrides) -> ProbeCalibrationFit:
 class TestFitIsPlausible:
     """T_0/beta_1 are real physical quantities (a reference temperature, a
     positive thermistor material constant) -- a fit that puts either far
-    outside a sane range indicates a poorly-conditioned regression (see the
-    session investigation into VMP412 T1 SN T2146: a fit with lag_corr=0.92
-    and rms=0.02 degC on its own segment still gave T_0=713.7K)."""
+    outside a sane range indicates a poorly-conditioned regression, even
+    if its own-segment lag and residual look good."""
 
     def test_sane_coefficients_are_plausible(self):
         assert fit_is_plausible(_make_fit(new_T_0=288.0, new_beta_1=3050.0))
@@ -92,11 +91,9 @@ class TestFitIsPlausible:
 class TestFitIsConfident:
     """fit_is_confident is the bar 'calibrate-fp07 auto' uses to accept a
     fit immediately, and what apply_probe_calibration's *_fp07_confident
-    attr reflects downstream -- see the session investigation into VMP412
-    T1 SN T1592, whose best achievable fit was plausible (T_0=281K,
-    beta_1=2690) but still only reached lag_corr=-0.07 and correlated just
-    0.35-0.39 with the reference: plausible coefficients alone don't mean
-    the fit is trustworthy."""
+    attr reflects downstream: plausible coefficients alone don't mean the
+    fit is trustworthy, since a weak lag can still land in a plausible
+    range."""
 
     def test_plausible_and_confident_lag_is_confident(self):
         assert fit_is_confident(_make_fit(lag_corr=0.9))
@@ -442,11 +439,7 @@ class TestApplyProbeCalibration:
     def test_preserves_cal_attrs_after_a_successful_apply(self, prepared_profile):
         # A successful apply must not wipe the probe's cal_* attrs -- a
         # later mismatched fit for the same probe relies on _channel_params
-        # reading them to decide to skip. Losing them (a bare (dims, data)
-        # reassignment discards existing attrs) turned a routine "batch
-        # scan every fit against every file" loop into an uncaught
-        # ValueError on the second fit attempt, killing a whole
-        # 'calibrate-fp07 auto' run partway through.
+        # reading them to decide to skip.
         ds_prepared, config = prepared_profile
         fit = fit_probe_calibration(
             ds_prepared, "T1", config, fit_file=PFILE.name, profile_index=0, order=1

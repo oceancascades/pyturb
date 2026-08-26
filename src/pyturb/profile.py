@@ -1574,13 +1574,11 @@ def _compose_range_qc(
 
       * fit_confident is False                 -> 4 (bad), regardless of
         range_frac -- a fit that isn't confident (see fp07_calibration.
-        fit_is_confident) can produce values that look physically
-        plausible while still being substantially wrong (e.g. VMP412 T1
-        SN T1592's best achievable fit: plausible T_0/beta_1, but only
-        0.35-0.39 correlation with the reference); no per-sample range
-        check can catch that, so it's flagged from the fit's own quality
-        instead. fit_confident is None (never run through calibrate-fp07,
-        or an older file predating this attr) applies no such floor.
+        fit_is_confident) can produce values that look physically plausible
+        while still being substantially wrong; no per-sample range check
+        can catch that, so it's flagged from the fit's own quality instead.
+        fit_confident is None (never run through calibrate-fp07, or an
+        older file predating this attr) applies no such floor.
       * range_frac > despike_frac_bad          -> 4 (bad)
       * range_frac > despike_frac_questionable -> 2 (questionable)
       * range_frac is NaN (no raw samples)     -> 9 (missing)

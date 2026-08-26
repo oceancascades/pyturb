@@ -211,28 +211,18 @@ class ProbeCalibrationFit:
     fit_date: str
 
 
-# A confident lag estimate: observed good fits land at lag_corr >= 0.92;
-# observed bad ones (the cross-correlation search finding no real peak, or
-# a probe whose signal is too noisy relative to the reference even at its
-# best -- see the session investigation into VMP412 T1 SN T1592, whose best
-# achievable fit still only reached lag_corr~-0.07 and correlated just
-# 0.35-0.39 with the reference) land well below this.
+# Minimum cross-correlation for a lag estimate to be trusted; a probe whose
+# signal is too noisy relative to the reference lands well below this.
 MIN_LAG_CORR = 0.7
 
-# steinhart_hart_regress fits 1/T_ref as a polynomial in log_R, then inverts
-# the coefficients to get (T_0, beta_1, beta_2). T_0 is, by construction,
-# whatever that fit predicts AT log_R=0 -- if the fitted data doesn't sit
-# near 0, T_0 is an extrapolation, not a measurement, and a low-order
-# polynomial can fit a narrow, offset window of real data beautifully (a
-# confident lag, a tiny residual) while still swinging to nonsense once
-# projected back to log_R=0. A probe whose resistance baseline has drifted
-# (e.g. a failing connection, well short of full ADC railing) produces
-# exactly this: fits that look perfect on their own segment but generalize
-# catastrophically. T_0 and beta_1 are real physical quantities (a
-# reference temperature; a positive thermistor material constant) that
-# should land close to the factory defaults (T_0=289.3K, beta_1=3143.55)
-# even for a genuinely different but still-working probe -- never hundreds
-# of Kelvin off, never negative.
+# T_0 is, by construction, whatever steinhart_hart_regress's fit predicts at
+# log_R=0 -- an extrapolation, not a measurement, if the fitted data doesn't
+# sit near 0. A narrow, offset window of real data (e.g. from a drifted
+# resistance baseline) can fit beautifully on its own segment (confident
+# lag, tiny residual) while still swinging to nonsense once projected back
+# to log_R=0. T_0/beta_1 should land close to the factory defaults
+# (T_0=289.3K, beta_1=3143.55) even for a genuinely different but
+# still-working probe.
 MIN_PLAUSIBLE_T0_K = 250.0
 MAX_PLAUSIBLE_T0_K = 350.0
 MIN_PLAUSIBLE_BETA1 = 1500.0
@@ -403,18 +393,15 @@ def fit_probe_calibration_multi(
     """Fit ``probe``'s in-situ calibration aggregated across every profile in
     ``profile_list``, instead of a single best one.
 
-    Mirrors the mousebrains/``odas_tpw`` package's approach: median lag
-    across every profile in a file, then a single Steinhart-Hart regression
-    on the concatenated data from all of them, rather than pyturb's older
-    single-best-profile fit. The median is far less sensitive to any one
-    profile's noisy lag estimate than trusting a single profile's search
-    outright, and concatenating data from profiles spanning different
-    depths/conditions gives the regression a wider, better-conditioned
-    ``log_R`` range to fit -- directly countering the narrow/offset-window
-    fragility a single profile's fit can have (see the session
-    investigation into VMP412 T1 SN T2146/T1592). Verified at least as
-    accurate as the single-profile fit on every well-behaved probe tested,
-    so this is now the only fitting strategy ``calibrate-fp07 auto`` uses.
+    Takes the median lag across every profile in a file, then a single
+    Steinhart-Hart regression on the concatenated data from all of them. The
+    median is far less sensitive to any one profile's noisy lag estimate
+    than trusting a single profile's search outright, and concatenating
+    data from profiles spanning different depths/conditions gives the
+    regression a wider, better-conditioned ``log_R`` range to fit --
+    directly countering the narrow/offset-window fragility a single
+    profile's fit can have. This is the fitting strategy ``calibrate-fp07
+    auto`` uses.
 
     The regression itself only uses samples with pressure (``config.
     pressure_smooth``) above ``min_pressure_dbar`` from each profile -- a
@@ -663,13 +650,7 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
     old_T_0, old_beta_1, old_beta_2 = _coefficients(params)
     # Save attrs before the bare (dims, data) assignments below, which would
     # otherwise silently wipe them -- including the cal_* attrs that a later
-    # fit's SN-mismatch check (_channel_params, above) depends on. Losing
-    # them mid-run raised an uncaught ValueError on the next fit for the
-    # same probe, killing 'calibrate-fp07 auto' partway through a batch with
-    # no indication beyond the traceback -- and since callers loop through
-    # every fit against every file relying on the mismatch check to no-op,
-    # the very first successful match for a probe silently broke every
-    # subsequent fit attempt for that same probe.
+    # fit's SN-mismatch check (_channel_params, above) depends on.
     probe_attrs = dict(ds[fit.probe].attrs)
     grad_attrs = dict(ds[grad_name].attrs)
     ds = ds.copy()
@@ -693,12 +674,11 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
             f"{fit.fit_file}:p{fit.profile_index}"
         )
         # Whether the *fit itself* was trustworthy (see fit_is_confident) --
-        # not whether the resulting values happen to look physically sane.
-        # A fit from a probe whose signal is too noisy relative to the
-        # reference (e.g. VMP412 T1 SN T1592) can still produce values
-        # within a normal-looking temperature range while being
-        # substantially wrong; pyturb.profile's T1_qc/T2_qc/chi_N_qc read
-        # this to flag that case, since no per-sample check can catch it.
+        # not whether the resulting values happen to look physically sane. A
+        # fit from a too-noisy signal can produce values within a
+        # normal-looking range while being substantially wrong;
+        # pyturb.profile's T1_qc/T2_qc/chi_N_qc read this to flag that case,
+        # since no per-sample check can catch it.
         ds[name].attrs[f"{fit.probe}_fp07_confident"] = np.int8(
             1 if fit_is_confident(fit) else 0
         )

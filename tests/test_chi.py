@@ -50,13 +50,8 @@ class TestKraichnanSpectrum:
         assert resolved_kraichnan_fraction(1e-4, EPS, NU, KAPPA) < 0.01
 
     def test_matches_bogucki_1997_cyclic_form(self):
-        # Cross-checked against an independent implementation (mousebrains'
-        # odas_tpw.chi.batchelor.kraichnan_grad/batchelor_kB), which writes
-        # the equation directly in the cyclic-wavenumber form given by
-        # Bogucki, Domaradzki & Yeung (1997) eq. 11, with no explicit 2*pi
-        # factors -- unlike this module's previous radian-first derivation
-        # (algebraically equivalent, but not directly comparable to the
-        # paper). Reference values below are that implementation's output.
+        # Reference values from the cyclic-wavenumber form given by Bogucki,
+        # Domaradzki & Yeung (1997) eq. 11, with no explicit 2*pi factors.
         k = np.array([0.1, 1.0, 5.0, 20.0, 50.0, 100.0])
         k_B = batchelor_wavenumber(EPS, NU, KAPPA)
         np.testing.assert_allclose(k_B, 70.83864994288155, rtol=1e-12)
@@ -139,13 +134,11 @@ class TestEstimateChi:
 
 
 class TestNoiseFloorCap:
-    """estimate_chi's optional phi_noise cap -- added because the
-    polynomial spectral-minimum search alone can land past where the
-    spectrum is actually noise-dominated (seen investigating real and
-    synthetic Kraichnan+noise spectra in this session); this caps k_max at
-    the wavenumber where the (smoothed) signal first drops to/below a
-    supplied noise floor, in addition to the existing k_95/k_AA/polyfit
-    limits.
+    """estimate_chi's optional phi_noise cap -- the polynomial
+    spectral-minimum search alone can land past where the spectrum is
+    actually noise-dominated, so this caps k_max at the wavenumber where
+    the (smoothed) signal first drops to/below a supplied noise floor, in
+    addition to the existing k_95/k_AA/polyfit limits.
     """
 
     def test_noise_crossing_k_finds_interpolated_crossing(self):
@@ -433,11 +426,10 @@ class TestCalibrationConfidenceQC:
     """A calibration fit that wasn't confident (see fp07_calibration.
     fit_is_confident) can still produce values within a normal-looking
     temperature range while being substantially wrong -- no per-sample
-    range check catches that (see the session investigation into VMP412 T1
-    SN T1592: plausible T_0/beta_1, but only 0.35-0.39 correlation with the
-    reference). apply_probe_calibration stamps *_fp07_confident from the
-    fit itself; process_profile must floor T1_qc/chi_1_qc to bad wherever
-    it's False, uniformly, regardless of how sane the values look.
+    range check catches that. apply_probe_calibration stamps
+    *_fp07_confident from the fit itself; process_profile must floor
+    T1_qc/chi_1_qc to bad wherever it's False, uniformly, regardless of how
+    sane the values look.
     """
 
     def _process_with_confidence(self, confident: bool | None):

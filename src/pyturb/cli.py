@@ -1261,8 +1261,7 @@ def _scan_probe_groups(
 # as a fit source: the regression over a collapsed/degenerate range can
 # still look deceptively confident (a low residual and a fine lag_corr) on
 # its own segment while producing physically nonsense coefficients that
-# blow up when applied elsewhere (e.g. VMP412 T1 SN T2146, which railed
-# partway through its deployment but kept reporting the same SN).
+# blow up when applied elsewhere.
 _RAIL_MARGIN_COUNTS = 500.0
 _RAIL_FRACTION_THRESHOLD = 0.3
 
@@ -1313,14 +1312,10 @@ def _fit_from_middle_of_group(
 
     Uses fit_probe_calibration_multi exclusively (median lag across all of
     a file's profiles, then a single Steinhart-Hart regression on their
-    concatenated data -- mirrors mousebrains/odas_tpw) rather than trying
-    single profiles first: real-data comparison across this session's
-    investigation showed the aggregate matches or beats the best
-    single-profile fit for every well-behaved probe tried, as well as
-    being what rescues a probe whose per-profile lag search is
-    individually too noisy to trust (see VMP412 T1 SN T2146/T1592) -- so
-    there's no case where falling back to a single profile would do
-    better, and keeping that path around was needless complexity.
+    concatenated data) rather than trying single profiles first: the
+    aggregate matches or beats the best single-profile fit for every
+    well-behaved probe, and also rescues a probe whose per-profile lag
+    search is individually too noisy to trust.
 
     Railed profiles (see _is_railed -- a probe that died mid-deployment but
     kept reporting the same SN) are dropped from a file's aggregate before
