@@ -427,3 +427,54 @@ class TestTemperatureRangeQC:
         result, _ = self._process_with_corrupted_t1(frac_corrupted=0.0)
         assert (result["T1_qc"].values == 1).all()
         assert (result["T1_range_frac"].values == 0).all()
+
+
+class TestCalibrationConfidenceQC:
+    """A calibration fit that wasn't confident (see fp07_calibration.
+    fit_is_confident) can still produce values within a normal-looking
+    temperature range while being substantially wrong -- no per-sample
+    range check catches that (see the session investigation into VMP412 T1
+    SN T1592: plausible T_0/beta_1, but only 0.35-0.39 correlation with the
+    reference). apply_probe_calibration stamps *_fp07_confident from the
+    fit itself; process_profile must floor T1_qc/chi_1_qc to bad wherever
+    it's False, uniformly, regardless of how sane the values look.
+    """
+
+    def _process_with_confidence(self, confident: bool | None):
+        raw = to_xarray(load_pfile_phys(PFILE)).copy(deep=True)
+        if confident is not None:
+            raw["T1"].attrs["T1_fp07_confident"] = np.int8(1 if confident else 0)
+
+        config = ProfileConfig(
+            shear_probes=("sh1", "sh2"),
+            accel_channels=("Ax", "Ay"),
+            diss_len_sec=4.0,
+            fft_len_sec=1.0,
+            compute_chi=True,
+        )
+        return process_profile(raw, config), config
+
+    def test_t1_value_not_masked_when_unconfident(self):
+        result, _ = self._process_with_confidence(confident=False)
+        assert not np.isnan(result["T1"].values).any()
+
+    def test_t1_qc_all_bad_when_unconfident(self):
+        result, _ = self._process_with_confidence(confident=False)
+        assert (result["T1_qc"].values == 4).all()
+
+    def test_chi_1_qc_all_bad_but_not_chi_2_qc(self):
+        result, _ = self._process_with_confidence(confident=False)
+        assert (result["chi_1_qc"].values == 4).all()
+        # T2 was untouched, so chi_2_qc should have some non-bad windows.
+        assert (result["chi_2_qc"].values != 4).any()
+
+    def test_no_penalty_when_confident(self):
+        result, _ = self._process_with_confidence(confident=True)
+        assert (result["T1_qc"].values == 1).all()
+        assert (result["chi_1_qc"].values != 4).any()
+
+    def test_no_penalty_when_never_calibrated(self):
+        # No *_fp07_confident attr at all (never run through
+        # calibrate-fp07) -- must not be penalized.
+        result, _ = self._process_with_confidence(confident=None)
+        assert (result["T1_qc"].values == 1).all()

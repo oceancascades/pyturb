@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 
 from pyturb.cli import (
     _fit_from_middle_of_group,
-    _fit_is_plausible,
     _is_railed,
     app,
 )
@@ -329,29 +328,6 @@ def _make_fit(**overrides) -> ProbeCalibrationFit:
     )
     fields.update(overrides)
     return ProbeCalibrationFit(**fields)
-
-
-class TestFitIsPlausible:
-    """T_0/beta_1 are real physical quantities (a reference temperature, a
-    positive thermistor material constant) -- a fit that puts either far
-    outside a sane range indicates a poorly-conditioned regression (see the
-    session investigation into VMP412 T1 SN T2146: a fit with lag_corr=0.92
-    and rms=0.02 degC on its own segment still gave T_0=713.7K)."""
-
-    def test_sane_coefficients_are_plausible(self):
-        assert _fit_is_plausible(_make_fit(new_T_0=288.0, new_beta_1=3050.0))
-
-    def test_t0_far_above_range_is_implausible(self):
-        assert not _fit_is_plausible(_make_fit(new_T_0=713.7, new_beta_1=1484.5))
-
-    def test_t0_negative_is_implausible(self):
-        assert not _fit_is_plausible(_make_fit(new_T_0=-913.0, new_beta_1=-9.5))
-
-    def test_beta1_negative_is_implausible(self):
-        assert not _fit_is_plausible(_make_fit(new_T_0=291.8, new_beta_1=-1165.9))
-
-    def test_beta1_far_above_range_is_implausible(self):
-        assert not _fit_is_plausible(_make_fit(new_T_0=289.0, new_beta_1=22950.2))
 
 
 class TestFitFromMiddleOfGroupSkipsImplausibleFits:

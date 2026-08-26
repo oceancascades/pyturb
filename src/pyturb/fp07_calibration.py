@@ -32,6 +32,13 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "ProbeCalibrationFit",
+    "MIN_LAG_CORR",
+    "MIN_PLAUSIBLE_T0_K",
+    "MAX_PLAUSIBLE_T0_K",
+    "MIN_PLAUSIBLE_BETA1",
+    "MAX_PLAUSIBLE_BETA1",
+    "fit_is_plausible",
+    "fit_is_confident",
     "fit_probe_calibration",
     "fit_probe_calibration_multi",
     "apply_probe_calibration",
@@ -202,6 +209,55 @@ class ProbeCalibrationFit:
     mean_bias_new_c: float
     residual_std_c: float
     fit_date: str
+
+
+# A confident lag estimate: observed good fits land at lag_corr >= 0.92;
+# observed bad ones (the cross-correlation search finding no real peak, or
+# a probe whose signal is too noisy relative to the reference even at its
+# best -- see the session investigation into VMP412 T1 SN T1592, whose best
+# achievable fit still only reached lag_corr~-0.07 and correlated just
+# 0.35-0.39 with the reference) land well below this.
+MIN_LAG_CORR = 0.7
+
+# steinhart_hart_regress fits 1/T_ref as a polynomial in log_R, then inverts
+# the coefficients to get (T_0, beta_1, beta_2). T_0 is, by construction,
+# whatever that fit predicts AT log_R=0 -- if the fitted data doesn't sit
+# near 0, T_0 is an extrapolation, not a measurement, and a low-order
+# polynomial can fit a narrow, offset window of real data beautifully (a
+# confident lag, a tiny residual) while still swinging to nonsense once
+# projected back to log_R=0. A probe whose resistance baseline has drifted
+# (e.g. a failing connection, well short of full ADC railing) produces
+# exactly this: fits that look perfect on their own segment but generalize
+# catastrophically. T_0 and beta_1 are real physical quantities (a
+# reference temperature; a positive thermistor material constant) that
+# should land close to the factory defaults (T_0=289.3K, beta_1=3143.55)
+# even for a genuinely different but still-working probe -- never hundreds
+# of Kelvin off, never negative.
+MIN_PLAUSIBLE_T0_K = 250.0
+MAX_PLAUSIBLE_T0_K = 350.0
+MIN_PLAUSIBLE_BETA1 = 1500.0
+MAX_PLAUSIBLE_BETA1 = 6000.0
+
+
+def fit_is_plausible(fit: ProbeCalibrationFit) -> bool:
+    """False if the fitted T_0/beta_1 are outside a physically plausible
+    range -- see the module comment above MIN_PLAUSIBLE_T0_K."""
+    return (
+        MIN_PLAUSIBLE_T0_K <= fit.new_T_0 <= MAX_PLAUSIBLE_T0_K
+        and MIN_PLAUSIBLE_BETA1 <= fit.new_beta_1 <= MAX_PLAUSIBLE_BETA1
+    )
+
+
+def fit_is_confident(fit: ProbeCalibrationFit) -> bool:
+    """True if fit is both physically plausible and has a confident lag
+    estimate -- the bar 'calibrate-fp07 auto' uses to accept a fit
+    immediately, and (via apply_probe_calibration's provenance attrs) what
+    pyturb.profile's T1_qc/T2_qc/chi_N_qc floor to "bad" when not met.
+    Plausible-but-unconfident fits are real but empirically still
+    inaccurate (see MIN_LAG_CORR's docstring) -- there is no "trustworthy
+    but not immediately accepted" tier.
+    """
+    return fit_is_plausible(fit) and abs(fit.lag_corr) >= MIN_LAG_CORR
 
 
 def fit_probe_calibration(
@@ -631,9 +687,20 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
             fit.new_beta_2 if fit.new_beta_2 is not None else np.nan
         )
         ds[name].attrs[f"{fit.probe}_fp07_lag_s"] = fit.lag_s
+        ds[name].attrs[f"{fit.probe}_fp07_lag_corr"] = fit.lag_corr
         ds[name].attrs[f"{fit.probe}_fp07_cal_date"] = fit.fit_date
         ds[name].attrs[f"{fit.probe}_fp07_cal_source"] = (
             f"{fit.fit_file}:p{fit.profile_index}"
+        )
+        # Whether the *fit itself* was trustworthy (see fit_is_confident) --
+        # not whether the resulting values happen to look physically sane.
+        # A fit from a probe whose signal is too noisy relative to the
+        # reference (e.g. VMP412 T1 SN T1592) can still produce values
+        # within a normal-looking temperature range while being
+        # substantially wrong; pyturb.profile's T1_qc/T2_qc/chi_N_qc read
+        # this to flag that case, since no per-sample check can catch it.
+        ds[name].attrs[f"{fit.probe}_fp07_confident"] = np.int8(
+            1 if fit_is_confident(fit) else 0
         )
     return ds
 

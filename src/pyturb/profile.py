@@ -1326,6 +1326,7 @@ def _attach_window_scalars(
     params: dict,
     config: ProfileConfig,
     range_masks: Optional[dict] = None,
+    fit_confident: Optional[dict] = None,
 ) -> xr.Dataset:
     """Compute window-mean scalars and attach them on the output ``time`` axis.
 
@@ -1402,8 +1403,9 @@ def _attach_window_scalars(
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
         }
+        confident = (fit_confident or {}).get(probe)
         qc_var = f"{probe}_qc"
-        ds[qc_var] = ("time", _compose_range_qc(frac, config))
+        ds[qc_var] = ("time", _compose_range_qc(frac, config, confident))
         ds[qc_var].attrs = {
             "long_name": f"QC flag for {probe}",
             "flag_values": _QC_FLAG_VALUES,
@@ -1416,7 +1418,10 @@ def _attach_window_scalars(
                 "temperature range in this window, e.g. from a calibration "
                 "extrapolated beyond its fitted range "
                 f"(questionable>{config.despike_frac_questionable}, "
-                f"bad>{config.despike_frac_bad})."
+                f"bad>{config.despike_frac_bad}) -- and floored to bad if "
+                f"the calibration fit itself wasn't confident "
+                f"({probe}_fp07_confident=0; see fp07_calibration."
+                "fit_is_confident)."
             ),
         }
 
@@ -1558,10 +1563,24 @@ def _temperature_range_mask(T: np.ndarray) -> np.ndarray:
     return ~np.isfinite(T) | (T < _MIN_SANE_TEMP_C) | (T > _MAX_SANE_TEMP_C)
 
 
-def _compose_range_qc(range_frac: np.ndarray, config: ProfileConfig) -> np.ndarray:
+def _compose_range_qc(
+    range_frac: np.ndarray,
+    config: ProfileConfig,
+    fit_confident: Optional[bool] = None,
+) -> np.ndarray:
     """QC flag from the fraction of a temperature probe's raw samples that
-    fell outside the physically sane range within a window.
+    fell outside the physically sane range within a window, floored to
+    "bad" if the calibration fit itself wasn't confident.
 
+      * fit_confident is False                 -> 4 (bad), regardless of
+        range_frac -- a fit that isn't confident (see fp07_calibration.
+        fit_is_confident) can produce values that look physically
+        plausible while still being substantially wrong (e.g. VMP412 T1
+        SN T1592's best achievable fit: plausible T_0/beta_1, but only
+        0.35-0.39 correlation with the reference); no per-sample range
+        check can catch that, so it's flagged from the fit's own quality
+        instead. fit_confident is None (never run through calibrate-fp07,
+        or an older file predating this attr) applies no such floor.
       * range_frac > despike_frac_bad          -> 4 (bad)
       * range_frac > despike_frac_questionable -> 2 (questionable)
       * range_frac is NaN (no raw samples)     -> 9 (missing)
@@ -1571,6 +1590,8 @@ def _compose_range_qc(range_frac: np.ndarray, config: ProfileConfig) -> np.ndarr
     qc[range_frac > config.despike_frac_questionable] = 2
     qc[range_frac > config.despike_frac_bad] = 4
     qc[np.isnan(range_frac)] = 9
+    if fit_confident is False:
+        qc[qc != 9] = 4
     return qc
 
 
@@ -1758,6 +1779,7 @@ def _attach_chi(
     config: ProfileConfig,
     params: dict,
     cal_params: dict,
+    fit_confident: Optional[dict] = None,
 ) -> xr.Dataset:
     """Attach per-probe chi, chi_k_max, FM, and QC flags on the ``time`` dim.
 
@@ -1851,6 +1873,12 @@ def _attach_chi(
         else:
             range_frac = np.zeros(n, dtype="f4")
         bad_frac = np.clip(despike_frac + range_frac, 0.0, 1.0)
+        # Floor to bad if the calibration fit itself wasn't confident (see
+        # _compose_range_qc's docstring) -- a bad-but-not-implausible fit
+        # corrupts the gradient the same way, and no per-sample check can
+        # catch it either.
+        if (fit_confident or {}).get(probe) is False:
+            bad_frac = np.ones_like(bad_frac)
         qc = _compose_qc(chi, fm, speed_bad, bad_frac, config)
         qc_var = f"chi_{probe_num}_qc"
         ds[qc_var] = ("time", qc)
@@ -1863,9 +1891,11 @@ def _attach_chi(
             "comment": (
                 f"Composed from speed (min_speed={config.min_speed} m/s), "
                 f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
-                f"and {name}_despike_frac + {probe}_range_frac "
+                f"{name}_despike_frac + {probe}_range_frac "
                 f"(questionable>{config.despike_frac_questionable}, "
-                f"bad>{config.despike_frac_bad})."
+                f"bad>{config.despike_frac_bad}), and floored to bad if the "
+                f"calibration fit itself wasn't confident "
+                f"({probe}_fp07_confident=0)."
             ),
         }
 
@@ -1910,9 +1940,16 @@ def process_profile(
         for probe in ("T1", "T2")
         if probe in ds
     }
+    # None (key absent) means "never run through calibrate-fp07" -- no
+    # penalty, unlike an explicit False (see _compose_range_qc).
+    fit_confident = {
+        probe: bool(ds[probe].attrs[f"{probe}_fp07_confident"])
+        for probe in ("T1", "T2")
+        if probe in ds and f"{probe}_fp07_confident" in ds[probe].attrs
+    }
 
     ds, params = _preprocess_for_spectra(ds, config)
-    ds = _attach_window_scalars(ds, params, config, range_masks)
+    ds = _attach_window_scalars(ds, params, config, range_masks, fit_confident)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
     ds = _attach_epsilon(ds, freq, spectra, config, params)
-    return _attach_chi(ds, freq, spectra, config, params, cal_params)
+    return _attach_chi(ds, freq, spectra, config, params, cal_params, fit_confident)

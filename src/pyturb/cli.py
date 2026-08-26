@@ -11,9 +11,15 @@ from typing_extensions import Annotated
 
 from . import __version__
 from .fp07_calibration import (
+    MAX_PLAUSIBLE_BETA1,
+    MAX_PLAUSIBLE_T0_K,
+    MIN_LAG_CORR,
+    MIN_PLAUSIBLE_BETA1,
+    MIN_PLAUSIBLE_T0_K,
     ProbeCalibrationFit,
     _channel_params,
     apply_probe_calibration,
+    fit_is_plausible,
     fit_probe_calibration,
     fit_probe_calibration_multi,
     read_report,
@@ -1248,10 +1254,6 @@ def _scan_probe_groups(
     return groups
 
 
-# A confident lag estimate: observed good fits land at lag_corr >= 0.92;
-# observed bad ones (the cross-correlation search finding no real peak,
-# often landing right at its search boundary) land at <= 0.52.
-_MIN_LAG_CORR = 0.7
 # A probe channel that dies mid-deployment (broken connection, shorted or
 # open thermistor, etc.) rails its raw counts to the ADC's saturation limit
 # instead of tracking real temperature. If enough of a candidate profile's
@@ -1298,35 +1300,6 @@ def _drop_railed_profiles(
     return kept or profile_list
 
 
-# steinhart_hart_regress fits 1/T_ref as a polynomial in log_R, then
-# inverts the coefficients to get (T_0, beta_1, beta_2). T_0 is, by
-# construction, whatever that fit predicts AT log_R=0 -- if the fitted
-# profile's actual log_R data doesn't sit near 0, T_0 is an extrapolation,
-# not a measurement, and a low-order polynomial can fit a narrow, offset
-# window of real data beautifully (a confident lag, a tiny residual) while
-# still swinging to nonsense once projected back to log_R=0. A probe whose
-# resistance baseline has drifted (e.g. a failing connection, well short of
-# full ADC railing -- see _is_railed) produces exactly this: fits that look
-# perfect on their own segment but generalize catastrophically. T_0 and
-# beta_1 are real physical quantities (a reference temperature; a positive
-# thermistor material constant) that should land close to the factory
-# defaults (T_0=289.3K, beta_1=3143.55) even for a genuinely different but
-# still-working probe -- never hundreds of Kelvin off, never negative.
-_MIN_PLAUSIBLE_T0_K = 250.0
-_MAX_PLAUSIBLE_T0_K = 350.0
-_MIN_PLAUSIBLE_BETA1 = 1500.0
-_MAX_PLAUSIBLE_BETA1 = 6000.0
-
-
-def _fit_is_plausible(fit: ProbeCalibrationFit) -> bool:
-    """False if the fitted T_0/beta_1 are outside a physically plausible
-    range -- see the module comment above _MIN_PLAUSIBLE_T0_K."""
-    return (
-        _MIN_PLAUSIBLE_T0_K <= fit.new_T_0 <= _MAX_PLAUSIBLE_T0_K
-        and _MIN_PLAUSIBLE_BETA1 <= fit.new_beta_1 <= _MAX_PLAUSIBLE_BETA1
-    )
-
-
 def _fit_from_middle_of_group(
     group_files: list[Path],
     probe: str,
@@ -1351,11 +1324,10 @@ def _fit_from_middle_of_group(
 
     Railed profiles (see _is_railed -- a probe that died mid-deployment but
     kept reporting the same SN) are dropped from a file's aggregate before
-    fitting. Accepts a candidate file's aggregate fit if it's both
-    physically plausible (see _fit_is_plausible) and has a confident lag
-    estimate (see _MIN_LAG_CORR) -- a confident lag with a low residual
-    doesn't guarantee the fitted coefficients generalize (see
-    _fit_is_plausible's docstring). Falls back to files progressively
+    fitting. Accepts a candidate file's aggregate fit if it's confident
+    (see fp07_calibration.fit_is_confident) -- a confident lag with a low
+    residual doesn't guarantee the fitted coefficients generalize (see
+    fit_is_plausible's docstring). Falls back to files progressively
     further from the middle if a file's aggregate doesn't qualify. If
     nothing plausible ever gets a confident lag, returns the most-
     plausible-yet-unconfident fit seen; only as an absolute last resort
@@ -1397,7 +1369,7 @@ def _fit_from_middle_of_group(
             _log.debug(f"{probe}: aggregate fit on {f.name} failed: {e}")
             continue
 
-        if not _fit_is_plausible(fit):
+        if not fit_is_plausible(fit):
             _log.debug(
                 f"{probe}: {f.name} gave an implausible aggregate fit "
                 f"(T_0={fit.new_T_0:.1f}K, beta_1={fit.new_beta_1:.1f}); "
@@ -1408,7 +1380,7 @@ def _fit_from_middle_of_group(
             ):
                 best_implausible_fit = fit
             continue
-        if abs(fit.lag_corr) >= _MIN_LAG_CORR:
+        if abs(fit.lag_corr) >= MIN_LAG_CORR:
             return fit
         if best_fit is None or abs(fit.lag_corr) > abs(best_fit.lag_corr):
             best_fit = fit
@@ -1429,8 +1401,8 @@ def _fit_from_middle_of_group(
             f"physically plausible fit (best available: "
             f"T_0={best_implausible_fit.new_T_0:.1f}K, "
             f"beta_1={best_implausible_fit.new_beta_1:.1f}, expected roughly "
-            f"[{_MIN_PLAUSIBLE_T0_K:.0f}, {_MAX_PLAUSIBLE_T0_K:.0f}]K / "
-            f"[{_MIN_PLAUSIBLE_BETA1:.0f}, {_MAX_PLAUSIBLE_BETA1:.0f}]); "
+            f"[{MIN_PLAUSIBLE_T0_K:.0f}, {MAX_PLAUSIBLE_T0_K:.0f}]K / "
+            f"[{MIN_PLAUSIBLE_BETA1:.0f}, {MAX_PLAUSIBLE_BETA1:.0f}]); "
             "using it anyway as a last resort -- this probe/period likely "
             "isn't calibratable and its data should be treated with "
             "suspicion.",

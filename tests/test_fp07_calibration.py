@@ -11,6 +11,8 @@ from pyturb.fp07_calibration import (
     ProbeCalibrationFit,
     apply_probe_calibration,
     find_lag,
+    fit_is_confident,
+    fit_is_plausible,
     fit_probe_calibration,
     fit_probe_calibration_multi,
     log_r_from_counts,
@@ -27,6 +29,85 @@ PFILE = Path(__file__).parent / "data" / "RIOTSHAKE_VMP142_0010_cut.p"
 T_0, BETA_1, BETA_2 = 289.301, 3143.55, 250000.0
 # Real T1 electronics constants (RIOTSHAKE_VMP142_0010_cut.p).
 A, B, G, E_B, ADC_FS, ADC_BITS = -11.5, 0.99954, 6.0, 0.68294, 4.096, 16
+
+
+def _make_fit(**overrides) -> ProbeCalibrationFit:
+    """A synthetic fit with sane, confident defaults; pass e.g.
+    new_T_0=713.0 or lag_corr=0.2 to make one field implausible/unconfident
+    for a specific test."""
+    fields = dict(
+        probe="T1",
+        sn="SYN1",
+        instrument_sn="142",
+        fit_file="synthetic",
+        profile_index=0,
+        reference="JAC_T",
+        order=1,
+        old_T_0=T_0,
+        old_beta_1=BETA_1,
+        old_beta_2=None,
+        new_T_0=289.0,
+        new_beta_1=3100.0,
+        new_beta_2=None,
+        lag_s=0.0,
+        lag_corr=0.95,
+        n_points=100,
+        temperature_range_c=10.0,
+        rms_diff_old_c=0.0,
+        rms_diff_new_c=0.0,
+        max_abs_diff_old_c=0.0,
+        max_abs_diff_new_c=0.0,
+        mean_bias_old_c=0.0,
+        mean_bias_new_c=0.0,
+        residual_std_c=0.0,
+        fit_date="2026-01-01T00:00:00+00:00",
+    )
+    fields.update(overrides)
+    return ProbeCalibrationFit(**fields)
+
+
+class TestFitIsPlausible:
+    """T_0/beta_1 are real physical quantities (a reference temperature, a
+    positive thermistor material constant) -- a fit that puts either far
+    outside a sane range indicates a poorly-conditioned regression (see the
+    session investigation into VMP412 T1 SN T2146: a fit with lag_corr=0.92
+    and rms=0.02 degC on its own segment still gave T_0=713.7K)."""
+
+    def test_sane_coefficients_are_plausible(self):
+        assert fit_is_plausible(_make_fit(new_T_0=288.0, new_beta_1=3050.0))
+
+    def test_t0_far_above_range_is_implausible(self):
+        assert not fit_is_plausible(_make_fit(new_T_0=713.7, new_beta_1=1484.5))
+
+    def test_t0_negative_is_implausible(self):
+        assert not fit_is_plausible(_make_fit(new_T_0=-913.0, new_beta_1=-9.5))
+
+    def test_beta1_negative_is_implausible(self):
+        assert not fit_is_plausible(_make_fit(new_T_0=291.8, new_beta_1=-1165.9))
+
+    def test_beta1_far_above_range_is_implausible(self):
+        assert not fit_is_plausible(_make_fit(new_T_0=289.0, new_beta_1=22950.2))
+
+
+class TestFitIsConfident:
+    """fit_is_confident is the bar 'calibrate-fp07 auto' uses to accept a
+    fit immediately, and what apply_probe_calibration's *_fp07_confident
+    attr reflects downstream -- see the session investigation into VMP412
+    T1 SN T1592, whose best achievable fit was plausible (T_0=281K,
+    beta_1=2690) but still only reached lag_corr=-0.07 and correlated just
+    0.35-0.39 with the reference: plausible coefficients alone don't mean
+    the fit is trustworthy."""
+
+    def test_plausible_and_confident_lag_is_confident(self):
+        assert fit_is_confident(_make_fit(lag_corr=0.9))
+
+    def test_plausible_but_weak_lag_is_not_confident(self):
+        assert not fit_is_confident(_make_fit(lag_corr=0.2))
+
+    def test_implausible_even_with_strong_lag_is_not_confident(self):
+        assert not fit_is_confident(
+            _make_fit(new_T_0=713.7, new_beta_1=1484.5, lag_corr=0.92)
+        )
 
 
 class TestLogRFromCounts:
@@ -284,6 +365,30 @@ class TestApplyProbeCalibration:
         assert "T1_fp07_recalibrated" in applied["T1"].attrs
         assert not np.allclose(applied["T1"].values, raw["T1"].values)
         assert np.allclose(applied["T1"].values, applied["JAC_T"].values, atol=0.2)
+
+    def test_stamps_confident_attr_reflecting_fit_is_confident(self, prepared_profile):
+        # T1_qc/T2_qc/chi_N_qc read *_fp07_confident (not the resulting
+        # value's plausibility) to flag a fit whose own quality is
+        # untrustworthy -- see fit_is_confident's docstring.
+        ds_prepared, config = prepared_profile
+        raw = to_xarray(load_pfile_phys(PFILE))
+
+        confident_fit = fit_probe_calibration(
+            ds_prepared, "T1", config, fit_file=PFILE.name, profile_index=0, order=1
+        )
+        applied = apply_probe_calibration(raw, confident_fit)
+        assert "T1_fp07_confident" in applied["T1"].attrs
+        assert applied["T1"].attrs["T1_fp07_confident"] == fit_is_confident(
+            confident_fit
+        )
+        assert applied["T1"].attrs["T1_fp07_lag_corr"] == confident_fit.lag_corr
+
+        unconfident_fit = confident_fit.__class__(
+            **{**confident_fit.__dict__, "lag_corr": 0.2}
+        )
+        applied_weak = apply_probe_calibration(raw, unconfident_fit)
+        assert applied_weak["T1"].attrs["T1_fp07_confident"] == 0
+        assert applied_weak["gradT1"].attrs["T1_fp07_confident"] == 0
 
     def test_matches_independent_manual_replication(self, prepared_profile):
         from pyturb._pfile import deconvolve, make_gradT

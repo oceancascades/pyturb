@@ -84,8 +84,6 @@ A selection of options:
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
-`T1`/`T2` each get a `T1_qc`/`T2_qc` flag (same 0/1/2/4/9 convention as `eps_N_qc`/`chi_N_qc`), composed from the fraction of raw samples in that window outside a physically sane seawater temperature range (`T1_range_frac`/`T2_range_frac`) -- catches a calibration extrapolated beyond its fitted range without discarding the underlying value. The same range fraction also feeds into `chi_1_qc`/`chi_2_qc`, since a bad calibration corrupts the gradient the same way a despiked-out transient does.
-
 The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
 
 See `pyturb eps --help` formore details. 
