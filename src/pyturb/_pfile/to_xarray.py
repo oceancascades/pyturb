@@ -92,7 +92,17 @@ _DEFAULT_VARIABLES = [
     "Incl_X",
     "Incl_Y",
     "Incl_T",
+    "Turbidity",
+    "Chlorophyll",
 ]
+
+# Source channel names (as they appear in the setup string) renamed on
+# output, e.g. to this package's lowercase convention for non-CTD-standard
+# sensor names.
+_OUTPUT_RENAME = {
+    "Turbidity": "turbidity",
+    "Chlorophyll": "chlorophyll",
+}
 
 
 def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
@@ -161,6 +171,8 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
         # Convert to float32 for space efficiency
         var_data = var_data.astype(np.float32)
 
+        out_name = _OUTPUT_RENAME.get(var_name, var_name)
+
         # Build attributes
         attrs = {}
 
@@ -177,11 +189,11 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
             # Use units from data if available
             if var_name in units_dict:
                 attrs["units"] = units_dict[var_name]
-            attrs["long_name"] = var_name
+            attrs["long_name"] = out_name
 
         attrs.update(_channel_calibration_attrs(cfg, var_name))
 
-        data_vars[var_name] = (dims, var_data, attrs)
+        data_vars[out_name] = (dims, var_data, attrs)
 
     # Create coordinate variables
     # Use reference time from file

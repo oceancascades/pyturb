@@ -84,6 +84,8 @@ A selection of options:
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
+Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables -- window-averaged and attached at both resolutions (`turbidity`/`chlorophyll` and their `_hires` counterparts).
+
 The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
 
 See `pyturb eps --help` formore details. 

@@ -120,6 +120,14 @@ class ProfileConfig:
     # versions. Set <= 0 to disable.
     ctd_bin_sec: float = 0.25
 
+    # === Optional bio-optical sensors (turbidity, chlorophyll fluorometer) ===
+    # Treated like other CTD scalars when present: window-averaged onto
+    # `time`, and (via ctd_bin_sec) also attached at higher resolution on
+    # `ctd_time`. A name not present in a given instrument's file is simply
+    # skipped, so instruments without these sensors bin with NaN rather than
+    # erroring.
+    optical_vars: tuple[str, ...] = ("turbidity", "chlorophyll")
+
     # === Auxiliary dataset variable names ===
     aux_time: str = "time"  # Time variable in auxiliary dataset
     aux_latitude: str = "lat"  # Latitude variable in auxiliary dataset
@@ -1130,6 +1138,15 @@ def _build_ctd_vars(
                 "units": "degree_C",
             },
         )
+    for var in config.optical_vars:
+        if var in means:
+            out[var] = (
+                means[var],
+                {
+                    "long_name": ds[var].attrs.get("long_name", var),
+                    "units": ds[var].attrs.get("units", ""),
+                },
+            )
 
     lat_for_gsw = (
         lat_arr if lat_arr is not None else np.full(n_out, config.default_latitude)
@@ -1279,7 +1296,11 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
     """
     if config.ctd_bin_sec <= 0 or not hasattr(ds, "fs_slow"):
         return ds
-    if config.temperature not in ds and "JAC_C" not in ds:
+    if (
+        config.temperature not in ds
+        and "JAC_C" not in ds
+        and not any(v in ds for v in config.optical_vars)
+    ):
         return ds
 
     n_ctd = max(1, round(config.ctd_bin_sec * float(ds.fs_slow)))
@@ -1294,8 +1315,25 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
         "JAC_C",
         "T1",
         "T2",
+        *config.optical_vars,
     ]
-    means_ctd = {v: block_mean(ds[v].values, n_ctd) for v in vars_to_mean if v in ds}
+    # Most CTD scalars are natively on t_slow, but some optional sensors
+    # (e.g. a turbidity/chlorophyll fluorometer) are wired into the p-file's
+    # fast channel matrix instead. Block size must scale with sampling rate
+    # so every var's block_mean() lands on the same ctd_time grid: with
+    # n_slow = len(t_slow), n_fast = ratio * n_slow (exact, by construction
+    # of the channel matrix), len(fast)//(n_ctd*ratio) == len(slow)//n_ctd.
+    ratio = None
+    means_ctd: dict[str, np.ndarray] = {}
+    for v in vars_to_mean:
+        if v not in ds:
+            continue
+        if "t_fast" in ds[v].dims:
+            if ratio is None:
+                ratio = max(1, round(float(ds.fs_fast) / float(ds.fs_slow)))
+            means_ctd[v] = block_mean(ds[v].values, n_ctd * ratio)
+        else:
+            means_ctd[v] = block_mean(ds[v].values, n_ctd)
     if len(means_ctd.get("t_slow", [])) == 0:
         return ds
 
@@ -1348,7 +1386,16 @@ def _attach_window_scalars(
 
     means = compute_window_means(
         ds,
-        ["t_slow", pressure_var, speed_var, config.temperature, "JAC_C", "T1", "T2"],
+        [
+            "t_slow",
+            pressure_var,
+            speed_var,
+            config.temperature,
+            "JAC_C",
+            "T1",
+            "T2",
+            *config.optical_vars,
+        ],
         params,
     )
 

@@ -4,7 +4,11 @@ import gsw
 import numpy as np
 import xarray as xr
 
-from pyturb.profile import ProfileConfig, _attach_hires_ctd_vars, _attach_window_scalars
+from pyturb.profile import (
+    ProfileConfig,
+    _attach_hires_ctd_vars,
+    _attach_window_scalars,
+)
 
 FS_SLOW = 64.0
 
@@ -217,3 +221,87 @@ class TestFP07Thermistors:
         assert "T2" not in out
         assert "T1_hires" not in out
         assert "T2_hires" not in out
+
+
+class TestOpticalVars:
+    def test_present_at_both_resolutions_when_in_input(self):
+        n = 3000
+        t = np.arange(n) / FS_SLOW
+        ds = _make_ds(turbidity=0.5 + 0.01 * t, chlorophyll=1.0 + 0.02 * t)
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+
+        for name in ["turbidity", "chlorophyll"]:
+            assert out[name].dims == ("time",)
+            assert out[f"{name}_hires"].dims == ("ctd_time",)
+            assert not out[name].isnull().all()
+            assert not out[f"{name}_hires"].isnull().all()
+
+    def test_absent_without_optical_vars_in_input(self):
+        # "if they exist": instruments without these sensors must not error
+        # or fabricate the variables.
+        ds = _make_ds()
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+        assert "turbidity" not in out
+        assert "chlorophyll" not in out
+        assert "turbidity_hires" not in out
+        assert "chlorophyll_hires" not in out
+
+    def test_only_present_var_is_attached(self):
+        # One sensor present, the other absent -- only the present one shows up.
+        n = 3000
+        t = np.arange(n) / FS_SLOW
+        ds = _make_ds(turbidity=0.5 + 0.01 * t)
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+        assert "turbidity" in out
+        assert "chlorophyll" not in out
+
+    def test_configurable_var_names(self):
+        # A differently-named channel (e.g. lowercase in this instrument's
+        # setup string) works when passed via optical_vars.
+        n = 3000
+        t = np.arange(n) / FS_SLOW
+        ds = _make_ds(turb=0.5 + 0.01 * t)
+        config = ProfileConfig(match_conductivity=False, optical_vars=("turb",))
+        out = _attach_window_scalars(ds, _PARAMS, config)
+        assert "turb" in out
+        assert "turb_hires" in out
+
+    def test_fast_sampled_optical_var_aligns_with_ctd_time(self):
+        # Regression: on real instruments the turbidity/chlorophyll
+        # fluorometer is wired into the p-file's fast channel matrix, not
+        # the slow one like JAC_T/JAC_C/T1/T2. _attach_hires_ctd_vars must
+        # scale the block size for a t_fast var to match the ctd_time grid
+        # built from t_slow, or block_mean() produces a mismatched length
+        # and xarray raises "conflicting sizes for dimension 'ctd_time'".
+        ratio = 8
+        n_slow = 3000
+        t_slow = np.arange(n_slow) / FS_SLOW
+        fs_fast = FS_SLOW * ratio
+        n_fast = n_slow * ratio
+        t_fast = np.arange(n_fast) / fs_fast
+
+        ds = xr.Dataset(
+            {
+                "P_smooth": ("t_slow", 10.0 + 0.5 * t_slow),
+                "W_smooth": ("t_slow", np.full(n_slow, 0.5)),
+                "JAC_T": ("t_slow", 10.0 + np.sin(2 * np.pi * 0.02 * t_slow)),
+                "JAC_C": ("t_slow", np.full(n_slow, 37.0)),
+                "turbidity": ("t_fast", 0.5 + 0.001 * t_fast),
+                "fs_slow": FS_SLOW,
+                "fs_fast": fs_fast,
+            },
+            coords={"t_slow": t_slow, "t_fast": t_fast},
+        )
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_hires_ctd_vars(ds, config)
+
+        assert "turbidity_hires" in out
+        assert out["turbidity_hires"].dims == ("ctd_time",)
+        assert (
+            out["turbidity_hires"].sizes["ctd_time"]
+            == out["temperature_hires"].sizes["ctd_time"]
+        )
+        assert not out["turbidity_hires"].isnull().all()
