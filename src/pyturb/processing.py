@@ -782,6 +782,8 @@ def bin_profiles(
             "conductivity",
             "T1",
             "T2",
+            "turbidity",
+            "chlorophyll",
             "salinity",
             "density",
             "z",
