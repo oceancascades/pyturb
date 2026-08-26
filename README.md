@@ -59,6 +59,16 @@ pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
 
 For each candidate file, `auto` fits by aggregating across every one of that file's profiles: median lag across all of them. Before accepting a candidate file's aggregate fit, `auto` also drops any profile whose raw counts are pinned near the ADC's saturation limit and checks the fitted `T_0`/`beta_1` land in a physically plausible range.
 
+### `calibrate-jac-c` - apply a constant conductivity offset (optional)
+
+Corrects a constant offset in the `JAC_C` conductivity channel (e.g. from a post-deployment comparison against a reference CTD), for one instrument at a time:
+
+```bash
+pyturb calibrate-jac-c 194 converted/RIOT_VMP194_*.nc --offset -0.05 -o converted_calibrated/
+```
+
+Only files whose `instrument_sn` attribute matches the given serial number exactly are modified; run it before `eps` so the correction also carries through to the salinity and density derived from `JAC_C`. `--offset` is in `JAC_C`'s own units (mS/cm) and is passed as an option (not positional) so negative values aren't mistaken for a flag.
+
 ### `eps` - calculate the dissipation rate
 
 Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:

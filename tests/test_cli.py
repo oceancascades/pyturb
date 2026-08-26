@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 from typer.testing import CliRunner
 
@@ -222,6 +223,153 @@ class TestCalibrateFp07Commands:
         after_b = xr.load_dataset(file_b, decode_times=False)["gradT1"].values
         assert not (before_a == after_a).all()
         assert not (before_b == after_b).all()
+
+
+class TestCalibrateJacCCommand:
+    """Test the calibrate-jac-c CLI command."""
+
+    CAL_PFILE = Path(__file__).parent / "data" / "RIOTSHAKE_VMP142_0010_cut.p"
+    INSTRUMENT_SN = "142"
+
+    def _convert(self, tmp_path: Path, name: str = "converted.nc") -> Path:
+        runner.invoke(app, ["p2nc", "--output", str(tmp_path), str(self.CAL_PFILE)])
+        src = tmp_path / f"{self.CAL_PFILE.stem}.nc"
+        dst = tmp_path / name
+        if dst != src:
+            dst.write_bytes(src.read_bytes())
+        return dst
+
+    def test_applies_offset_to_matching_instrument(self, tmp_path):
+        converted = self._convert(tmp_path)
+        before = xr.load_dataset(converted, decode_times=False)["JAC_C"].values.copy()
+
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--overwrite",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        after = xr.load_dataset(converted, decode_times=False)["JAC_C"].values
+        np.testing.assert_allclose(after, before - 0.05, atol=1e-4)
+
+    def test_stamps_provenance_attr(self, tmp_path):
+        converted = self._convert(tmp_path)
+        runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--overwrite",
+            ],
+        )
+        ds = xr.load_dataset(converted, decode_times=False)
+        assert float(ds["JAC_C"].attrs["JAC_C_offset_applied"]) == pytest.approx(-0.05)
+
+    def test_other_variables_unaffected(self, tmp_path):
+        converted = self._convert(tmp_path)
+        before_p = xr.load_dataset(converted, decode_times=False)["P"].values.copy()
+
+        runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--overwrite",
+            ],
+        )
+        after_p = xr.load_dataset(converted, decode_times=False)["P"].values
+        np.testing.assert_array_equal(after_p, before_p)
+
+    def test_mismatched_instrument_sn_leaves_file_untouched(self, tmp_path):
+        converted = self._convert(tmp_path)
+        before = xr.load_dataset(converted, decode_times=False)["JAC_C"].values.copy()
+
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                "999",
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--overwrite",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "skipped" in result.output
+        after = xr.load_dataset(converted, decode_times=False)["JAC_C"].values
+        np.testing.assert_array_equal(after, before)
+
+    def test_negative_offset_parses_as_option_value(self, tmp_path):
+        # Regression: a bare positional "-0.05" is mistaken by click for an
+        # option flag ("No such option: -0"). --offset must consume it as
+        # its value regardless of the leading '-'.
+        converted = self._convert(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--overwrite",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "No such option" not in result.output
+
+    def test_requires_overwrite_or_output(self, tmp_path):
+        converted = self._convert(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+            ],
+        )
+        assert result.exit_code != 0
+
+    def test_output_dir_leaves_original_untouched(self, tmp_path):
+        converted = self._convert(tmp_path)
+        before = xr.load_dataset(converted, decode_times=False)["JAC_C"].values.copy()
+        out_dir = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-jac-c",
+                self.INSTRUMENT_SN,
+                str(converted),
+                "--offset",
+                "-0.05",
+                "--output",
+                str(out_dir),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        original_after = xr.load_dataset(converted, decode_times=False)["JAC_C"].values
+        np.testing.assert_array_equal(original_after, before)
+
+        corrected = xr.load_dataset(out_dir / converted.name, decode_times=False)[
+            "JAC_C"
+        ].values
+        np.testing.assert_allclose(corrected, before - 0.05, atol=1e-4)
 
 
 class TestIsRailed:
