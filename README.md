@@ -37,6 +37,28 @@ Note that unlike the ODAS toolbox, this conversion does not apply a velocity sca
 
 The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where profiles are split across multiple files and per-file processing would result in incomplete profiles.
 
+Each converted variable also carries the setup-string calibration parameters actually used for it, as `cal_<key>` attrs (e.g. `T1.attrs["cal_t_0"]`, `T1.attrs["cal_beta_1"]`) -- easier to consume downstream than re-parsing the full embedded `pfile_configuration` string. Thermistor channels (`T1`, `T2`) additionally retain their raw ADC counts (`T1_counts`, `T2_counts`) alongside the usual physical-unit output, since the FP07 conversion's internal `Z` clip means the converted value can saturate; the raw counts let `calibrate-fp07` (below) rebuild a corrected signal exactly, without needing to reconvert from the original `.p` file.
+
+### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
+
+The embedded FP07 calibration coefficients are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T` sensor) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2`, applying the best available fit. `pyturb eps` checks the raw `T1`/`T2` range and attaches `T1_qc`/`T2_qc` and folds the same check into `chi_1_qc`/`chi_2_qc`.
+
+```bash
+# Fit from one representative profile and write a calibration report
+pyturb calibrate-fp07 fit converted/RIOT_VMP194_0003.nc --profile 0 -o cal.yaml
+
+# Apply a fit to every converted file from the same instrument with a
+# matching probe serial number.
+pyturb calibrate-fp07 apply cal.yaml converted/RIOT_VMP194_*.nc -o converted_calibrated/
+
+# Automatically apply the first two steps across multiple instruments and sensors.
+pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
+```
+
+`--profile` is 0-based and matches `eps`'s `_p{NNNN}` output numbering, so `--profile 0` corresponds to what would become `..._p0000.nc`. Run `pyturb calibrate-fp07 fit`/`apply`/`auto --help` for all options.
+
+For each candidate file, `auto` fits by aggregating across every one of that file's profiles: median lag across all of them. Before accepting a candidate file's aggregate fit, `auto` also drops any profile whose raw counts are pinned near the ADC's saturation limit and checks the fitted `T_0`/`beta_1` land in a physically plausible range.
+
 ### `eps` - calculate the dissipation rate
 
 Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:
@@ -47,7 +69,7 @@ pyturb eps ./converted/*.nc -o ./eps_output/
 
 The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a Slocum glider and used to esimate viscosity. Velocity from a calibrated glider flight model may also be used.
 
-A selection of the option:
+A selection of options:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
@@ -55,11 +77,14 @@ A selection of the option:
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
 - `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw, including potential density and buoyancy frequency.
+- `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).
 - `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
-- `--stationary-platform`/`--moving-platform`: Use one lat/lon per profile instead of interpolating a position onto every window/bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as stationary; anything else is treated as moving, e.g. gliders). For a stationary platform, `lat`/`lon` are written as dimensionless scalars (the position at the profile's first timestamp); for a moving platform they vary with `time`/`ctd_time` as before.
+- `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile instead of interpolating a continuously-tracked position onto every bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked).
 
-CTD scalars (pressure, temperature, salinity, conductivity, density) can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `temperature_hires`), alongside the usual dissipation-bin versions. Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+
+The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
 
 See `pyturb eps --help` formore details. 
 
@@ -103,3 +128,14 @@ The dissipation rate is estimated by fitting shear spectra to the Nasmyth spectr
 4. Epsilon is estimated by fitting the observed spectrum to the theoretical Nasmyth spectrum in the inertial subrange.
 5. Unresolved high-wavenumber variance is accounted for using the integrated Nasmyth spectrum.
 6. Quality control metrics including mean absolute deivation are computed and QC flag attached. 
+
+### Temperature gradient spectrum processing
+
+With `--chi`, the dissipation rate of temperature variance is estimated from the FP07 temperature gradient spectra:
+
+1. Spectra are corrected for the thermistor frequency response using a single-pole transfer function with a speed-dependent time constant.
+2. Chi is computed by integrating the corrected spectrum over the resolved wavenumber band, with the upper limit set by the anti-alias cutoff, the spectral noise minimum, the 95%-variance wavenumber, and (when the channel carries calibration attrs) the wavenumber where the spectrum crosses a predicted electronics noise floor.
+3. Epsilon is taken as the per-window combination of the shear-probe estimates, fixing the Batchelor wavenumber.
+4. Unresolved variance is corrected using the Kraichnan spectrum.
+5. Molecular thermal diffusivity is computed from an empirical conductivity formula.
+6. A figure of merit against the Kraichnan spectrum and a QC flag are attached.

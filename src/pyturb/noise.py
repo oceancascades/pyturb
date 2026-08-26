@@ -1,16 +1,151 @@
 """
 Electronic noise models for RSI instrument channels.
 
-Translated from MATLAB ODAS library v4.5.1:
-- noise_shearchannel.m
-- noise_thermchannel.m
-
 These models predict the noise floor of the signal conditioning electronics
 as a function of frequency. They are useful for validating bench test data
 and identifying faulty instruments.
+
+``thermistor_noise_phi`` combines ``noise_thermchannel`` with the FP07
+Steinhart-Hart scale factor and thermal-response correction to predict the
+gradT noise floor in the same physical units and domain as the observed,
+response-corrected spectrum (see ``pyturb.profile``'s ``S_gradT1``/
+``S_gradT2``) -- used by :func:`pyturb.temperature.estimate_chi` to cap the
+chi integration band at the wavenumber where signal meets noise.
 """
 
 import numpy as np
+
+from .temperature import single_pole_correction as _fp07_response_correction
+
+
+def _channel_calibration_params(ds, probe: str) -> dict:
+    """``cal_<key>`` attrs for ``probe`` (e.g. ``"T1"``), plus ``diff_gain``
+    from its pre-emphasized channel (e.g. ``"T1_dT1"``).
+
+    Prefers the in-situ ``calibrate-fp07`` coefficients over the factory
+    ones if the channel was recalibrated -- ``apply_probe_calibration``
+    rebuilds the data with the new coefficients but leaves the original
+    ``cal_t_0``/``cal_beta_1``/``cal_beta_2`` attrs untouched (they record
+    the factory calibration), so those must not be used here or the
+    predicted noise floor would not match what actually produced the data.
+
+    A small, deliberate duplicate of ``fp07_calibration._channel_params``'s
+    attr-reading (rather than importing it): ``fp07_calibration`` imports
+    ``profile``, and ``profile`` needs this function, so importing
+    ``fp07_calibration`` here would create a cycle.
+
+    Returns {} if ``probe`` isn't present or carries no ``cal_*`` attrs.
+    """
+    if probe not in ds:
+        return {}
+    attrs = ds[probe].attrs
+    params = {k[len("cal_") :]: v for k, v in attrs.items() if k.startswith("cal_")}
+    if not params:
+        return {}
+    if attrs.get(f"{probe}_fp07_recalibrated"):
+        params["t_0"] = attrs[f"{probe}_fp07_new_T_0"]
+        params["beta_1"] = attrs[f"{probe}_fp07_new_beta_1"]
+        new_beta_2 = attrs[f"{probe}_fp07_new_beta_2"]
+        if np.isfinite(new_beta_2):
+            params["beta_2"] = new_beta_2
+        else:
+            params.pop("beta_2", None)
+    dT_name = f"{probe}_d{probe}"
+    if dT_name in ds and "cal_diff_gain" in ds[dT_name].attrs:
+        params["diff_gain"] = ds[dT_name].attrs["cal_diff_gain"]
+    return params
+
+
+def _log_R_from_T(
+    T_celsius: np.ndarray, t_0: float, beta_1: float, beta_2: float | None = None
+) -> np.ndarray:
+    """Invert the Steinhart-Hart equation: absolute temperature -> log(R_T/R_0).
+
+    The forward direction is ``fp07_calibration.steinhart_hart_forward``;
+    this is only needed here because the noise floor is built from a
+    window-mean temperature rather than raw counts.
+    """
+    T_abs = np.asarray(T_celsius, dtype=float) + 273.15
+    c = 1.0 / t_0 - 1.0 / T_abs
+    if beta_2 is not None:
+        a = 1.0 / beta_2
+        b = 1.0 / beta_1
+        disc = b * b - 4 * a * c
+        return (-b + np.sqrt(disc)) / (2 * a)
+    return -c * beta_1
+
+
+def thermistor_noise_phi(
+    f: np.ndarray,
+    W: float,
+    T_celsius: float,
+    params: dict,
+    fs_fast: float,
+) -> np.ndarray:
+    """Predicted FP07 gradT noise floor phi(k) [K2 m-2 cpm-1], k = f / W.
+
+    Combines the electronics noise model (``noise_thermchannel``) with the
+    Steinhart-Hart counts-to-K/s scale factor (evaluated at the window-mean
+    temperature) and the FP07 thermal single-pole response correction --
+    the same corrections applied to the real signal (see
+    ``pyturb.profile``'s ``gradT_response_correction`` and
+    ``fp07_calibration.make_gradT``) -- so it is directly comparable to the
+    observed, response-corrected spectrum.
+
+    f    : frequency (Hz)
+    W    : mean fall speed for this window (m/s)
+    T_celsius : window-mean temperature (degC) -- sets the thermistor's
+        resistance ratio, and hence the scale factor, operating point.
+    params : calibration dict from :func:`_channel_calibration_params`
+        (a, b, g, e_b, adc_fs, adc_bits, t_0, beta_1, beta_2 [optional],
+        diff_gain).
+    fs_fast : fast sampling rate (Hz).
+    """
+    b = float(params["b"])
+    adc_fs = float(params["adc_fs"])
+    adc_bits = int(float(params["adc_bits"]))
+    g = float(params["g"])
+    e_b = float(params["e_b"])
+    t_0 = float(params["t_0"])
+    beta_1 = float(params["beta_1"])
+    beta_2 = params.get("beta_2")
+    beta_2 = (
+        float(beta_2) if beta_2 is not None and np.isfinite(float(beta_2)) else None
+    )
+    diff_gain = float(params["diff_gain"])
+
+    log_R = _log_R_from_T(T_celsius, t_0, beta_1, beta_2)
+    R = np.exp(log_R)
+    eta = (b / 2) * (2**adc_bits) * g * e_b / adc_fs
+    sf = 1 + 2 * (beta_1 / beta_2) * log_R if beta_2 is not None else 1.0
+    T_abs = T_celsius + 273.15
+    scale_factor = sf * T_abs**2 * (1 + R) ** 2 / (2 * eta * beta_1 * R)
+    R_ohms = 3000.0 * R  # nominal thermistor R_0 (ODAS default)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # f=0 (the DC bin, always present in production spectra) makes
+        # noise_thermchannel's flicker-noise terms (~1/f) blow up to inf/nan
+        # -- harmless (thermistor_noise_phi's own NaN/Inf checks and
+        # _noise_crossing_k's isfinite filtering drop that bin downstream),
+        # but noisy without suppressing it here.
+        noise_counts_psd = noise_thermchannel(
+            f,
+            FS=adc_fs,
+            Bits=adc_bits,
+            gamma_RSI=3.0,
+            fs=fs_fast,
+            R_0=R_ohms,
+            gain=g,
+            G_D=diff_gain,
+        )
+        G_HP = (
+            (1 / diff_gain) ** 2
+            * (2 * np.pi * diff_gain * f) ** 2
+            / (1 + (2 * np.pi * diff_gain * f) ** 2)
+        )
+        noise_Kdot_psd = noise_counts_psd * G_HP * scale_factor**2  # (K/s)^2/Hz
+    noise_S_f = noise_Kdot_psd / W**2  # (K/m)^2/Hz
+    return noise_S_f * W * _fp07_response_correction(f, W)  # phi(k) domain
 
 
 def noise_shearchannel(

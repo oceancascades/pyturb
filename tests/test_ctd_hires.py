@@ -59,9 +59,11 @@ class TestHiresCtdVars:
 
         assert "W_hires" not in out
         assert "nu_hires" not in out
+        assert "kappa_T_hires" not in out
         # Still present at the main (dissipation-window) resolution.
         assert "W" in out
         assert "nu" in out
+        assert "kappa_T" in out
 
     def test_ctd_time_much_finer_than_time(self):
         ds = _make_ds()
@@ -175,3 +177,43 @@ class TestDepth:
 
         expected = gsw.z_from_p(out["pressure"].values, -60.0)
         np.testing.assert_allclose(out["z"].values, expected, rtol=1e-4)
+
+
+class TestFP07Thermistors:
+    def test_t1_t2_present_at_both_resolutions(self):
+        n = 3000
+        t = np.arange(n) / FS_SLOW
+        ds = _make_ds(T1=10.0 + 0.01 * t, T2=10.1 + 0.01 * t)
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+
+        assert out["T1"].dims == ("time",)
+        assert out["T2"].dims == ("time",)
+        assert out["T1_hires"].dims == ("ctd_time",)
+        assert out["T2_hires"].dims == ("ctd_time",)
+
+    def test_t1_t2_are_window_means_not_overwritten_by_each_other(self):
+        # T1/T2 share a name with their own raw input; the coarse and hires
+        # outputs must each reflect a real window mean of the raw signal, not
+        # get corrupted by the other resolution's pass (see profile.py's
+        # ordering comment in _attach_window_scalars).
+        n = 3000
+        t = np.arange(n) / FS_SLOW
+        ds = _make_ds(T1=10.0 + 0.01 * t, T2=20.0 + 0.02 * t)
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+
+        assert out.sizes["ctd_time"] > 10 * out.sizes["time"]
+        assert np.all((out["T1"].values > 9.5) & (out["T1"].values < 11.5))
+        assert np.all((out["T2"].values > 19.5) & (out["T2"].values < 21.5))
+        assert np.all((out["T1_hires"].values > 9.5) & (out["T1_hires"].values < 11.5))
+        assert np.all((out["T2_hires"].values > 19.5) & (out["T2_hires"].values < 21.5))
+
+    def test_absent_without_t1_t2_in_input(self):
+        ds = _make_ds()
+        config = ProfileConfig(match_conductivity=False)
+        out = _attach_window_scalars(ds, _PARAMS, config)
+        assert "T1" not in out
+        assert "T2" not in out
+        assert "T1_hires" not in out
+        assert "T2_hires" not in out

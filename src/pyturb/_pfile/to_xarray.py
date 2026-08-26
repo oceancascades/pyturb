@@ -27,9 +27,11 @@ _CF_VARIABLE_METADATA = {
     # FP07 thermistors
     "T1": ("sea_water_temperature", "FP07 thermistor 1 temperature", "degree_C"),
     "T2": ("sea_water_temperature", "FP07 thermistor 2 temperature", "degree_C"),
+    "T1_counts": (None, "FP07 thermistor 1 raw counts (pre-conversion)", "counts"),
+    "T2_counts": (None, "FP07 thermistor 2 raw counts (pre-conversion)", "counts"),
     # Pre-emphasized thermistor signals
-    # "T1_dT1": (None, "Pre-emphasized thermistor 1 signal", "counts"),
-    # "T2_dT2": (None, "Pre-emphasized thermistor 2 signal", "counts"),
+    "T1_dT1": (None, "Pre-emphasized thermistor 1 signal", "counts"),
+    "T2_dT2": (None, "Pre-emphasized thermistor 2 signal", "counts"),
     # Accelerometers
     "Ax": (None, "Acceleration X", "m s-2"),
     "Ay": (None, "Acceleration Y", "m s-2"),
@@ -39,6 +41,32 @@ _CF_VARIABLE_METADATA = {
     "Incl_Y": (None, "Inclinometer Y angle", "degree"),
     # "Incl_T": (None, "Inclinometer temperature", "degree_C"),
 }
+
+# Suffixes stripped (in order) to find a variable's underlying channel name
+# in the setup config, e.g. "T1_counts" and "T1_raw" both look up "T1".
+_CHANNEL_SUFFIXES = ("_counts", "_raw", "_hires")
+
+
+def _channel_calibration_attrs(cfg, var_name: str) -> Dict[str, str]:
+    """The variable's channel-config parameters, as ``cal_<key>`` attrs.
+
+    Looks up ``var_name`` directly, then its base channel name (stripping
+    ``_counts``/``_raw``/``_hires``) if there's no direct match. Empty if no
+    matching channel section exists (e.g. for variables with no calibration,
+    such as accelerometers converted with fixed constants).
+    """
+    if cfg is None:
+        return {}
+    names = [var_name]
+    for suffix in _CHANNEL_SUFFIXES:
+        if var_name.endswith(suffix):
+            names.append(var_name[: -len(suffix)])
+    for name in names:
+        params = cfg.get_channel_params(name)
+        if params:
+            return {f"cal_{k}": v for k, v in params.items()}
+    return {}
+
 
 # Default variables to save (in order of priority)
 _DEFAULT_VARIABLES = [
@@ -54,6 +82,10 @@ _DEFAULT_VARIABLES = [
     "JAC_C",
     "T1",
     "T2",
+    "T1_counts",
+    "T2_counts",
+    "T1_dT1",
+    "T2_dT2",
     "Ax",
     "Ay",
     "Az",
@@ -109,6 +141,7 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
     # Build xarray Dataset
     data_vars = {}
     units_dict = data.get("units", {})
+    cfg = data.get("cfgobj")
 
     for var_name in available_vars:
         var_data = data[var_name]
@@ -145,6 +178,8 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
             if var_name in units_dict:
                 attrs["units"] = units_dict[var_name]
             attrs["long_name"] = var_name
+
+        attrs.update(_channel_calibration_attrs(cfg, var_name))
 
         data_vars[var_name] = (dims, var_data, attrs)
 

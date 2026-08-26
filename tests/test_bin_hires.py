@@ -99,3 +99,34 @@ class TestCtdBinWidth:
         )
         assert "ctd_depth" not in binned.dims
         assert "temperature_hires" not in binned
+
+
+class TestBinIncludesFP07Thermistors:
+    def test_t1_t2_on_main_grid(self, eps_file, tmp_path):
+        binned = bin_profiles(
+            [eps_file],
+            output_file=tmp_path / "binned.nc",
+            depth_min=DEPTH_MIN,
+            depth_max=DEPTH_MAX,
+            bin_width=2.0,
+        )
+        for name in ["T1", "T2"]:
+            assert name in binned, name
+            assert binned[name].dims == ("profile", "depth")
+            assert not binned[name].isnull().all()
+
+    def test_t1_t2_on_ctd_depth_grid(self, eps_file, tmp_path):
+        binned = bin_profiles(
+            [eps_file],
+            output_file=tmp_path / "binned.nc",
+            depth_min=DEPTH_MIN,
+            depth_max=DEPTH_MAX,
+            bin_width=2.0,
+            ctd_bin_width=0.5,
+        )
+        for name in ["T1_hires", "T2_hires"]:
+            assert name in binned, name
+            assert binned[name].dims == ("profile", "ctd_depth")
+            assert not binned[name].isnull().all()
+        # Main-grid vars must still be present and unrenamed.
+        assert binned["T1"].dims == ("profile", "depth")
