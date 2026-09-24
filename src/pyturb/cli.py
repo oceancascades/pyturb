@@ -10,6 +10,7 @@ import xarray as xr
 from typing_extensions import Annotated
 
 from . import __version__
+from .auxiliary import attach_auxiliary, infer_sample_rate, load_auxiliary
 from .fp07_calibration import (
     MAX_PLAUSIBLE_BETA1,
     MAX_PLAUSIBLE_T0_K,
@@ -1151,6 +1152,63 @@ def _print_fit_report(fits: list) -> None:
         )
 
 
+# --aux/--aux-temp/--ref/--ref-fs, shared by 'calibrate-fp07 fit' and 'auto'.
+_AUX_HELP = (
+    "Auxiliary NetCDF file with a temperature time series (e.g. a glider's "
+    "onboard CTD), for a platform with no onboard reference thermometer "
+    "(e.g. a MicroRider). Same file 'eps' takes via --aux."
+)
+_AUX_TEMP_HELP = (
+    "Temperature variable name in the auxiliary file. Required if --aux is given."
+)
+_REF_HELP = (
+    "Reference temperature variable to fit against. Defaults to 'JAC_T', or "
+    "'aux_temperature' (the name --aux's temperature is merged in as) if "
+    "--aux is given."
+)
+_REF_FS_HELP = (
+    "The reference's own native sample rate (Hz), if sampled well below the "
+    "FP07's slow-channel rate (e.g. ~1 Hz for a glider CTD, vs tens of Hz "
+    "for the microstructure package) and then upsampled onto its time axis. "
+    "Caps the thermal-response-matching filter so the fit and lag estimate "
+    "aren't corrupted by content the reference can't actually resolve -- "
+    "auto-detected from --aux if omitted; irrelevant without --aux."
+)
+
+
+def _resolve_calibration_reference(
+    auxiliary_file: Optional[Path],
+    aux_temp: Optional[str],
+    reference: Optional[str],
+    ref_fs: Optional[float],
+) -> tuple[Optional[xr.Dataset], ProfileConfig, str, Optional[float]]:
+    """Load --aux (if given) and resolve --ref/--ref-fs defaults.
+
+    Without --aux: reference defaults to "JAC_T", ref_fs stays None (no
+    bandwidth cap -- unchanged behavior for a continuously-sampled onboard
+    reference). With --aux: reference defaults to "aux_temperature" (the
+    name attach_auxiliary populates it as), and ref_fs auto-detects the
+    auxiliary dataset's own sample rate unless given explicitly.
+    """
+    if auxiliary_file is None:
+        return None, ProfileConfig(), reference or "JAC_T", ref_fs
+
+    if aux_temp is None:
+        typer.echo(
+            "Error: --aux-temp is required when --aux is given (which "
+            "column in the auxiliary file is temperature).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    config = ProfileConfig(aux_temperature=aux_temp)
+    aux_ds = load_auxiliary(auxiliary_file, config)
+    resolved_ref_fs = (
+        ref_fs if ref_fs is not None else infer_sample_rate(aux_ds, config.aux_time)
+    )
+    return aux_ds, config, reference or "aux_temperature", resolved_ref_fs
+
+
 @calibrate_fp07_app.command("fit")
 def calibrate_fp07_fit(
     converted_file: Annotated[
@@ -1177,9 +1235,7 @@ def calibrate_fp07_fit(
         str,
         typer.Option("--probe", help="Comma-separated probe channel names"),
     ] = "T1,T2",
-    reference: Annotated[
-        str, typer.Option("--ref", help="Reference temperature variable")
-    ] = "JAC_T",
+    reference: Annotated[Optional[str], typer.Option("--ref", help=_REF_HELP)] = None,
     order: Annotated[
         int,
         typer.Option(
@@ -1194,6 +1250,13 @@ def calibrate_fp07_fit(
             show_default=True,
         ),
     ] = 8.0,
+    auxiliary_file: Annotated[
+        Path | None, typer.Option("--aux", "-a", help=_AUX_HELP)
+    ] = None,
+    aux_temp: Annotated[
+        str | None, typer.Option("--aux-temp", help=_AUX_TEMP_HELP)
+    ] = None,
+    ref_fs: Annotated[float | None, typer.Option("--ref-fs", help=_REF_FS_HELP)] = None,
 ):
     """Fit in-situ FP07 calibration coefficients against a reference thermometer.
 
@@ -1204,9 +1267,15 @@ def calibrate_fp07_fit(
 
     Examples:
         pyturb calibrate-fp07 fit converted/RIOT_VMP194_0003.nc --profile 0 -o cal.yaml
+        pyturb calibrate-fp07 fit converted/MR_0003.nc --profile 0 -o cal.yaml \\
+            --aux glider.nc --aux-temp sci_water_temp
     """
+    aux_ds, config, reference, ref_fs = _resolve_calibration_reference(
+        auxiliary_file, aux_temp, reference, ref_fs
+    )
     ds = load_profile_nc(converted_file)
-    config = ProfileConfig()
+    if aux_ds is not None:
+        ds = attach_auxiliary(ds, aux_ds, config)
     ds = prepare_profile(ds, config)
     profile_list = list(split_into_profiles(ds, config)) or [(0, ds)]
     if not (0 <= profile < len(profile_list)):
@@ -1230,6 +1299,7 @@ def calibrate_fp07_fit(
                 ref=reference,
                 order=order,
                 min_range_c=min_range,
+                ref_fs=ref_fs,
             )
         except (ValueError, KeyError) as e:
             typer.echo(f"Error fitting {probe}: {e}", err=True)
@@ -1418,6 +1488,8 @@ def _fit_from_middle_of_group(
     reference: str,
     order: int,
     min_range: float,
+    aux_ds: Optional[xr.Dataset] = None,
+    ref_fs: Optional[float] = None,
 ) -> Optional[ProbeCalibrationFit]:
     """Fit from the file at the middle of the (sorted) group, aggregating
     across every one of its profiles.
@@ -1456,7 +1528,10 @@ def _fit_from_middle_of_group(
     for idx in candidate_order:
         f = group_files[idx]
         try:
-            ds = prepare_profile(load_profile_nc(f), config)
+            ds = load_profile_nc(f)
+            if aux_ds is not None:
+                ds = attach_auxiliary(ds, aux_ds, config)
+            ds = prepare_profile(ds, config)
             profile_list = list(split_into_profiles(ds, config)) or [(0, ds)]
         except Exception as e:
             _log.debug(f"{probe}: could not prepare {f.name}: {e}")
@@ -1471,6 +1546,7 @@ def _fit_from_middle_of_group(
                 ref=reference,
                 order=order,
                 min_range_c=min_range,
+                ref_fs=ref_fs,
             )
         except Exception as e:
             _log.debug(f"{probe}: aggregate fit on {f.name} failed: {e}")
@@ -1546,9 +1622,7 @@ def calibrate_fp07_auto(
         str,
         typer.Option("--probe", help="Comma-separated probe channel names"),
     ] = "T1,T2",
-    reference: Annotated[
-        str, typer.Option("--ref", help="Reference temperature variable")
-    ] = "JAC_T",
+    reference: Annotated[Optional[str], typer.Option("--ref", help=_REF_HELP)] = None,
     order: Annotated[
         int,
         typer.Option(
@@ -1567,6 +1641,13 @@ def calibrate_fp07_auto(
         Path | None,
         typer.Option("--report", "-r", help="Also write the combined report as YAML"),
     ] = None,
+    auxiliary_file: Annotated[
+        Path | None, typer.Option("--aux", "-a", help=_AUX_HELP)
+    ] = None,
+    aux_temp: Annotated[
+        str | None, typer.Option("--aux-temp", help=_AUX_TEMP_HELP)
+    ] = None,
+    ref_fs: Annotated[float | None, typer.Option("--ref-fs", help=_REF_FS_HELP)] = None,
 ):
     """Scan, fit, and apply FP07 in-situ calibration across a set of files.
 
@@ -1581,6 +1662,8 @@ def calibrate_fp07_auto(
     Examples:
         pyturb calibrate-fp07 auto converted/*.nc --overwrite
         pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
+        pyturb calibrate-fp07 auto converted/MR_*.nc --overwrite \\
+            --aux glider.nc --aux-temp sci_water_temp
     """
     files = resolve_input_files(input_files, "*.nc")
     if not files:
@@ -1588,15 +1671,25 @@ def calibrate_fp07_auto(
         raise typer.Exit(1)
     _require_output_target(output_dir, overwrite)
 
+    aux_ds, config, reference, ref_fs = _resolve_calibration_reference(
+        auxiliary_file, aux_temp, reference, ref_fs
+    )
+
     probe_list = [p.strip() for p in probes.split(",")]
     groups = _scan_probe_groups(files, probe_list)
-    config = ProfileConfig()
 
     fits: list[ProbeCalibrationFit] = []
     for probe, sn_groups in groups.items():
         for (instrument_sn, sn), group_files in sn_groups.items():
             fit = _fit_from_middle_of_group(
-                group_files, probe, config, reference, order, min_range
+                group_files,
+                probe,
+                config,
+                reference,
+                order,
+                min_range,
+                aux_ds=aux_ds,
+                ref_fs=ref_fs,
             )
             if fit is None:
                 typer.echo(

@@ -59,6 +59,15 @@ pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
 
 For each candidate file, `auto` fits by aggregating across every one of that file's profiles: median lag across all of them. Before accepting a candidate file's aggregate fit, `auto` also drops any profile whose raw counts are pinned near the ADC's saturation limit and checks the fitted `T_0`/`beta_1` land in a physically plausible range.
 
+For a platform with no onboard reference thermometer (e.g. a MicroRider on a glider), `fit`/`auto` accept `--aux`/`--aux-temp` (the same auxiliary file `eps` takes) to fit against an external CTD's temperature instead:
+
+```bash
+pyturb calibrate-fp07 auto converted/MR_*.nc --overwrite \
+    --aux glider.nc --aux-temp sci_water_temp
+```
+
+`--ref` then defaults to `aux_temperature` instead of `JAC_T` (an explicit `--ref` still overrides). The existing lag cross-correlation handles the physical mounting offset between the CTD and the FP07 automatically -- no separate lag configuration needed. If the external reference is sampled well below the FP07's slow-channel rate (e.g. ~1 Hz for a glider CTD), `--ref-fs` (auto-detected from `--aux` if omitted) caps the thermal-response-matching filter so the fit isn't corrupted by content the reference can't actually resolve.
+
 ### `calibrate-jac-c` - apply a constant conductivity offset (optional)
 
 Corrects a constant offset in the `JAC_C` conductivity channel (e.g. from a post-deployment comparison against a reference CTD), for one instrument at a time:

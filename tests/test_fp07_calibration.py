@@ -8,6 +8,7 @@ import xarray as xr
 
 from pyturb._pfile import to_xarray
 from pyturb.fp07_calibration import (
+    REF_BANDWIDTH_MARGIN,
     ProbeCalibrationFit,
     apply_probe_calibration,
     find_lag,
@@ -156,6 +157,117 @@ class TestFindLag:
         lag_s, corr = find_lag(base, T_ref, fs)
         np.testing.assert_allclose(lag_s, -shift / fs, atol=1 / fs)
         assert corr > 0.9
+
+
+def _counts_from_log_R(
+    log_R: np.ndarray,
+    a: float,
+    b: float,
+    g: float,
+    e_b: float,
+    adc_fs: float,
+    adc_bits: int,
+) -> np.ndarray:
+    """Inverse of log_r_from_counts: raw counts that convert to log_R exactly."""
+    R = np.exp(log_R)
+    Z = (1 - R) / (1 + R)
+    return a + b * Z / ((adc_fs / 2**adc_bits) * 2 / (g * e_b))
+
+
+class TestZeroLagEdgeCase:
+    """A lag estimate landing exactly at zero (e.g. a reference with no
+    real timing offset from the probe -- more likely with a heavily
+    smoothed/coarse reference) must not crash. Regression for a bug in the
+    T_ref-alignment branch that only special-cased lag_samples > 0, calling
+    _lag_filter(T_ref, 0) for lag_samples == 0 and indexing out of bounds
+    (_lag_filter assumes a strictly positive delay)."""
+
+    def _make_ds(self, n: int = 3000, fs: float = 64.0) -> xr.Dataset:
+        rng = np.random.default_rng(0)
+        t = np.arange(n) / fs
+        T_true = (
+            10.0 + 2.0 * np.sin(2 * np.pi * 0.05 * t) + 0.01 * rng.standard_normal(n)
+        )
+        # Raw counts that convert (via the real electronics/Steinhart-Hart
+        # constants) to exactly T_true -- the "probe" and "reference" are
+        # then identical, guaranteeing find_lag's cross-correlation peaks
+        # at exactly zero.
+        log_R = BETA_1 * (1 / (T_true + 273.15) - 1 / T_0)
+        counts = _counts_from_log_R(log_R, A, B, G, E_B, ADC_FS, ADC_BITS)
+
+        ds = xr.Dataset(
+            {
+                "T1": ("t_slow", T_true.astype("f4")),
+                "T1_counts": ("t_slow", counts),
+                "aux_temperature": ("t_slow", T_true),
+                "W_smooth": ("t_slow", np.full(n, 0.5)),
+                "P_smooth": ("t_slow", np.full(n, 20.0)),
+                "fs_slow": fs,
+            },
+            coords={"t_slow": t},
+            attrs={"instrument_sn": "142"},
+        )
+        ds["T1"].attrs = {
+            "cal_a": str(A),
+            "cal_b": str(B),
+            "cal_g": str(G),
+            "cal_e_b": str(E_B),
+            "cal_adc_fs": str(ADC_FS),
+            "cal_adc_bits": str(ADC_BITS),
+            "cal_t_0": str(T_0),
+            "cal_beta_1": str(BETA_1),
+            "cal_sn": "SYN1",
+        }
+        return ds
+
+    def test_zero_lag_is_a_reachable_find_lag_result(self):
+        # Confirms lag_samples == 0 is a real, reachable case (a perfectly
+        # correlated, unshifted pair of signals) -- not a hypothetical one
+        # -- before the other two tests force it through the full pipeline.
+        ds = self._make_ds()
+        lag_s, corr = find_lag(ds["T1"].values, ds["aux_temperature"].values, 64.0)
+        assert lag_s == 0.0
+        assert corr > 0.99
+
+    def test_fit_does_not_crash_on_exact_zero_lag(self, monkeypatch):
+        # fit_probe_calibration's own internal thermal-response-matching
+        # filter has some phase lag of its own, so it doesn't reliably land
+        # exactly on lag_samples == 0 for the ds above -- pin find_lag's
+        # result directly to exercise that exact branch deterministically.
+        import pyturb.fp07_calibration as fp07mod
+
+        monkeypatch.setattr(fp07mod, "find_lag", lambda *a, **k: (0.0, 0.99))
+        ds = self._make_ds()
+        config = ProfileConfig()
+        fit = fit_probe_calibration(
+            ds,
+            "T1",
+            config,
+            fit_file="synthetic",
+            profile_index=0,
+            ref="aux_temperature",
+            order=1,
+        )
+        assert fit.lag_s == 0.0
+        np.testing.assert_allclose(fit.new_T_0, T_0, rtol=1e-3)
+        np.testing.assert_allclose(fit.new_beta_1, BETA_1, rtol=1e-2)
+
+    def test_fit_multi_does_not_crash_on_exact_zero_lag(self, monkeypatch):
+        import pyturb.fp07_calibration as fp07mod
+
+        monkeypatch.setattr(fp07mod, "find_lag", lambda *a, **k: (0.0, 0.99))
+        ds = self._make_ds()
+        config = ProfileConfig()
+        fit = fit_probe_calibration_multi(
+            [(0, ds)],
+            "T1",
+            config,
+            fit_file="synthetic",
+            ref="aux_temperature",
+            order=1,
+        )
+        assert fit.lag_s == 0.0
+        np.testing.assert_allclose(fit.new_T_0, T_0, rtol=1e-3)
 
 
 class TestReportIO:
@@ -332,6 +444,116 @@ class TestFitProbeCalibrationMulti:
         stripped = [(pidx, pds.drop_vars(["T1_counts"])) for pidx, pds in profile_list]
         with pytest.raises(ValueError, match="no usable profiles"):
             fit_probe_calibration_multi(stripped, "T1", config, fit_file=PFILE.name)
+
+
+class TestReferenceBandwidthCap:
+    """ref_fs caps the thermal-matching filter and lag-smoothing cutoff to
+    what a discretely-sampled external reference (e.g. a 1 Hz glider CTD)
+    can actually resolve -- see REF_BANDWIDTH_MARGIN's docstring. Spies on
+    _matching_filter/find_lag to check the exact cutoff each was called
+    with, rather than inferring it indirectly from the fit result."""
+
+    def _spy(self, monkeypatch):
+        import pyturb.fp07_calibration as fp07mod
+
+        calls: dict = {}
+        orig_matching = fp07mod._matching_filter
+        orig_find_lag = fp07mod.find_lag
+
+        def spy_matching(C, fs, f_tc):
+            calls["fc"] = f_tc
+            return orig_matching(C, fs, f_tc)
+
+        def spy_find_lag(T, T_ref, fs, smooth_hz=4.0, **kwargs):
+            calls["smooth_hz"] = smooth_hz
+            return orig_find_lag(T, T_ref, fs, smooth_hz=smooth_hz, **kwargs)
+
+        monkeypatch.setattr(fp07mod, "_matching_filter", spy_matching)
+        monkeypatch.setattr(fp07mod, "find_lag", spy_find_lag)
+        return calls
+
+    def test_no_ref_fs_leaves_smoothing_at_default(self, prepared_profile, monkeypatch):
+        ds, config = prepared_profile
+        calls = self._spy(monkeypatch)
+        fit_probe_calibration(
+            ds, "T1", config, fit_file=PFILE.name, profile_index=0, order=1
+        )
+        assert calls["smooth_hz"] == 4.0
+
+    def test_large_ref_fs_does_not_change_the_cutoff(
+        self, prepared_profile, monkeypatch
+    ):
+        ds, config = prepared_profile
+        calls_uncapped = self._spy(monkeypatch)
+        fit_probe_calibration(
+            ds, "T1", config, fit_file=PFILE.name, profile_index=0, order=1
+        )
+        fc_uncapped = calls_uncapped["fc"]
+
+        calls_capped = self._spy(monkeypatch)
+        fit_probe_calibration(
+            ds,
+            "T1",
+            config,
+            fit_file=PFILE.name,
+            profile_index=0,
+            order=1,
+            ref_fs=1000.0,
+        )
+        assert calls_capped["fc"] == pytest.approx(fc_uncapped)
+        assert calls_capped["smooth_hz"] == 4.0
+
+    def test_small_ref_fs_caps_matching_filter_and_lag_smoothing(
+        self, prepared_profile, monkeypatch
+    ):
+        ds, config = prepared_profile
+        calls = self._spy(monkeypatch)
+        fit_probe_calibration(
+            ds,
+            "T1",
+            config,
+            fit_file=PFILE.name,
+            profile_index=0,
+            order=1,
+            ref_fs=1.0,
+        )
+        assert calls["fc"] == pytest.approx(REF_BANDWIDTH_MARGIN * 1.0)
+        assert calls["smooth_hz"] == pytest.approx(REF_BANDWIDTH_MARGIN * 1.0)
+
+    def test_fit_still_succeeds_with_a_capped_reference(self, prepared_profile):
+        ds, config = prepared_profile
+        fit = fit_probe_calibration(
+            ds,
+            "T1",
+            config,
+            fit_file=PFILE.name,
+            profile_index=0,
+            order=1,
+            ref_fs=1.0,
+        )
+        assert np.isfinite(fit.new_T_0)
+        assert np.isfinite(fit.new_beta_1)
+
+    def test_ref_fs_threads_through_multi(self, two_profile_list, monkeypatch):
+        # fit_probe_calibration_multi recomputes fc per profile (each may
+        # have a different mean speed) -- confirm every call is capped, not
+        # just the first.
+        profile_list, config = two_profile_list
+        import pyturb.fp07_calibration as fp07mod
+
+        fc_calls: list[float] = []
+        orig_matching = fp07mod._matching_filter
+
+        def spy_matching(C, fs, f_tc):
+            fc_calls.append(f_tc)
+            return orig_matching(C, fs, f_tc)
+
+        monkeypatch.setattr(fp07mod, "_matching_filter", spy_matching)
+        fit_probe_calibration_multi(
+            profile_list, "T1", config, fit_file=PFILE.name, order=1, ref_fs=1.0
+        )
+        assert len(fc_calls) >= len(profile_list)
+        assert all(fc <= REF_BANDWIDTH_MARGIN * 1.0 + 1e-9 for fc in fc_calls)
 
 
 class TestApplyProbeCalibration:

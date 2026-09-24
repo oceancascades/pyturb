@@ -26,6 +26,7 @@ __all__ = [
     "load_auxiliary",
     "merge_auxiliary_data",
     "attach_auxiliary",
+    "infer_sample_rate",
 ]
 
 # Names of auxiliary variables once interpolated onto the profile.
@@ -80,6 +81,21 @@ def load_auxiliary(
             _log.info(f"Interpolated NaN values in auxiliary variable '{var}'")
 
     return aux_ds
+
+
+def infer_sample_rate(aux_ds: xr.Dataset, time_var: str = "time") -> float:
+    """Median sample rate (Hz) of an auxiliary dataset's time coordinate.
+
+    Used to tell in-situ FP07 calibration (:func:`pyturb.fp07_calibration.
+    fit_probe_calibration`'s ``ref_fs``) how coarsely a merged-in external
+    reference (e.g. a glider's ~1 Hz CTD) was actually sampled, since after
+    interpolation onto ``t_slow`` it no longer carries that information.
+    The median (not mean) is robust to the occasional dropped/duplicated
+    sample real instrument logs tend to have.
+    """
+    t = aux_ds[time_var].values.astype("datetime64[ns]").astype("int64") / 1e9
+    dt = float(np.median(np.diff(t)))
+    return 1.0 / dt
 
 
 def merge_auxiliary_data(

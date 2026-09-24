@@ -224,6 +224,157 @@ class TestCalibrateFp07Commands:
         assert not (before_a == after_a).all()
         assert not (before_b == after_b).all()
 
+    def _make_aux_glider_file(
+        self, tmp_path: Path, converted: Path, rate_hz: float = 1.0
+    ) -> Path:
+        """A synthetic external-CTD aux file (e.g. a glider's), built by
+        decimating the converted file's own JAC_T -- self-consistent
+        (perfectly correlated with truth, just coarser) so it's a
+        realistic --aux-temp source for testing the --aux/--ref/--ref-fs
+        wiring without needing a real glider file.
+        """
+        ds = xr.load_dataset(converted, decode_times=True)
+        fs_slow = float(ds.attrs["fs_slow"])
+        step = max(1, round(fs_slow / rate_hz))
+        decimated = ds.isel(t_slow=slice(0, None, step))
+        aux = xr.Dataset(
+            {"temperature": ("time", decimated["JAC_T"].values)},
+            coords={"time": decimated["t_slow"].values},
+        )
+        aux_path = tmp_path / "aux_glider.nc"
+        aux.to_netcdf(aux_path)
+        return aux_path
+
+    def test_fit_with_aux_reference(self, tmp_path):
+        # No onboard JAC_T-equivalent (e.g. a MicroRider on a glider) --
+        # --aux/--aux-temp supplies the reference instead.
+        converted = self._convert(tmp_path)
+        aux_path = self._make_aux_glider_file(tmp_path, converted)
+        report = tmp_path / "cal_aux.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+                "--aux",
+                str(aux_path),
+                "--aux-temp",
+                "temperature",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        text = report.read_text()
+        assert "reference: aux_temperature" in text
+        assert "T1" in text
+
+    def test_fit_requires_aux_temp_with_aux(self, tmp_path):
+        converted = self._convert(tmp_path)
+        aux_path = self._make_aux_glider_file(tmp_path, converted)
+        report = tmp_path / "cal.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+                "--aux",
+                str(aux_path),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "--aux-temp" in result.output
+
+    def test_fit_explicit_ref_overrides_aux_default(self, tmp_path):
+        # An explicit --ref must win even when --aux is also given.
+        converted = self._convert(tmp_path)
+        aux_path = self._make_aux_glider_file(tmp_path, converted)
+        report = tmp_path / "cal.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+                "--aux",
+                str(aux_path),
+                "--aux-temp",
+                "temperature",
+                "--ref",
+                "JAC_T",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "reference: JAC_T" in report.read_text()
+
+    def test_fit_accepts_explicit_ref_fs_override(self, tmp_path):
+        converted = self._convert(tmp_path)
+        aux_path = self._make_aux_glider_file(tmp_path, converted)
+        report = tmp_path / "cal.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "fit",
+                str(converted),
+                "--profile",
+                "0",
+                "--order",
+                "1",
+                "-o",
+                str(report),
+                "--aux",
+                str(aux_path),
+                "--aux-temp",
+                "temperature",
+                "--ref-fs",
+                "2.0",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_auto_with_aux_reference(self, tmp_path):
+        file_a = self._convert(tmp_path, "a.nc")
+        aux_path = self._make_aux_glider_file(tmp_path, file_a)
+        report = tmp_path / "auto_aux.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "calibrate-fp07",
+                "auto",
+                str(file_a),
+                "--order",
+                "1",
+                "--overwrite",
+                "-r",
+                str(report),
+                "--aux",
+                str(aux_path),
+                "--aux-temp",
+                "temperature",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "reference: aux_temperature" in report.read_text()
+
 
 class TestCalibrateJacCCommand:
     """Test the calibrate-jac-c CLI command."""
