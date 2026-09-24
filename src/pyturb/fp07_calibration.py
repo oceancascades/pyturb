@@ -10,6 +10,15 @@ Fitting regresses the resistance-ratio log_R (computed directly from raw
 counts via the electronics constants, unaffected by any prior clipping)
 against the reference. Applying rebuilds gradT1/gradT2 from scratch with the
 new coefficients via ``deconvolve``/``make_gradT``, exact and lossless.
+
+``ref`` need not be an onboard sensor (e.g. JAC_T) -- any column on the
+profile's ``t_slow`` axis works, including an external CTD's temperature
+merged in via ``pyturb.auxiliary.attach_auxiliary`` (as ``aux_temperature``),
+for platforms with no onboard reference (e.g. a MicroRider on a glider). If
+that reference is itself discretely sampled well below the FP07's slow-
+channel rate (e.g. a 1 Hz glider CTD), pass ``ref_fs`` so the comparison is
+capped to what the reference can actually resolve -- see ``ref_fs``'s
+docstring below.
 """
 
 import logging
@@ -228,6 +237,15 @@ MAX_PLAUSIBLE_T0_K = 350.0
 MIN_PLAUSIBLE_BETA1 = 1500.0
 MAX_PLAUSIBLE_BETA1 = 6000.0
 
+# Fraction of a discretely-sampled reference's Nyquist frequency (ref_fs/2)
+# used as the matching-filter/lag-smoothing cutoff cap when ref_fs is given.
+# A reference like a 1 Hz glider CTD has no real content above 0.5 Hz;
+# comparing the FP07 against it at full bandwidth would fit/lag-correlate
+# against interpolation artifacts rather than the reference's actual signal.
+# Comfortably below Nyquist (rather than right at it) leaves margin for the
+# single-pole filter's gentle rolloff.
+REF_BANDWIDTH_MARGIN = 0.4
+
 
 def fit_is_plausible(fit: ProbeCalibrationFit) -> bool:
     """False if the fitted T_0/beta_1 are outside a physically plausible
@@ -262,6 +280,7 @@ def fit_probe_calibration(
     f_tc: float = 0.73,
     reference_speed: float = 0.62,
     min_pressure_dbar: float = 1.0,
+    ref_fs: Optional[float] = None,
 ) -> ProbeCalibrationFit:
     """Fit ``probe``'s (e.g. ``"T1"``) in-situ calibration against ``ref``.
 
@@ -275,6 +294,19 @@ def fit_probe_calibration(
     surface/out-of-water samples shouldn't be allowed to pull the fit
     (lag-finding still uses the full segment, which needs continuous data
     for its cross-correlation/filtering to be meaningful).
+
+    ``ref_fs`` : the reference's own native sample rate (Hz), if it was
+        discretely sampled well below ``profile_ds``'s slow-channel rate and
+        then upsampled onto ``t_slow`` (e.g. a 1 Hz external CTD merged in
+        via ``attach_auxiliary`` -- pass the aux dataset's rate). Caps the
+        thermal-response-matching filter (normally scaled to the reference
+        sensor's own physical response, e.g. JAC_T's) at
+        ``REF_BANDWIDTH_MARGIN * ref_fs`` so the fit and lag estimate aren't
+        corrupted by content the reference can't actually resolve -- the
+        upsampled reference is piecewise-linear between its real samples and
+        has no genuine signal above its own Nyquist frequency. ``None``
+        (default) leaves the existing speed-scaled behavior unchanged, for a
+        continuously-sampled onboard reference like JAC_T.
     """
     counts_name = f"{probe}_counts"
     if counts_name not in profile_ds:
@@ -306,11 +338,19 @@ def fit_probe_calibration(
 
     W_mean = float(np.nanmean(np.abs(W)))
     fc = f_tc * np.sqrt(W_mean / reference_speed)
+    lag_smooth_hz = 4.0
+    if ref_fs is not None and REF_BANDWIDTH_MARGIN * ref_fs < fc:
+        fc = REF_BANDWIDTH_MARGIN * ref_fs
+        lag_smooth_hz = min(lag_smooth_hz, fc)
     T_filtered = _matching_filter(T_unclipped, fs, fc)
 
-    lag_s, lag_corr = find_lag(T_filtered, T_ref, fs)
+    lag_s, lag_corr = find_lag(T_filtered, T_ref, fs, smooth_hz=lag_smooth_hz)
     lag_samples = -lag_s * fs  # shift T forward by |lag| to align with T_ref
-    if lag_samples > 0:
+    # >= 0, not > 0: lag_samples == 0 (a lag estimate landing exactly at zero
+    # -- e.g. a heavily-smoothed, near-zero-lag reference) must leave T_ref
+    # untouched too, matching _shift's own zero-lag no-op; _lag_filter(x, 0)
+    # would otherwise index out of bounds (it only expects a positive delay).
+    if lag_samples >= 0:
         T_ref_aligned = T_ref
     else:
         T_ref_aligned = _lag_filter(T_ref, -lag_samples)
@@ -389,6 +429,7 @@ def fit_probe_calibration_multi(
     f_tc: float = 0.73,
     reference_speed: float = 0.62,
     min_pressure_dbar: float = 1.0,
+    ref_fs: Optional[float] = None,
 ) -> ProbeCalibrationFit:
     """Fit ``probe``'s in-situ calibration aggregated across every profile in
     ``profile_list``, instead of a single best one.
@@ -414,6 +455,10 @@ def fit_probe_calibration_multi(
     :func:`pyturb.profile.split_into_profiles`. ``profile_index`` on the
     returned fit is ``-1``, a sentinel meaning "aggregate of multiple
     profiles" (see :func:`apply_probe_calibration`'s provenance attrs).
+
+    ``ref_fs`` : see :func:`fit_probe_calibration` -- applied per-profile
+    (each may have a different mean speed, hence a different uncapped
+    thermal-matching cutoff).
     """
     counts_name = f"{probe}_counts"
 
@@ -456,9 +501,13 @@ def fit_probe_calibration_multi(
 
         W_mean = float(np.nanmean(np.abs(W)))
         fc = f_tc * np.sqrt(W_mean / reference_speed)
+        lag_smooth_hz = 4.0
+        if ref_fs is not None and REF_BANDWIDTH_MARGIN * ref_fs < fc:
+            fc = REF_BANDWIDTH_MARGIN * ref_fs
+            lag_smooth_hz = min(lag_smooth_hz, fc)
         T_filtered = _matching_filter(T_unclipped, fs, fc)
 
-        lag_s, lag_corr = find_lag(T_filtered, T_ref, fs)
+        lag_s, lag_corr = find_lag(T_filtered, T_ref, fs, smooth_hz=lag_smooth_hz)
         # A flatlined/non-finite segment gives a non-finite lag; drop it so
         # it cannot poison the median.
         if not np.isfinite(lag_s):
@@ -480,7 +529,8 @@ def fit_probe_calibration_multi(
     log_R_fit_parts, T_ref_fit_parts = [], []
     for log_R, T_ref, T_stored, fs, _fc, P in per_profile:
         lag_samples = -median_lag_s * fs
-        T_ref_aligned = T_ref if lag_samples > 0 else _lag_filter(T_ref, -lag_samples)
+        # >= 0: see the matching comment in fit_probe_calibration.
+        T_ref_aligned = T_ref if lag_samples >= 0 else _lag_filter(T_ref, -lag_samples)
         log_R_aligned_p = _shift(log_R, lag_samples)
         log_R_parts.append(log_R_aligned_p)
         T_ref_parts.append(T_ref_aligned)
