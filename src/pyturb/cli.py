@@ -342,7 +342,13 @@ def eps(
         str,
         typer.Option(
             "--speed",
-            help="Speed variable name. If not found, estimates from pressure.",
+            help=(
+                "Onboard speed variable name to look for in the converted "
+                "file. If not found, speed is estimated from the pressure "
+                "derivative without pitch correction (see "
+                "--pitch-correction/--aoa). Must not be combined with "
+                "--aux-speed, which takes priority when given."
+            ),
             show_default=True,
         ),
     ] = "W",
@@ -367,7 +373,7 @@ def eps(
         typer.Option(
             "--aux",
             "-a",
-            help="Auxiliary NetCDF file with lat, lon, T, S, density time series",
+            help="Auxiliary NetCDF file with lat, lon, T, S, density, speed time series",
         ),
     ] = None,
     aux_lat: Annotated[
@@ -407,6 +413,20 @@ def eps(
         typer.Option(
             "--aux-dens",
             help="Auxiliary density variable name (optional). If omitted, auxiliary density will NOT be applied.",
+            show_default=True,
+        ),
+    ] = None,
+    aux_speed: Annotated[
+        str | None,
+        typer.Option(
+            "--aux-speed",
+            help=(
+                "Auxiliary speed variable name (optional), e.g. a calibrated "
+                "glider flight-model speed for a platform with no onboard "
+                "speed sensor. If given, takes priority over --speed; error "
+                "if both an auxiliary and an onboard speed variable are "
+                "present. If omitted, auxiliary speed will NOT be applied."
+            ),
             show_default=True,
         ),
     ] = None,
@@ -599,6 +619,7 @@ def eps(
         aux_temperature=aux_temp,
         aux_salinity=aux_sal,
         aux_density=aux_dens,
+        aux_speed=aux_speed,
         accel_clean=accel_clean,
         emc_clean=emc_clean,
         compute_thermo=thermo,
@@ -686,7 +707,12 @@ def profiles(
         str,
         typer.Option(
             "--speed",
-            help="Speed variable name. If not found, estimates from pressure.",
+            help=(
+                "Onboard speed variable name to look for in the converted "
+                "file. If not found, speed is estimated from the pressure "
+                "derivative without pitch correction (see "
+                "--pitch-correction/--aoa)."
+            ),
             show_default=True,
         ),
     ] = "W",

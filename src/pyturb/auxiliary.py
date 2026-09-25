@@ -36,6 +36,7 @@ AUX_VARS = (
     "aux_temperature",
     "aux_salinity",
     "aux_density",
+    "aux_speed",
 )
 
 
@@ -70,7 +71,12 @@ def load_auxiliary(
     aux_ds = aux_ds.dropna(dim="time", subset=["time"]).sortby("time")
 
     aux_vars = [config.aux_latitude, config.aux_longitude]
-    opt_vars = [config.aux_temperature, config.aux_salinity, config.aux_density]
+    opt_vars = [
+        config.aux_temperature,
+        config.aux_salinity,
+        config.aux_density,
+        config.aux_speed,
+    ]
     aux_vars.extend(v for v in opt_vars if v is not None)
 
     for var in aux_vars:
@@ -133,6 +139,8 @@ def merge_auxiliary_data(
         var_mappings.append((config.aux_salinity, "aux_salinity"))
     if config.aux_density is not None:
         var_mappings.append((config.aux_density, "aux_density"))
+    if config.aux_speed is not None:
+        var_mappings.append((config.aux_speed, "aux_speed"))
 
     for aux_var, output_var in var_mappings:
         if aux_var in aux_ds:

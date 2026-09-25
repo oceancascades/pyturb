@@ -139,6 +139,7 @@ class ProfileConfig:
         None  # Salinity variable in auxiliary dataset (opt-in)
     )
     aux_density: Optional[str] = None  # Density variable in auxiliary dataset (opt-in)
+    aux_speed: Optional[str] = None  # Speed variable in auxiliary dataset (opt-in)
 
     # VMP-style GPS: a vertical profiler tracked by a single ship/surface GPS
     # fix per profile (not a continuously-tracked position), so it gets one
@@ -343,7 +344,9 @@ def prepare_profile(
 
     Performs only the slow-channel preprocessing:
       1. Low-pass filters the pressure data.
-      2. Smooths the speed variable, or estimates it from pressure if absent.
+      2. Resolves the speed variable and smooths it, or estimates speed from
+         the pressure derivative if none is available (see the speed source
+         priority below).
 
     Probe signals (shear, gradT) are left in their raw calibrated units. The
     velocity normalisation that converts them to physical gradients is applied
@@ -351,6 +354,16 @@ def prepare_profile(
     ``_compute_shear_spectra_with_cleaning``). Keeping the time series raw
     means despiking and high-pass filtering operate on stationary signals
     whose amplitude does not balloon near turnarounds.
+
+    Speed source priority: an auxiliary speed (``aux_speed``, merged in via
+    :func:`pyturb.auxiliary.attach_auxiliary` -- e.g. a calibrated glider
+    flight-model speed, for a platform like a MicroRider with no onboard
+    speed sensor) takes priority over the onboard ``config.speed`` variable
+    when both are present, since it's usually the better estimate for a
+    platform whose pressure-derivative fallback is a poor proxy for total
+    flow speed (e.g. a glider's shallow glide angle). Having both present is
+    treated as a configuration error rather than silently picking one --
+    raises ``ValueError``.
 
     Parameters
     ----------
@@ -401,18 +414,29 @@ def prepare_profile(
     else:
         raise ValueError(f"Pressure variable '{config.pressure}' not found in dataset")
 
-    if config.speed in ds:
-        # Speed variable exists - smooth it with gap-aware filtering
-        ds[config.speed_smooth] = (
-            "t_slow",
-            gap_aware_sosfiltfilt(
-                sos,
-                ds[config.speed].values,
-                t_slow,
-                gap_threshold=config.gap_threshold,
-                gap_factor=config.gap_factor,
-            ),
+    aux_speed_present = "aux_speed" in ds
+    onboard_speed_present = config.speed in ds
+    if aux_speed_present and onboard_speed_present:
+        raise ValueError(
+            f"Both an onboard speed variable ('{config.speed}') and an "
+            "auxiliary speed variable ('aux_speed', from --aux-speed) are "
+            "present -- pass only one to resolve the ambiguity."
         )
+
+    def _smooth(values: np.ndarray) -> np.ndarray:
+        return gap_aware_sosfiltfilt(
+            sos,
+            values,
+            t_slow,
+            gap_threshold=config.gap_threshold,
+            gap_factor=config.gap_factor,
+        )
+
+    if aux_speed_present:
+        _log.info("Using auxiliary speed variable 'aux_speed'")
+        ds[config.speed_smooth] = ("t_slow", _smooth(ds["aux_speed"].values))
+    elif onboard_speed_present:
+        ds[config.speed_smooth] = ("t_slow", _smooth(ds[config.speed].values))
     else:
         _log.info(
             f"Speed variable '{config.speed}' not found, "
