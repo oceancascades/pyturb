@@ -9,15 +9,14 @@ from typing import Optional, Union
 
 import gsw  # type: ignore[import]
 import numpy as np
+import pandas as pd
 import xarray as xr
 
-from . import __version__
+from . import __version__, qc
 from .auxiliary import attach_auxiliary, load_auxiliary
 from .io import load_profile_nc, resolve_input_files
 from .profile import (
-    _EPS_AGREEMENT_FACTOR,
     ProfileConfig,
-    _combine_eps_pair,
     prepare_profile,
     process_profile,
     split_into_profiles,
@@ -233,7 +232,7 @@ def batch_compute_epsilon(
     """Batch compute epsilon from converted NetCDF files.
 
     This function processes raw p2nc output by:
-    1. Detecting multiple profiles within each file (for glider data)
+    1. Detecting multiple profiles within each file
     2. Smoothing speed and pressure data
     3. Scaling shear probes by 1/U^2 and gradT probes by 1/U
     4. Computing epsilon using the Nasmyth spectrum fit
@@ -301,146 +300,6 @@ def batch_compute_epsilon(
     )
 
 
-_QC_SENTINEL_EXCLUDED = np.int8(-1)
-_QC_MISSING = np.int8(9)
-
-
-def _mask_low_quality_eps(
-    ds: xr.Dataset,
-    probes: tuple[str, ...],
-    questionable_thresh: float,
-    bad_thresh: float,
-) -> xr.Dataset:
-    """NaN out epsilon (and sentinel its QC) using separate questionable / bad
-    rejection thresholds.
-
-    A QC-flagged questionable (qc=2) window is excluded when its epsilon
-    exceeds ``questionable_thresh``; a QC-flagged bad (qc=4) window is
-    excluded when its epsilon exceeds ``bad_thresh``. Below the respective
-    threshold the value is kept (low-epsilon flagged windows are usually
-    noise-floor artifacts rather than instrument problems). The QC sentinel
-    ``-1`` is a stand-in for "excluded from binning"; it is mapped back to
-    9 (missing) after groupby_bins. Using a sentinel lets the per-bin ``max``
-    aggregator ignore excluded windows naturally (any kept flag is >= 0 and
-    dominates).
-    """
-    for probe in probes:
-        eps_name = f"eps_{probe}"
-        qc_name = f"eps_{probe}_qc"
-        if eps_name not in ds or qc_name not in ds:
-            continue
-        eps = ds[eps_name].values.copy()
-        qc = ds[qc_name].values.astype("i1", copy=True)
-        excluded = ((qc == 2) & (eps > questionable_thresh)) | (
-            (qc == 4) & (eps > bad_thresh)
-        )
-        if not excluded.any():
-            continue
-        eps[excluded] = np.nan
-        qc[excluded] = _QC_SENTINEL_EXCLUDED
-        ds[eps_name] = (ds[eps_name].dims, eps)
-        ds[qc_name] = (ds[qc_name].dims, qc)
-    return ds
-
-
-def _restore_qc_missing(ds: xr.Dataset, qc_vars: list[str]) -> xr.Dataset:
-    """Map sentinel ``-1`` and empty-bin NaN values in QC vars back to 9.
-
-    After groupby_bins.max(), QC vars may contain:
-      * -1 (sentinel): all contributing windows were excluded → missing
-      * NaN: the bin had no contributing windows at all → missing
-      * one of {0, 1, 2, 4, 9}: a real flag from at least one window
-    """
-    for v in qc_vars:
-        if v not in ds:
-            continue
-        arr = ds[v].values
-        out = np.where(np.isnan(arr) | (arr == _QC_SENTINEL_EXCLUDED), _QC_MISSING, arr)
-        ds[v] = (ds[v].dims, out.astype("i1"))
-    return ds
-
-
-def _attach_combined_eps(ds: xr.Dataset) -> xr.Dataset:
-    """Build ``eps`` and ``eps_qc`` from binned ``eps_1``/``eps_2`` (+ QCs).
-
-    No-op if either probe's eps or QC variable is missing from the dataset.
-    """
-    needed = ("eps_1", "eps_2", "eps_1_qc", "eps_2_qc")
-    if any(v not in ds for v in needed):
-        return ds
-    e1 = ds["eps_1"].values
-    e2 = ds["eps_2"].values
-    q1 = ds["eps_1_qc"].values.astype("i1")
-    q2 = ds["eps_2_qc"].values.astype("i1")
-    eps, eps_qc = _combine_eps_pair(e1, e2, q1, q2)
-    dims = ds["eps_1"].dims
-    ds["eps"] = (dims, eps)
-    ds["eps"].attrs = {
-        "long_name": "Best epsilon estimate combined from eps_1 and eps_2",
-        "units": "W kg-1",
-        "comment": (
-            "Mean of eps_1 and eps_2 where they agree within a factor of "
-            f"{_EPS_AGREEMENT_FACTOR:g}; element-wise minimum otherwise. "
-            "Falls back to the single surviving probe when one is missing."
-        ),
-    }
-    ds["eps_qc"] = (dims, eps_qc)
-    ds["eps_qc"].attrs = {
-        "long_name": "Combined QC flag for eps",
-        "flag_values": np.array([0, 1, 2, 4, 9], dtype="i1"),
-        "flag_meanings": "unknown good questionable bad missing",
-        "valid_min": np.int8(0),
-        "valid_max": np.int8(9),
-        "comment": (
-            "Per-bin max of eps_1_qc and eps_2_qc where both probes have a "
-            "finite epsilon; the surviving probe's flag when one is missing; "
-            "9 (missing) when both are missing."
-        ),
-    }
-    return ds
-
-
-def _attach_combined_chi(ds: xr.Dataset) -> xr.Dataset:
-    """Build ``chi`` and ``chi_qc`` from binned ``chi_1``/``chi_2`` (+ QCs).
-
-    Uses the same combination rule as epsilon. No-op if either probe's chi
-    or QC variable is missing from the dataset.
-    """
-    needed = ("chi_1", "chi_2", "chi_1_qc", "chi_2_qc")
-    if any(v not in ds for v in needed):
-        return ds
-    c1 = ds["chi_1"].values
-    c2 = ds["chi_2"].values
-    q1 = ds["chi_1_qc"].values.astype("i1")
-    q2 = ds["chi_2_qc"].values.astype("i1")
-    chi, chi_qc = _combine_eps_pair(c1, c2, q1, q2)
-    dims = ds["chi_1"].dims
-    ds["chi"] = (dims, chi)
-    ds["chi"].attrs = {
-        "long_name": "Best chi estimate combined from chi_1 and chi_2",
-        "units": "K2 s-1",
-        "comment": (
-            "Mean of chi_1 and chi_2 where they agree within a factor of "
-            f"{_EPS_AGREEMENT_FACTOR:g}; element-wise minimum otherwise. "
-            "Falls back to the single surviving probe when one is missing."
-        ),
-    }
-    ds["chi_qc"] = (dims, chi_qc)
-    ds["chi_qc"].attrs = {
-        "long_name": "Combined QC flag for chi",
-        "flag_values": np.array([0, 1, 2, 4, 9], dtype="i1"),
-        "flag_meanings": "unknown good questionable bad missing",
-        "valid_min": np.int8(0),
-        "valid_max": np.int8(9),
-        "comment": (
-            "Per-bin max of chi_1_qc and chi_2_qc where both probes have a "
-            "finite chi; the surviving probe's flag when one is missing; "
-            "9 (missing) when both are missing."
-        ),
-    }
-    return ds
-
-
 def _depth_from_pressure(
     pressure: np.ndarray,
     lat: Optional[np.ndarray],
@@ -485,7 +344,9 @@ def _bin_var_group(
 ) -> Optional[xr.Dataset]:
     """Bin var_names (all on time_dim) against depth_bins using pressure_name.
 
-    QC vars (suffix "_qc") take the worst (max) flag in the bin; everything
+    Vars with a ``<var>_qc`` companion are averaged over the bin's best
+    windows only (see ``qc.select_best_windows``), with ``<var>_n`` counting
+    them. QC vars take the worst (max) flag among the windows used; everything
     else is mean-averaged. Output vars are renamed per rename_map.
     """
     if pressure_name not in ds:
@@ -505,6 +366,13 @@ def _bin_var_group(
         ds_subset["time_var"] = (time_dim, _time_to_epoch_seconds(ds, time_dim))
         present = present + ["time_var"]
 
+    value_vars = [v for v in present if f"{v}_qc" in present]
+    codes = np.asarray(pd.cut(bin_values, depth_bins).codes)
+    ds_subset = qc.select_best_windows(
+        ds_subset, value_vars, codes, len(depth_bins) - 1
+    )
+    count_vars = [f"{v}_n" for v in value_vars]
+
     qc_vars = [v for v in present if v.endswith("_qc")]
     mean_vars = [v for v in present if v not in qc_vars]
 
@@ -519,8 +387,13 @@ def _bin_var_group(
         ds_binned = xr.merge([ds_binned, grouped_max.max()])
         # Post-bin: restore sentinel -1 (all windows excluded) and any
         # empty-bin NaN to 9 (missing) so the on-disk QC is always a valid
-        # IODE flag in {0, 1, 2, 4, 9}.
-        ds_binned = _restore_qc_missing(ds_binned, qc_vars)
+        # IODE flag in {1, 2, 3, 4, 9}.
+        ds_binned = qc.restore_qc_missing(ds_binned, qc_vars)
+    if count_vars:
+        counts = ds_subset[count_vars].groupby_bins(
+            ds_subset[bin_var_name], bins=depth_bins
+        )
+        ds_binned = xr.merge([ds_binned, counts.sum().fillna(0).astype("i4")])
 
     bin_name = f"{bin_var_name}_bins"
     ds_binned[bin_name] = np.array(
@@ -561,7 +434,7 @@ def _bin_single_profile(
     default_latitude : float
         Default latitude for pressure-to-depth conversion if not in data.
     questionable_thresh : float, default 1e-7
-        Epsilon threshold above which qc=2 (questionable) windows are dropped
+        Epsilon threshold above which qc=3 (questionable) windows are dropped
         before binning. Pass ``inf`` to keep them all.
     bad_thresh : float, default 1e-9
         Epsilon threshold above which qc=4 (bad) windows are dropped before
@@ -578,7 +451,9 @@ def _bin_single_profile(
 
         # Pre-bin masking: drop high-eps windows flagged questionable/bad
         # (those are likely real instrument problems, not noise-floor noise).
-        ds = _mask_low_quality_eps(ds, ("1", "2"), questionable_thresh, bad_thresh)
+        ds = qc.mask_low_quality_eps(
+            ds, ("eps_1", "eps_2", "eps"), questionable_thresh, bad_thresh
+        )
 
         coarse_vars = [v for v in variables if v in ds and f"{v}_hires" not in ds]
         hires_bases = [v for v in variables if f"{v}_hires" in ds]
@@ -623,10 +498,6 @@ def _bin_single_profile(
         ds_binned = (
             pieces[0] if len(pieces) == 1 else xr.merge(pieces, compat="override")
         )
-
-        # Build combined eps / eps_qc and chi / chi_qc from binned probe pairs.
-        ds_binned = _attach_combined_eps(ds_binned)
-        ds_binned = _attach_combined_chi(ds_binned)
 
         # Rename time_var back to time if it exists and add epoch units
         if "time_var" in ds_binned:
@@ -736,7 +607,7 @@ def bin_profiles(
     n_workers : int, optional
         Number of parallel workers. Default is number of CPU cores.
     questionable_thresh : float, default 1e-7
-        Drop qc=2 (questionable) windows whose epsilon exceeds this value
+        Drop qc=3 (questionable) windows whose epsilon exceeds this value
         before binning. Pass ``inf`` to keep them all.
     bad_thresh : float, default 1e-9
         Drop qc=4 (bad) windows whose epsilon exceeds this value before
@@ -757,10 +628,12 @@ def bin_profiles(
     >>> from pyturb.processing import bin_profiles
     >>> ds = bin_profiles('/path/to/eps_output/*.nc', output_file='binned.nc')
     """
-    # Default variables to bin. Names ending in "_qc" are aggregated with
-    # max (worst flag wins per bin); others with mean.
     if variables is None:
         variables = [
+            "eps",
+            "eps_qc",
+            "chi",
+            "chi_qc",
             "eps_1",
             "eps_2",
             "eps_1_fm",

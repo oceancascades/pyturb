@@ -11,6 +11,7 @@ import xarray as xr
 import yaml
 from profinder import find_profiles  # type: ignore[import]
 
+from . import qc
 from .conductivity import match_conductivity_to_temperature
 from .noise import _channel_calibration_params, thermistor_noise_phi
 from .shear import estimate_epsilon, viscosity
@@ -76,13 +77,13 @@ class ProfileConfig:
     # FM (figure of merit) thresholds for per-window QC.
     # FM = mad(log10(spectrum / Nasmyth)) * sqrt(dof_spec). Low FM = good
     # Nasmyth-shaped spectrum. FM <= fm_good -> qc=1 (good);
-    # fm_good < FM <= fm_bad -> qc=2 (questionable); FM > fm_bad -> qc=4 (bad).
+    # fm_good < FM <= fm_bad -> qc=3 (questionable); FM > fm_bad -> qc=4 (bad).
     # Speed-based and FM-based QC are combined by taking the higher flag.
     fm_good: float = 1.5
     fm_bad: float = 2.5
     # Despike fraction thresholds for per-window QC. The per-window fraction
     # of fast samples modified by despiking promotes the eps_N_qc flag for
-    # the matching shear probe: fraction > despike_frac_questionable -> 2,
+    # the matching shear probe: fraction > despike_frac_questionable -> 3,
     # fraction > despike_frac_bad -> 4. Combined with the speed and FM
     # contributions via max.
     despike_frac_questionable: float = 0.1
@@ -1469,32 +1470,26 @@ def _attach_window_scalars(
         ds[f"{probe}_range_frac"] = ("time", frac.astype("f4"))
         ds[f"{probe}_range_frac"].attrs = {
             "long_name": f"Fraction of {probe} raw samples outside "
-            f"[{_MIN_SANE_TEMP_C}, {_MAX_SANE_TEMP_C}] C",
+            f"[{qc.MIN_SANE_TEMP_C}, {qc.MAX_SANE_TEMP_C}] C",
             "units": "1",
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
         }
         confident = (fit_confident or {}).get(probe)
         qc_var = f"{probe}_qc"
-        ds[qc_var] = ("time", _compose_range_qc(frac, config, confident))
-        ds[qc_var].attrs = {
-            "long_name": f"QC flag for {probe}",
-            "flag_values": _QC_FLAG_VALUES,
-            "flag_meanings": _QC_FLAG_MEANINGS,
-            "valid_min": np.int8(0),
-            "valid_max": np.int8(9),
-            "comment": (
-                f"Composed from {probe}_range_frac -- the fraction of raw "
-                f"{probe} samples outside a physically sane seawater "
-                "temperature range in this window, e.g. from a calibration "
-                "extrapolated beyond its fitted range "
-                f"(questionable>{config.despike_frac_questionable}, "
-                f"bad>{config.despike_frac_bad}) -- and floored to bad if "
-                f"the calibration fit itself wasn't confident "
-                f"({probe}_fp07_confident=0; see fp07_calibration."
-                "fit_is_confident)."
-            ),
-        }
+        ds[qc_var] = ("time", qc.compose_range_qc(frac, config, confident))
+        ds[qc_var].attrs = qc.flag_attrs(
+            f"QC flag for {probe}",
+            f"Composed from {probe}_range_frac -- the fraction of raw "
+            f"{probe} samples outside a physically sane seawater "
+            "temperature range in this window, e.g. from a calibration "
+            "extrapolated beyond its fitted range "
+            f"(questionable>{config.despike_frac_questionable}, "
+            f"bad>{config.despike_frac_bad}) -- and floored to bad if "
+            f"the calibration fit itself wasn't confident "
+            f"({probe}_fp07_confident=0; see fp07_calibration."
+            "fit_is_confident).",
+        )
 
     return ds
 
@@ -1613,139 +1608,12 @@ def _compute_shear_spectra_with_cleaning(
     return ds, freq, spectra
 
 
-_QC_FLAG_VALUES = np.array([0, 1, 2, 4, 9], dtype="i1")
-_QC_FLAG_MEANINGS = "unknown good questionable bad missing"
-_QC_MISSING = np.int8(9)
-_EPS_AGREEMENT_FACTOR = 10.0
-
-# Broad, globally-safe bounds on seawater temperature. A T1/T2 value outside
-# this range usually indicates a calibration extrapolated beyond its fitted
-# range (e.g. applied to an anomalous profile) rather than real data.
-# calibrate-fp07's apply_probe_calibration applies the best available fit
-# as-is and does not mask this -- flagged via QC here instead, at the eps
-# step, per policy: don't destroy data, mark it untrustworthy and let the
-# consumer decide.
-_MIN_SANE_TEMP_C = -3.0
-_MAX_SANE_TEMP_C = 40.0
-
-
-def _temperature_range_mask(T: np.ndarray) -> np.ndarray:
-    """True where T is missing or outside the physically sane seawater range."""
-    return ~np.isfinite(T) | (T < _MIN_SANE_TEMP_C) | (T > _MAX_SANE_TEMP_C)
-
-
-def _compose_range_qc(
-    range_frac: np.ndarray,
-    config: ProfileConfig,
-    fit_confident: Optional[bool] = None,
-) -> np.ndarray:
-    """QC flag from the fraction of a temperature probe's raw samples that
-    fell outside the physically sane range within a window, floored to
-    "bad" if the calibration fit itself wasn't confident.
-
-      * fit_confident is False                 -> 4 (bad), regardless of
-        range_frac -- a fit that isn't confident (see fp07_calibration.
-        fit_is_confident) can produce values that look physically plausible
-        while still being substantially wrong; no per-sample range check
-        can catch that, so it's flagged from the fit's own quality instead.
-        fit_confident is None (never run through calibrate-fp07, or an
-        older file predating this attr) applies no such floor.
-      * range_frac > despike_frac_bad          -> 4 (bad)
-      * range_frac > despike_frac_questionable -> 2 (questionable)
-      * range_frac is NaN (no raw samples)     -> 9 (missing)
-      * otherwise                              -> 1 (good)
-    """
-    qc = np.ones(range_frac.shape, dtype="i1")
-    qc[range_frac > config.despike_frac_questionable] = 2
-    qc[range_frac > config.despike_frac_bad] = 4
-    qc[np.isnan(range_frac)] = 9
-    if fit_confident is False:
-        qc[qc != 9] = 4
-    return qc
-
-
-def _combine_eps_pair(
-    eps1: np.ndarray, eps2: np.ndarray, qc1: np.ndarray, qc2: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Combine two probe estimates into (eps, eps_qc).
-
-    eps:
-      * both finite & within factor of ``_EPS_AGREEMENT_FACTOR`` → mean
-      * both finite, disagreement larger → element-wise minimum
-      * exactly one finite → that value
-      * neither finite → NaN
-
-    eps_qc:
-      * both eps finite → max(qc1, qc2)
-      * exactly one finite → the surviving probe's qc
-      * neither finite → 9 (missing)
-    """
-    e1_ok = np.isfinite(eps1)
-    e2_ok = np.isfinite(eps2)
-    both = e1_ok & e2_ok
-
-    hi = np.fmax(eps1, eps2)
-    lo = np.fmin(eps1, eps2)
-    within = both & (hi <= _EPS_AGREEMENT_FACTOR * lo)
-
-    eps = np.where(
-        within,
-        0.5 * (eps1 + eps2),
-        np.where(both, lo, np.where(e1_ok, eps1, np.where(e2_ok, eps2, np.nan))),
-    )
-
-    eps_qc = np.full(eps1.shape, _QC_MISSING, dtype="i1")
-    only1 = e1_ok & ~e2_ok
-    only2 = e2_ok & ~e1_ok
-    eps_qc[only1] = qc1[only1]
-    eps_qc[only2] = qc2[only2]
-    eps_qc[both] = np.maximum(qc1[both], qc2[both])
-    return eps.astype("f4"), eps_qc
-
-
 def _dof_spec(params: dict) -> float:
     """Spectral degrees of freedom per Nuttall (1971) for 50%% FFT overlap."""
     n_fft = params["n_fft"]
     n_diss = params["n_diss"]
     num_of_ffts = 2 * (n_diss // n_fft) - 1
     return 1.9 * num_of_ffts
-
-
-def _compose_qc(
-    eps: np.ndarray,
-    fm: np.ndarray,
-    speed_bad: np.ndarray,
-    despike_frac: np.ndarray,
-    config: ProfileConfig,
-) -> np.ndarray:
-    """Combine speed, FM, and despike-fraction contributions into a per-window flag.
-
-    Precedence (max wins across the three contributions, then NaN-eps overrides as 9):
-      * FM <= fm_good                                           -> 1 (good)
-      * fm_good < FM <= fm_bad                                  -> 2 (questionable)
-      * FM > fm_bad                                             -> 4 (bad)
-      * speed below min_speed                                   -> 2 (questionable)
-      * despike_frac > despike_frac_questionable                -> 2 (questionable)
-      * despike_frac > despike_frac_bad                         -> 4 (bad)
-      * eps NaN                                                 -> 9 (missing, overrides)
-    """
-    qc_speed = np.zeros(eps.size, dtype="i1")
-    qc_speed[speed_bad] = 2
-
-    qc_fm = np.zeros(eps.size, dtype="i1")
-    # Comparisons against NaN are False, so FM=NaN leaves qc_fm at 0 (unknown).
-    qc_fm[fm <= config.fm_good] = 1
-    qc_fm[(fm > config.fm_good) & (fm <= config.fm_bad)] = 2
-    qc_fm[fm > config.fm_bad] = 4
-
-    # Despike fraction: 0 (or absent → zeros from caller) leaves qc_dsp at 0.
-    qc_dsp = np.zeros(eps.size, dtype="i1")
-    qc_dsp[despike_frac > config.despike_frac_questionable] = 2
-    qc_dsp[despike_frac > config.despike_frac_bad] = 4
-
-    qc = np.maximum(np.maximum(qc_speed, qc_fm), qc_dsp)
-    qc[np.isnan(eps)] = 9
-    return qc
 
 
 def _attach_epsilon(
@@ -1757,15 +1625,15 @@ def _attach_epsilon(
 ) -> xr.Dataset:
     """Attach per-probe epsilon, k_max, FM, wavenumber ``k``, and QC flags.
 
-    QC convention (IODE): 0=unknown, 1=good, 2=questionable, 4=bad, 9=missing.
-    Three contributions are folded together via max (see ``_compose_qc``):
+    QC convention (IODE): 1=good, 2=not evaluated, 3=questionable, 4=bad, 9=missing.
+    Three contributions are folded together via max (see ``qc.compose_qc``):
 
-      * Window-mean speed below ``config.min_speed`` raises the flag to 2.
+      * Window-mean speed below ``config.min_speed`` raises the flag to 3.
       * FM = mad * sqrt(dof_spec) is the spectrum-vs-Nasmyth fit residual
-        (low = trustworthy). It promotes flags to 1/2/4 against the two
+        (low = trustworthy). It sets flags to 1/3/4 (4 if NaN) against the two
         ``config.fm_good`` / ``config.fm_bad`` thresholds.
       * Per-probe window despike fraction (``sh1_despike_frac`` for eps_1,
-        ``sh2_despike_frac`` for eps_2) promotes flags to 2/4 against the
+        ``sh2_despike_frac`` for eps_2) promotes flags to 3/4 against the
         two ``config.despike_frac_questionable`` / ``config.despike_frac_bad``
         thresholds. Treated as zero if the despike-fraction variable is
         absent (e.g., probe was never despiked).
@@ -1797,48 +1665,21 @@ def _attach_epsilon(
             despike_frac = ds[despike_frac_var].values
         else:
             despike_frac = np.zeros(eps.size, dtype="f4")
-        qc = _compose_qc(eps, fm, speed_bad, despike_frac, config)
+        qc_flags = qc.compose_qc(eps, fm, speed_bad, despike_frac, config)
         qc_var = f"eps_{probe_num}_qc"
-        ds[qc_var] = ("time", qc)
-        ds[qc_var].attrs = {
-            "long_name": f"QC flag for eps_{probe_num}",
-            "flag_values": _QC_FLAG_VALUES,
-            "flag_meanings": _QC_FLAG_MEANINGS,
-            "valid_min": np.int8(0),
-            "valid_max": np.int8(9),
-            "comment": (
-                f"Composed from speed (min_speed={config.min_speed} m/s), "
-                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
-                f"and {name}_despike_frac "
-                f"(questionable>{config.despike_frac_questionable}, "
-                f"bad>{config.despike_frac_bad})."
-            ),
-        }
+        ds[qc_var] = ("time", qc_flags)
+        ds[qc_var].attrs = qc.flag_attrs(
+            f"QC flag for eps_{probe_num}",
+            f"Composed from speed (min_speed={config.min_speed} m/s), "
+            f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
+            f"and {name}_despike_frac "
+            f"(questionable>{config.despike_frac_questionable}, "
+            f"bad>{config.despike_frac_bad}).",
+        )
 
     ds["k"] = ds.frequency / ds.W
+    qc.attach_combined(ds, "eps", "Best epsilon estimate", "W kg-1")
     return ds
-
-
-def _best_window_epsilon(ds: xr.Dataset) -> Optional[np.ndarray]:
-    """Per-window best epsilon combined from eps_1/eps_2 via _combine_eps_pair.
-
-    Falls back to the single available probe; None if neither exists.
-    """
-    have1 = "eps_1" in ds
-    have2 = "eps_2" in ds
-    if have1 and have2:
-        eps, _ = _combine_eps_pair(
-            ds["eps_1"].values,
-            ds["eps_2"].values,
-            ds["eps_1_qc"].values.astype("i1"),
-            ds["eps_2_qc"].values.astype("i1"),
-        )
-        return eps
-    if have1:
-        return ds["eps_1"].values
-    if have2:
-        return ds["eps_2"].values
-    return None
 
 
 def _attach_chi(
@@ -1854,9 +1695,9 @@ def _attach_chi(
 
     chi is estimated from each temperature gradient spectrum with epsilon
     taken as the per-window combined shear-probe estimate (see
-    :func:`_best_window_epsilon` and :func:`pyturb.temperature.estimate_chi`).
+    :func:`pyturb.qc.attach_combined` and :func:`pyturb.temperature.estimate_chi`).
     QC composition mirrors epsilon: speed, FM vs the Kraichnan model, and the
-    matching gradT despike fraction.
+    matching gradT despike fraction, then floored to the combined eps QC.
 
     ``cal_params`` (from :func:`process_profile`, keyed by probe e.g.
     ``"T1"``) lets each window's predicted electronics noise floor (see
@@ -1867,10 +1708,11 @@ def _attach_chi(
     if not config.compute_chi:
         return ds
 
-    eps_best = _best_window_epsilon(ds)
-    if eps_best is None:
+    if "eps" not in ds:
         _log.warning("compute_chi requested but no epsilon estimates available")
         return ds
+    eps_best = ds["eps"].values
+    eps_best_qc = ds["eps_qc"].values
 
     W = ds["W"].values
     nu = ds["nu"].values
@@ -1933,7 +1775,7 @@ def _attach_chi(
         else:
             despike_frac = np.zeros(n, dtype="f4")
         # Fold in the probe's own out-of-range fraction (see
-        # _attach_window_scalars/_compose_range_qc) -- a calibration
+        # _attach_window_scalars/qc.compose_range_qc) -- a calibration
         # extrapolated beyond its fitted range corrupts gradT the same way
         # a despiked-out transient does, so it's treated the same way here.
         range_frac_var = f"{probe}_range_frac"
@@ -1943,31 +1785,29 @@ def _attach_chi(
             range_frac = np.zeros(n, dtype="f4")
         bad_frac = np.clip(despike_frac + range_frac, 0.0, 1.0)
         # Floor to bad if the calibration fit itself wasn't confident (see
-        # _compose_range_qc's docstring) -- a bad-but-not-implausible fit
+        # qc.compose_range_qc's docstring) -- a bad-but-not-implausible fit
         # corrupts the gradient the same way, and no per-sample check can
         # catch it either.
         if (fit_confident or {}).get(probe) is False:
             bad_frac = np.ones_like(bad_frac)
-        qc = _compose_qc(chi, fm, speed_bad, bad_frac, config)
+        qc_flags = qc.compose_qc(chi, fm, speed_bad, bad_frac, config)
+        qc_flags = np.where(
+            qc_flags == qc.MISSING, qc_flags, np.maximum(qc_flags, eps_best_qc)
+        )
         qc_var = f"chi_{probe_num}_qc"
-        ds[qc_var] = ("time", qc)
-        ds[qc_var].attrs = {
-            "long_name": f"QC flag for chi_{probe_num}",
-            "flag_values": _QC_FLAG_VALUES,
-            "flag_meanings": _QC_FLAG_MEANINGS,
-            "valid_min": np.int8(0),
-            "valid_max": np.int8(9),
-            "comment": (
-                f"Composed from speed (min_speed={config.min_speed} m/s), "
-                f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
-                f"{name}_despike_frac + {probe}_range_frac "
-                f"(questionable>{config.despike_frac_questionable}, "
-                f"bad>{config.despike_frac_bad}), and floored to bad if the "
-                f"calibration fit itself wasn't confident "
-                f"({probe}_fp07_confident=0)."
-            ),
-        }
+        ds[qc_var] = ("time", qc_flags)
+        ds[qc_var].attrs = qc.flag_attrs(
+            f"QC flag for chi_{probe_num}",
+            f"Composed from speed (min_speed={config.min_speed} m/s), "
+            f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
+            f"{name}_despike_frac + {probe}_range_frac "
+            f"(questionable>{config.despike_frac_questionable}, "
+            f"bad>{config.despike_frac_bad}), the combined epsilon QC, "
+            f"and floored to bad if the calibration fit itself wasn't "
+            f"confident ({probe}_fp07_confident=0).",
+        )
 
+    qc.attach_combined(ds, "chi", "Best chi estimate", "K2 s-1")
     return ds
 
 
@@ -2005,12 +1845,12 @@ def process_profile(
         if (p := _channel_calibration_params(ds, probe))
     }
     range_masks = {
-        probe: _temperature_range_mask(ds[probe].values)
+        probe: qc.temperature_range_mask(ds[probe].values)
         for probe in ("T1", "T2")
         if probe in ds
     }
     # None (key absent) means "never run through calibrate-fp07" -- no
-    # penalty, unlike an explicit False (see _compose_range_qc).
+    # penalty, unlike an explicit False (see qc.compose_range_qc).
     fit_confident = {
         probe: bool(ds[probe].attrs[f"{probe}_fp07_confident"])
         for probe in ("T1", "T2")
