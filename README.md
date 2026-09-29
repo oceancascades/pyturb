@@ -12,7 +12,7 @@ Install using `pip`.
 flowchart TD;
     pfile[L0: .p] -->|pyturb p2nc| ncfile[L1: .nc];
     ncfile --- C[ ]:::empty;
-    glider[glider.data.nc] --- C;
+    glider[glider.data.nc (optional)] --- C;
     C -->|pyturb eps| l2[L2: *_0001.nc, ... *_N.nc];
     l2 -->|pyturb bin| l3[L3: .binned.nc];
     
@@ -22,8 +22,9 @@ classDef empty fill:none,stroke:none,color:transparent,width:1px,height:1px;
 Pyturb is primarily a CLI. The processing should be run in the following order:
 
 1. Convert p files to netCDF using `pyturb p2nc`. Optionally, merge converted p files with `pyturb merge`.
-2. Calculate turbulence estimates per-profile using `pyturb eps`.
-3. Bin estimates onto a regular grid with `pyturb bin`.
+2. Calibrate the fp07 sensors using `pyturb calibrate-fp07` and adjust conductivity if needed.
+3. Calculate turbulence estimates per-profile using `pyturb eps`.
+4. Bin estimates onto a regular grid with `pyturb bin`.
 
 ### `p2nc` - convert P files
 
@@ -33,13 +34,13 @@ Convert Rockland binary P-files to NetCDF format:
 pyturb p2nc ./path/to/raw_data/*.p -o ./converted/
 ```
 
-Note that unlike the ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. Consequently, the units of these variables are different to their ODAS counterparts. The scaling is applied later.
+Note that unlike Rockland's ODAS toolbox, this conversion does not apply a velocity scaling to the microstructure shear or temperature gradient. Consequently, the units of these variables are different to their ODAS counterparts. The scaling is applied later.
 
-The merge utility enables merging of netcdf files (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). This may be useful in the case where profiles are split across multiple files and per-file processing would result in incomplete profiles.
+The merge utility is useful in the case where profiles are split across multiple files and per-file processing would result in incomplete profiles. (e.g. `pyturb merge -o ./merged/merged.nc ./converted/*.nc`). 
 
-Each converted variable also carries the setup-string calibration parameters actually used for it, as `cal_<key>` attrs (e.g. `T1.attrs["cal_t_0"]`, `T1.attrs["cal_beta_1"]`) -- easier to consume downstream than re-parsing the full embedded `pfile_configuration` string. Thermistor channels (`T1`, `T2`) additionally retain their raw ADC counts (`T1_counts`, `T2_counts`) alongside the usual physical-unit output, since the FP07 conversion's internal `Z` clip means the converted value can saturate; the raw counts let `calibrate-fp07` (below) rebuild a corrected signal exactly, without needing to reconvert from the original `.p` file.
+Each converted variable carries the setup-string calibration parameters use to converted it from the raw data as `cal_<key>` attrs (e.g. `T1.attrs["cal_t_0"]`, `T1.attrs["cal_beta_1"]`). Thermistor channels (`T1`, `T2`) additionally retain their raw ADC counts (`T1_counts`, `T2_counts`) alongside the usual physical-unit output to aid with calibration.
 
-### `calibrate-fp07` - recalibrate FP07 thermistor probes (optional)
+### `calibrate-fp07` - calibrate FP07 thermistor probes (optional)
 
 The embedded FP07 calibration coefficients are usually uncalibrated default values. `calibrate-fp07` fits corrected coefficients in situ against a reference (e.g. `JAC_T` sensor) and rebuilds both `T1`/`T2` and `gradT1`/`gradT2`, applying the best available fit. `pyturb eps` checks the raw `T1`/`T2` range and attaches `T1_qc`/`T2_qc` and folds the same check into `chi_1_qc`/`chi_2_qc`.
 
@@ -55,28 +56,28 @@ pyturb calibrate-fp07 apply cal.yaml converted/RIOT_VMP194_*.nc -o converted_cal
 pyturb calibrate-fp07 auto converted/*.nc -o converted_calibrated/ -r cal.yaml
 ```
 
-`--profile` is 0-based and matches `eps`'s `_p{NNNN}` output numbering, so `--profile 0` corresponds to what would become `..._p0000.nc`. Run `pyturb calibrate-fp07 fit`/`apply`/`auto --help` for all options.
+`--profile` is 0-based and matches `eps`'s `_p{NNNN}` output numbering, so `--profile 0` corresponds to what would become `..._p0000.nc`.
 
 For each candidate file, `auto` fits by aggregating across every one of that file's profiles: median lag across all of them. Before accepting a candidate file's aggregate fit, `auto` also drops any profile whose raw counts are pinned near the ADC's saturation limit and checks the fitted `T_0`/`beta_1` land in a physically plausible range.
 
-For a platform with no onboard reference thermometer (e.g. a MicroRider on a glider), `fit`/`auto` accept `--aux`/`--aux-temp` (the same auxiliary file `eps` takes) to fit against an external CTD's temperature instead:
+For a platform with no onboard reference thermometer (e.g. a MicroRider on a glider), `fit`/`auto` accept `--aux`/`--aux-temp` to fit against an external CTD's temperature instead:
 
 ```bash
 pyturb calibrate-fp07 auto converted/MR_*.nc --overwrite \
     --aux glider.nc --aux-temp sci_water_temp
 ```
 
-`--ref` then defaults to `aux_temperature` instead of `JAC_T` (an explicit `--ref` still overrides). The existing lag cross-correlation handles the physical mounting offset between the CTD and the FP07 automatically -- no separate lag configuration needed. If the external reference is sampled well below the FP07's slow-channel rate (e.g. ~1 Hz for a glider CTD), `--ref-fs` (auto-detected from `--aux` if omitted) caps the thermal-response-matching filter so the fit isn't corrupted by content the reference can't actually resolve.
+pyturbs lag cross-correlation functionality handles the physical mounting offset between the CTD and the FP07 automatically. The method also attempts to handle the case where the external reference is sampled well below the FP07's slow-channel rate (e.g. ~1 Hz for a glider CTD).
 
 ### `calibrate-jac-c` - apply a constant conductivity offset (optional)
 
-Corrects a constant offset in the `JAC_C` conductivity channel (e.g. from a post-deployment comparison against a reference CTD), for one instrument at a time:
+Corrects a constant offset in the `JAC_C` conductivity channel, for one instrument at a time:
 
 ```bash
 pyturb calibrate-jac-c 194 converted/RIOT_VMP194_*.nc --offset -0.05 -o converted_calibrated/
 ```
 
-Only files whose `instrument_sn` attribute matches the given serial number exactly are modified; run it before `eps` so the correction also carries through to the salinity and density derived from `JAC_C`. `--offset` is in `JAC_C`'s own units (mS/cm) and is passed as an option (not positional) so negative values aren't mistaken for a flag.
+Only files whose `instrument_sn` attribute matches the given serial number are modified; run it before `eps` so the correction also carries through to the salinity and density derived from `JAC_C`.
 
 ### `eps` - calculate the dissipation rate
 
@@ -86,7 +87,7 @@ Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:
 pyturb eps ./converted/*.nc -o ./eps_output/
 ```
 
-The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a Slocum glider and used to esimate viscosity. Velocity from a calibrated glider flight model may also be used.
+The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a glider CTD and used to esimate viscosity. Velocity from a calibrated glider flight model may also be used.
 
 A selection of options:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
@@ -103,9 +104,9 @@ A selection of options:
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
-Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables -- window-averaged and attached at both resolutions (`turbidity`/`chlorophyll` and their `_hires` counterparts).
+Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables.
 
-The per-window response-corrected power spectra are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate. gradT pectra are corrected for the FP07 single-pole frequency response; shear spectra are corrected for the shear probe's spatial-averaging and anti-alias response with a single-pole transfer function. 
+The per-window response-corrected power spectra (see details below) are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate.
 
 See `pyturb eps --help` formore details. 
 
@@ -136,8 +137,8 @@ Profiles are concatenated along a `profile` dimension and sorted chronologically
 Before computing epsilon, profiles undergo:
 
 1. Low-pass filtering of speed (or dP/dt-derived speed) to remove high-frequency noise.
-2. Shear signals are scaled by 1/U^2 and temperature gradients by 1/U to convert to physical units.
-3. Iterative removal of outliers from shear and temperature gradient signals using a form of median filter.
+2. Physical unit conversion: shear by 1/U^2 and temperature gradients by 1/U.
+3. Iterative removal of outliers from shear and temperature gradient signals using a type of median filter.
 
 ### Shear spectrum processing
 

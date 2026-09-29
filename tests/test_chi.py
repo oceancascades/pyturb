@@ -10,7 +10,8 @@ from pyturb._pfile import to_xarray
 from pyturb.noise import _channel_calibration_params
 from pyturb.pfile import load_pfile_phys
 from pyturb.processing import _write_epsilon_profile, bin_profiles
-from pyturb.profile import ProfileConfig, _combine_eps_pair, process_profile
+from pyturb.profile import ProfileConfig, process_profile
+from pyturb.qc import combine_probe_pair
 from pyturb.temperature import (
     _noise_crossing_k,
     batchelor_wavenumber,
@@ -202,7 +203,7 @@ class TestCombineEpsPair:
         e1 = np.array([1e-9])
         e2 = np.array([5e-9])
         qc = np.array([1], dtype="i1")
-        eps, eps_qc = _combine_eps_pair(e1, e2, qc, qc)
+        eps, eps_qc = combine_probe_pair(e1, e2, qc, qc)
         np.testing.assert_allclose(eps, 3e-9, rtol=1e-6)
         assert eps_qc[0] == 1
 
@@ -210,22 +211,39 @@ class TestCombineEpsPair:
         e1 = np.array([1e-9])
         e2 = np.array([5e-8])
         qc = np.array([1], dtype="i1")
-        eps, _ = _combine_eps_pair(e1, e2, qc, qc)
+        eps, eps_qc = combine_probe_pair(e1, e2, qc, qc)
         np.testing.assert_allclose(eps, 1e-9, rtol=1e-6)
+        assert eps_qc[0] == 3
 
     def test_single_probe_fallback(self):
         e1 = np.array([np.nan])
         e2 = np.array([2e-9])
         q1 = np.array([9], dtype="i1")
         q2 = np.array([1], dtype="i1")
-        eps, eps_qc = _combine_eps_pair(e1, e2, q1, q2)
+        eps, eps_qc = combine_probe_pair(e1, e2, q1, q2)
         np.testing.assert_allclose(eps, 2e-9, rtol=1e-6)
-        assert eps_qc[0] == 1
+        assert eps_qc[0] == 3
+
+    def test_bad_probe_excluded(self):
+        e1 = np.array([1e-6])
+        e2 = np.array([2e-9])
+        q1 = np.array([4], dtype="i1")
+        q2 = np.array([1], dtype="i1")
+        eps, eps_qc = combine_probe_pair(e1, e2, q1, q2)
+        np.testing.assert_allclose(eps, 2e-9, rtol=1e-6)
+        assert eps_qc[0] == 3
+
+    def test_both_bad(self):
+        e = np.array([1e-9])
+        q = np.array([4], dtype="i1")
+        eps, eps_qc = combine_probe_pair(e, e, q, q)
+        assert np.isnan(eps[0])
+        assert eps_qc[0] == 4
 
     def test_both_missing(self):
         e = np.array([np.nan])
         q = np.array([9], dtype="i1")
-        eps, eps_qc = _combine_eps_pair(e, e, q, q)
+        eps, eps_qc = combine_probe_pair(e, e, q, q)
         assert np.isnan(eps[0])
         assert eps_qc[0] == 9
 
@@ -273,7 +291,7 @@ class TestChiPipeline:
 
     def test_chi_qc_valid_flags(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)
-        assert set(np.unique(written["chi_1_qc"].values)) <= {0, 1, 2, 4, 9}
+        assert set(np.unique(written["chi_1_qc"].values)) <= {1, 2, 3, 4, 9}
 
     def test_noise_floor_cap_is_exercised_and_sane(self, chi_eps_file):
         # This real PFILE does carry cal_* attrs, so process_profile's
@@ -360,8 +378,8 @@ class TestChiPipeline:
 class TestTemperatureRangeQC:
     """apply_probe_calibration no longer masks physically implausible T1/T2
     (e.g. from a calibration extrapolated beyond its fitted range) -- that's
-    flagged via QC at the eps step instead (see _temperature_range_mask /
-    _compose_range_qc / process_profile in profile.py), per policy: don't
+    flagged via QC at the eps step instead (see qc.temperature_range_mask /
+    qc.compose_range_qc / process_profile), per policy: don't
     destroy data, mark it untrustworthy and let the consumer decide.
     """
 
@@ -393,7 +411,7 @@ class TestTemperatureRangeQC:
         assert "T1_range_frac" in result
         qc = result["T1_qc"].values
         frac = result["T1_range_frac"].values
-        assert set(np.unique(qc)) <= {0, 1, 2, 4, 9}
+        assert set(np.unique(qc)) <= {1, 2, 3, 4, 9}
         assert (qc[frac > 0.2] == 4).all()
         assert (qc[frac == 0] == 1).all()
 

@@ -911,7 +911,7 @@ def bin(
             "--qc-thresh",
             help=(
                 "Epsilon rejection thresholds (W/kg) as two comma-separated "
-                "values: questionable,bad. A qc=2 (questionable) window is "
+                "values: questionable,bad. A qc=3 (questionable) window is "
                 "dropped before binning when its eps exceeds the first value; "
                 "a qc=4 (bad) window is dropped when its eps exceeds the "
                 "second. Low-epsilon flagged values are usually noise-floor "
