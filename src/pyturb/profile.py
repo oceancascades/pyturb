@@ -699,6 +699,11 @@ def extract_profile_by_indices(
     return ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
 
 
+def segment_direction(pressure: np.ndarray, idx_start: int, idx_end: int) -> str:
+    """Return "down" if pressure increases start->end, else "up"."""
+    return "down" if pressure[idx_end] >= pressure[idx_start] else "up"
+
+
 def split_into_profiles(
     ds: xr.Dataset,
     config: ProfileConfig,
@@ -938,6 +943,7 @@ def _preprocess_for_spectra(
 
     if config.force_despike:
         ds = _drop_embedded_clean(ds, config)
+    embedded = {p for p in config.all_probes if despike_mask_name(p) in ds}
     ds = despike_variables(
         ds,
         config.all_probes,
@@ -947,6 +953,18 @@ def _preprocess_for_spectra(
         smooth=config.despike_smooth,
         replace_sec=config.despike_replace_sec,
     )
+    for probe in config.all_probes:
+        if (mask_name := despike_mask_name(probe)) not in ds:
+            continue
+        attrs = ds[mask_name].attrs
+        if probe in embedded:
+            attrs["despike_source"] = "p2nc"
+            # Files converted before the parameters moved onto the variables.
+            for key, value in ds.attrs.items():
+                if key.startswith("despike_"):
+                    attrs.setdefault(key, value)
+        else:
+            attrs["despike_source"] = "eps"
 
     hp_cutoff = _resolve_hp_cutoff(config)
     if hp_cutoff is not None and hp_cutoff > 0:
@@ -1052,7 +1070,11 @@ def _apply_conductivity_matching(ds: xr.Dataset, config: ProfileConfig) -> xr.Da
         reference_speed=config.jac_reference_speed,
     )
     ds = ds.copy()
-    ds["JAC_C"] = ("t_slow", matched.astype(ds["JAC_C"].values.dtype))
+    ds["JAC_C"] = (
+        "t_slow",
+        matched.astype(ds["JAC_C"].values.dtype),
+        ds["JAC_C"].attrs,
+    )
     return ds
 
 
@@ -1088,6 +1110,11 @@ def _resolve_eps_floor(ds: xr.Dataset, config: ProfileConfig) -> float:
     if _vehicle(ds) in _VMP_STYLE_VEHICLES:
         return qc.VMP_EPS_FLOOR
     return qc.DEFAULT_EPS_FLOOR
+
+
+def _calibration_provenance(ds: xr.Dataset, name: str) -> dict:
+    """Attrs recorded by calibrate-fp07/calibrate-jac-c on ``name`` (not ``cal_*``)."""
+    return {k: v for k, v in ds[name].attrs.items() if k.startswith(f"{name}_")}
 
 
 def _build_ctd_vars(
@@ -1157,10 +1184,10 @@ def _build_ctd_vars(
             lon_arr = aux_mean(ds["aux_longitude"].values)
             out["lon"] = (lon_arr, {})
     if "JAC_C" in means:
-        out["conductivity"] = (means["JAC_C"], {})
+        out["conductivity"] = (means["JAC_C"], _calibration_provenance(ds, "JAC_C"))
     for probe in ("T1", "T2"):
         if probe in means:
-            out[probe] = (means[probe], {})
+            out[probe] = (means[probe], _calibration_provenance(ds, probe))
     # Optical units come from the setup file, so aren't in the CF registry.
     for var in config.optical_vars:
         if var in means:
@@ -1420,6 +1447,9 @@ def _attach_window_scalars(
         ds[out_name].attrs = {
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
+            **{
+                k: v for k, v in ds[mask_name].attrs.items() if k.startswith("despike_")
+            },
         }
         ds = ds.drop_vars(mask_name)
 

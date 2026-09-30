@@ -44,7 +44,7 @@ def test_no_variable_missing_cf(outputs, stage):
 def test_binned_attrs(outputs):
     ds = xr.open_dataset(outputs["bin"], decode_times=False)
     assert ds.attrs["Conventions"] == "CF-1.8"
-    assert "source_files" in ds.attrs
+    assert ds["source_pfile"].values[0] == PFILE.name
     assert ds["depth"].attrs["positive"] == "down"
     assert ds["eps"].attrs["cell_methods"] == "depth: mean"
     assert ds["eps"].attrs["ancillary_variables"] == "eps_qc eps_n"

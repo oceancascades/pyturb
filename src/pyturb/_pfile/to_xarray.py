@@ -1,9 +1,11 @@
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
 import xarray as xr
 
 from ..cf import normalize_units
+from ..metadata import stamp_globals
 
 # Suffixes stripped (in order) to find a variable's underlying channel name
 # in the setup config, e.g. "T1_counts" and "T1_raw" both look up "T1".
@@ -164,37 +166,33 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
         ),
     }
 
-    # Build global attributes
-    global_attrs = {
-        "Conventions": "CF-1.8",
-        "title": "",
-        "institution": "",
-        "source": "",
-        "history": f"p file created {data.get('filetime', '').strftime('%Y-%m-%d %H:%M:%S') if data.get('filetime') else ''}",
-        "fs_fast": float(fs_fast) if fs_fast else "not found",
-        "fs_slow": float(fs_slow) if fs_slow else "not found",
-        "source_file": data.get("fullPath", ""),
-        "date": data.get("date", ""),
-        "time": data.get("time", ""),
-        "header_version": float(data.get("header_version", 0)),
-    }
-
-    # Add configuration string as global attribute
-    if "setupfilestr" in data:
-        global_attrs["pfile_configuration"] = data["setupfilestr"]
-
-    # Extract instrument info from config object
+    source = {}
+    if data.get("fullPath"):
+        source["source_pfile"] = Path(data["fullPath"]).name
     if "cfgobj" in data:
-        cfg = data["cfgobj"]
-        vehicle = cfg.get_value("instrument_info", "vehicle", default="")
-        model = cfg.get_value("instrument_info", "model", default="")
-        sn = cfg.get_value("instrument_info", "sn", default="")
-        if vehicle:
-            global_attrs["instrument_vehicle"] = vehicle
-        if model:
-            global_attrs["instrument_model"] = model
-        if sn:
-            global_attrs["instrument_sn"] = sn
+        for key in ("vehicle", "model", "sn"):
+            value = data["cfgobj"].get_value("instrument_info", key, default="")
+            if value:
+                source[f"instrument_{key}"] = value
+
+    extra = {}
+    if filetime:
+        extra["pfile_start_time"] = filetime.isoformat(timespec="seconds")
+    extra["header_version"] = float(data.get("header_version", 0))
+    if fs_fast:
+        extra["fs_fast"] = float(fs_fast)
+    if fs_slow:
+        extra["fs_slow"] = float(fs_slow)
+    if "setupfilestr" in data:
+        extra["pfile_configuration"] = data["setupfilestr"]
+
+    global_attrs = stamp_globals(
+        source,
+        step="p2nc",
+        title="RSI microstructure p-file converted to NetCDF",
+        detail=f"converted {source.get('source_pfile', 'p-file')}",
+        **extra,
+    )
 
     # Create Dataset
     ds = xr.Dataset(data_vars, coords=coords, attrs=global_attrs)

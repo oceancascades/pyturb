@@ -10,7 +10,6 @@ data out of the original converted file on demand, without re-running detection.
 
 import logging
 import multiprocessing as mp
-from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -21,24 +20,19 @@ import xarray as xr
 from . import __version__
 from .cf import apply_cf
 from .io import load_profile_nc, resolve_input_files
+from .metadata import append_history, stamp_globals, utc_now
 from .processing import _ensure_output_dir, _init_worker_logging
 from .profile import (
     ProfileConfig,
     extract_profile_by_indices,
     find_all_profiles,
     prepare_profile,
+    segment_direction,
 )
 
 _log = logging.getLogger(__name__)
 
 __all__ = ["batch_index_profiles", "extract_profile"]
-
-_INSTRUMENT_ATTRS = ("instrument_vehicle", "instrument_model", "instrument_sn")
-
-
-def _segment_direction(pressure: np.ndarray, idx_start: int, idx_end: int) -> str:
-    """Return "down" if pressure increases start->end, else "up"."""
-    return "down" if pressure[idx_end] >= pressure[idx_start] else "up"
 
 
 def _index_from_segments(
@@ -59,7 +53,7 @@ def _index_from_segments(
         end_idx[i] = e
         start_time[i] = t_slow[s]
         end_time[i] = t_slow[e]
-        direction[i] = _segment_direction(pressure, s, e)
+        direction[i] = segment_direction(pressure, s, e)
 
     idx_ds = xr.Dataset(
         {
@@ -101,15 +95,14 @@ def _write_profile_index(
     source_attrs: dict,
 ) -> None:
     idx_ds = idx_ds.copy()
-    idx_ds.attrs["source_file"] = source_file_name
-    idx_ds.attrs["pyturb_version"] = __version__
-    idx_ds.attrs["pyturb_processed_utc"] = datetime.now(timezone.utc).isoformat(
-        timespec="seconds"
+    idx_ds.attrs = stamp_globals(
+        source_attrs,
+        step="profiles",
+        title="Profile index",
+        detail=f"indexed {source_file_name}",
+        source_file=source_file_name,
+        pyturb_config=config.to_yaml(),
     )
-    idx_ds.attrs["pyturb_config"] = config.to_yaml()
-    for attr in _INSTRUMENT_ATTRS:
-        if attr in source_attrs:
-            idx_ds.attrs[attr] = source_attrs[attr]
 
     apply_cf(idx_ds).to_netcdf(output_file, format="NETCDF4")
 
@@ -125,14 +118,18 @@ def _write_hires_profile(
     compression_level: int,
 ) -> None:
     out = profile_ds.copy()
-    out.attrs["source_file"] = source_file_name
-    out.attrs["profile_index"] = profile_idx
-    out.attrs["profile_direction"] = direction
-    out.attrs["pyturb_version"] = __version__
-    out.attrs["pyturb_processed_utc"] = datetime.now(timezone.utc).isoformat(
-        timespec="seconds"
+    out.attrs.pop("pyturb_processed_utc", None)
+    out.attrs.update(
+        source_file=source_file_name,
+        profile_index=profile_idx,
+        profile_direction=direction,
+        pyturb_version=__version__,
+        date_created=utc_now(),
+        pyturb_config=config.to_yaml(),
+        history=append_history(
+            profile_ds.attrs, "profiles", f"{source_file_name} profile {profile_idx}"
+        ),
     )
-    out.attrs["pyturb_config"] = config.to_yaml()
 
     encoding = {}
     if compress:

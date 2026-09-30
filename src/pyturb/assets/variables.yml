@@ -63,6 +63,10 @@ ctd_depth: {long_name: Depth, units: m, standard_name: depth, positive: down, ax
 profile_time: {long_name: Profile start time, standard_name: time}
 instrument_sn: {long_name: Instrument serial number}
 instrument_vehicle: {long_name: Instrument vehicle type}
+source_file: {long_name: Source eps file}
+source_pfile: {long_name: Source p-file}
+profile_index: {long_name: Profile number within source file, units: "1"}
+profile_direction: {long_name: Cast direction}
 
 # --- patterns ---
 "sh{n}": {long_name: "Velocity time derivative {n}", units: m2 s-3}
