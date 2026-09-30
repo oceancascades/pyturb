@@ -14,6 +14,8 @@ from typing import Any, Union
 
 import netCDF4 as nc
 
+from .metadata import append_history, utc_now
+
 _log = logging.getLogger(__name__)
 
 __all__ = ["merge_netcdf"]
@@ -86,6 +88,37 @@ def _get_file_info(filepath: Path) -> tuple[dict, dict, dict, dict]:
     return dims, var_info, global_attrs, sizes
 
 
+def _calibration(global_attrs: dict, var_info: dict) -> dict:
+    """The setup string and every variable's ``cal_*`` attrs, as strings."""
+    cal = {"pfile_configuration": str(global_attrs.get("pfile_configuration", ""))}
+    for name, info in var_info.items():
+        for attr, value in info["attrs"].items():
+            if attr.startswith("cal_"):
+                cal[f"{name}:{attr}"] = str(value)
+    return cal
+
+
+def _check_same_calibration(
+    path: Path, first: Path, ds: nc.Dataset, first_calibration: dict
+) -> None:
+    var_info = {
+        name: {"attrs": {a: var.getncattr(a) for a in var.ncattrs()}}
+        for name, var in ds.variables.items()
+    }
+    global_attrs = {a: ds.getncattr(a) for a in ds.ncattrs()}
+    calibration = _calibration(global_attrs, var_info)
+    differing = sorted(
+        k
+        for k in first_calibration.keys() | calibration.keys()
+        if first_calibration.get(k) != calibration.get(k)
+    )
+    if differing:
+        raise ValueError(
+            f"{path.name} and {first.name} have different setup or calibration "
+            f"({', '.join(differing[:5])}); merging would mislabel one of them"
+        )
+
+
 def merge_netcdf(
     files: Union[list[Path], list[str]],
     output_file: Union[str, Path],
@@ -114,7 +147,8 @@ def merge_netcdf(
     Raises
     ------
     ValueError
-        If no input files provided or files lack required dimensions.
+        If no input files provided, files lack required dimensions, or files
+        differ in setup string or channel calibration (``cal_*``) attrs.
     FileExistsError
         If output file exists and overwrite is False.
 
@@ -141,6 +175,7 @@ def merge_netcdf(
 
     # Get structure from first file
     dims, var_info, global_attrs, _ = _get_file_info(file_list[0])
+    first_calibration = _calibration(global_attrs, var_info)
 
     # Collect sizes and time offsets from all files
     file_info: list[dict[str, Any]] = []
@@ -150,7 +185,10 @@ def merge_netcdf(
                 "path": f,
                 "t_fast_size": ds.dimensions["t_fast"].size,
                 "t_slow_size": ds.dimensions["t_slow"].size,
+                "source_pfile": getattr(ds, "source_pfile", f.name),
             }
+            if f != file_list[0]:
+                _check_same_calibration(f, file_list[0], ds, first_calibration)
 
             # Get time offsets
             for time_var in ["t_fast", "t_slow"]:
@@ -219,11 +257,20 @@ def merge_netcdf(
                 attrs["units"] = "seconds since 1970-01-01T00:00:00"
             var.setncatts(attrs)
 
-        # Set global attributes
-        dst.setncatts(global_attrs)
-        dst.history = (
-            f"Merged from {len(file_list)} files on {datetime.now().isoformat()}"
+        # Per-file lineage replaces the first file's; everything else is shared.
+        merged_attrs = {
+            k: v
+            for k, v in global_attrs.items()
+            if k not in ("source_pfile", "source_file")
+        }
+        merged_attrs["source_pfiles"] = ", ".join(
+            str(i["source_pfile"]) for i in file_info
         )
+        merged_attrs["date_created"] = utc_now()
+        merged_attrs["history"] = append_history(
+            global_attrs, "merge", f"merged {len(file_list)} files"
+        )
+        dst.setncatts(merged_attrs)
 
         # Copy data file by file
         offset_t_fast = 0

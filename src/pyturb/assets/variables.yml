@@ -1,0 +1,88 @@
+# CF attributes for every variable pyturb writes, applied by pyturb.cf.apply_cf.
+#
+# Keys are variable names. A key containing {placeholders} is a pattern:
+# {n} matches digits, any other {name} matches a word, and the captured text
+# is substituted into the attribute values. Exact names are tried first, then
+# patterns in file order. <var>_hires inherits <var>'s entry; <var>_clean and
+# <var>_smooth inherit it with " (despiked)"/" (smoothed)" appended to long_name. Units that depend on
+# the file (time origins, setup-file units) are set in code, not here.
+
+# --- p2nc: converted channels ---
+t_fast: {long_name: Time, standard_name: time, axis: T}
+t_slow: {long_name: Time, standard_name: time, axis: T}
+P: {long_name: Pressure, units: dbar, standard_name: sea_water_pressure, positive: down}
+P_raw: {long_name: Raw pressure, units: dbar, standard_name: sea_water_pressure}
+JAC_T: {long_name: Temperature, units: degree_C, standard_name: sea_water_temperature}
+JAC_C: {long_name: Conductivity, units: mS cm-1, standard_name: sea_water_electrical_conductivity}
+EMC_Cur: {long_name: ADC counts EM driving current, units: "1"}
+EM_Cur: {long_name: ADC counts EM driving current, units: "1"}
+U_EM: {long_name: EM speed, units: m s-1}
+Ax: {long_name: Acceleration X, units: m s-2}
+Ay: {long_name: Acceleration Y, units: m s-2}
+Az: {long_name: Acceleration Z, units: m s-2}
+Incl_X: {long_name: Inclinometer X angle, units: degree}
+Incl_Y: {long_name: Inclinometer Y angle, units: degree}
+Incl_T: {long_name: Inclinometer temperature, units: degree_C}
+turbidity: {long_name: Turbidity, standard_name: sea_water_turbidity}
+chlorophyll: {long_name: Chlorophyll-a concentration, standard_name: mass_concentration_of_chlorophyll_in_sea_water}
+
+# --- profiles: index files ---
+profile: {long_name: Profile number, units: "1"}
+start_idx: {long_name: t_slow index of profile start (inclusive), units: "1"}
+end_idx: {long_name: t_slow index of profile end (inclusive), units: "1"}
+start_time: {long_name: Profile start time, standard_name: time}
+end_time: {long_name: Profile end time, standard_name: time}
+direction: {long_name: Cast direction}
+
+# --- eps: per-profile files ---
+time: {long_name: Time, standard_name: time, axis: T}
+ctd_time: {long_name: Time, standard_name: time, axis: T}
+frequency: {long_name: Frequency, units: Hz}
+k: {long_name: Wavenumber, units: cycles m-1}
+pressure: {long_name: Pressure, units: dbar, standard_name: sea_water_pressure}
+W: {long_name: Platform speed, units: m s-1, standard_name: platform_speed_wrt_sea_water}
+temperature: {long_name: Temperature, units: degree_C, standard_name: sea_water_temperature}
+conductivity: {long_name: Conductivity, units: mS cm-1, standard_name: sea_water_electrical_conductivity}
+salinity: {long_name: Practical salinity, units: "1", standard_name: sea_water_practical_salinity}
+density: {long_name: In situ density, units: kg m-3, standard_name: sea_water_density}
+absolute_salinity: {long_name: Absolute salinity, units: g kg-1, standard_name: sea_water_absolute_salinity}
+conservative_temperature: {long_name: Conservative temperature, units: degree_C, standard_name: sea_water_conservative_temperature}
+potential_density: {long_name: Potential density, units: kg m-3, standard_name: sea_water_potential_density}
+N2: {long_name: Buoyancy frequency squared, units: s-2, standard_name: square_of_brunt_vaisala_frequency_in_sea_water}
+z: {long_name: Height, units: m, standard_name: height, positive: up}
+lat: {long_name: Latitude, units: degree_north, standard_name: latitude}
+lon: {long_name: Longitude, units: degree_east, standard_name: longitude}
+nu: {long_name: Kinematic viscosity, units: m2 s-1}
+kappa_T: {long_name: Molecular thermal diffusivity, units: m2 s-1}
+eps: {long_name: Epsilon, units: W kg-1, standard_name: specific_turbulent_kinetic_energy_dissipation_in_sea_water}
+chi: {long_name: Chi, units: K2 s-1}
+
+# --- bin: binned file ---
+depth: {long_name: Depth, units: m, standard_name: depth, positive: down, axis: Z}
+ctd_depth: {long_name: Depth, units: m, standard_name: depth, positive: down, axis: Z}
+profile_time: {long_name: Profile start time, standard_name: time}
+instrument_sn: {long_name: Instrument serial number}
+instrument_vehicle: {long_name: Instrument vehicle type}
+source_file: {long_name: Source eps file}
+source_pfile: {long_name: Source p-file}
+profile_index: {long_name: Profile number within source file, units: "1"}
+profile_direction: {long_name: Cast direction}
+
+# --- patterns ---
+"sh{n}": {long_name: "Velocity time derivative {n}", units: m2 s-3}
+"gradT{n}": {long_name: "Temperature time derivative {n}", units: K s-1}
+"T{n}": {long_name: "Temperature FP07 {n}", units: degree_C, standard_name: sea_water_temperature}
+"T{n}_counts": {long_name: "ADC counts FP07 {n}", units: "1"}
+"T{n}_dT{n}": {long_name: "ADC counts pre-emphasized FP07 {n}", units: "1"}
+"T{n}_range_frac": {long_name: "Fraction of T{n} raw samples outside the sane temperature range", units: "1"}
+"S_sh{n}": {long_name: "Shear variance {n}", units: s-2 Hz-1}
+"S_gradT{n}": {long_name: "Temperature gradient variance {n}", units: K2 m-2 Hz-1}
+"eps_{n}": {long_name: "Epsilon {n}", units: W kg-1, standard_name: specific_turbulent_kinetic_energy_dissipation_in_sea_water}
+"eps_{n}_fm": {long_name: "Figure of merit for eps_{n} Nasmyth fit", units: "1"}
+"k_max_{n}": {long_name: "Upper wavenumber of eps_{n} integration", units: cycles m-1}
+"chi_{n}": {long_name: "Chi {n}", units: K2 s-1}
+"chi_{n}_fm": {long_name: "Figure of merit for chi_{n} Kraichnan fit", units: "1"}
+"chi_k_max_{n}": {long_name: "Upper wavenumber of chi_{n} integration", units: cycles m-1}
+"{probe}_despike_mask": {long_name: "Samples of {probe} modified by despiking", units: "1"}
+"{probe}_despike_frac": {long_name: "Fraction of {probe} samples modified by despiking", units: "1"}
+"{var}_n": {long_name: "Number of windows averaged into {var}", units: "1"}

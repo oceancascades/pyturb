@@ -12,7 +12,7 @@ Install using `pip`.
 flowchart TD;
     pfile[L0: .p] -->|pyturb p2nc| ncfile[L1: .nc];
     ncfile --- C[ ]:::empty;
-    glider[glider.data.nc (optional)] --- C;
+    glider[glider.data.nc] --- C;
     C -->|pyturb eps| l2[L2: *_0001.nc, ... *_N.nc];
     l2 -->|pyturb bin| l3[L3: .binned.nc];
     
@@ -94,6 +94,7 @@ There are numerous options (see `pyturb eps --help`). Some important options are
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
 - `--qc-override`: Apply bad flags to data manually.
+- `--attrs`: Add descriptive global attributes (title, institution, ...) from a yml file.
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
@@ -121,6 +122,15 @@ An override.yml file may look like:
   reason: Shear probes and thermistors broken by bottom crash.
 ```
 
+Descriptive global attributes (e.g. the CF/ACDD `title`, `institution`, `creator_name`, and more) can be added to the output with the `--attrs` flag and a yml file. `bin` carries them into the binned file when every profile has the same value.
+
+An attrs.yml file may look like:
+```
+title: RIOT Shakedown 2026 VMP turbulence profiles collected near San Diego
+institution: Oregon State University
+creator_name: Jesse Cusack
+```
+
 ### `bin` - bin average the data
 
 Bin epsilon estimates by depth and concatenate into a single file:
@@ -133,6 +143,7 @@ A selection of the option:
 - `--bin-width`: Depth bin width in meters (default: 2.0)
 - `--dmin`/`--dmax`: Depth range for binning (default: 0-1000 m)
 - `--ctd-bin-width`: Also bin the higher-resolution CTD variables (see `eps` above) onto a separate, typically finer grid of this width, on a separate `ctd_depth` coordinate (default: off)
+- `--attrs`: Global attributes yml file (see `eps` above); overrides any inherited from the eps files
 
 Profiles are concatenated along a `profile` dimension and sorted chronologically.
 

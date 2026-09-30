@@ -28,6 +28,7 @@ from .fp07_calibration import (
 )
 from .io import load_profile_nc, resolve_input_files
 from .merge import merge_netcdf
+from .metadata import append_history, load_global_attrs
 from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
 from .profile import ProfileConfig, prepare_profile, split_into_profiles
@@ -606,6 +607,18 @@ def eps(
             show_default=True,
         ),
     ] = False,
+    attrs_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--attrs",
+            help=(
+                "YAML file of extra global attributes (e.g. title, summary, "
+                "institution, creator_name, license) for the output; bin carries them into the binned file."
+            ),
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input NetCDF files (supports shell globs)"),
@@ -675,6 +688,7 @@ def eps(
         n_workers=n_workers,
         overwrite=overwrite,
         skip_existing=skip_existing,
+        global_attrs=load_global_attrs(attrs_file) if attrs_file else None,
     )
 
 
@@ -946,6 +960,18 @@ def bin(
             ),
         ),
     ] = None,
+    attrs_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--attrs",
+            help=(
+                "YAML file of extra global attributes (e.g. title, summary, "
+                "institution, creator_name, license) for the output, overriding any inherited from the eps files."
+            ),
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     input_files: Annotated[
         list[Path] | None,
         typer.Argument(help="Input epsilon NetCDF files (supports shell globs)"),
@@ -983,6 +1009,7 @@ def bin(
         questionable_thresh=qc_opts.get("questionable", 1e-7),
         bad_thresh=qc_opts.get("bad", 1e-9),
         ctd_bin_width=ctd_bin_width,
+        global_attrs=load_global_attrs(attrs_file) if attrs_file else None,
     )
 
     if result is None:
@@ -1160,6 +1187,9 @@ def calibrate_jac_c(
             ds["JAC_C"] = (ds["JAC_C"].dims, corrected.astype(ds["JAC_C"].values.dtype))
             ds["JAC_C"].attrs = attrs
             ds["JAC_C"].attrs["JAC_C_offset_applied"] = np.float32(offset)
+            ds.attrs["history"] = append_history(
+                ds.attrs, "calibrate-jac-c", f"JAC_C offset {offset:+g} mS/cm"
+            )
 
             out_path = (output_dir / f.name) if output_dir is not None else f
             ds.to_netcdf(out_path)
@@ -1438,15 +1468,18 @@ def _apply_fits_to_files(
     for f in files:
         try:
             ds = load_profile_nc(f)
-            applied_any = False
+            applied = []
             for fit in fits:
                 before = ds
                 ds = apply_probe_calibration(ds, fit)
                 if ds is not before:
-                    applied_any = True
-            if not applied_any:
+                    applied.append(fit.probe)
+            if not applied:
                 typer.echo(f"{f.name}: no matching probe SN, skipped")
                 continue
+            ds.attrs["history"] = append_history(
+                ds.attrs, "calibrate-fp07", f"{', '.join(applied)} recalibrated"
+            )
             out_path = (output_dir / f.name) if output_dir is not None else f
             ds.to_netcdf(out_path)
             typer.echo(f"{f.name}: calibrated -> {out_path}")

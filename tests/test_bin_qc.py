@@ -3,6 +3,7 @@
 import numpy as np
 import xarray as xr
 
+from pyturb.cf import apply_cf
 from pyturb.processing import _bin_var_group
 
 BINS = np.array([0.0, 10.0, 20.0])
@@ -47,10 +48,15 @@ class TestBestWindowBinning:
         np.testing.assert_array_equal(out["eps_n"].values, [0, 1])
 
     def test_count_attrs(self):
-        attrs = _bin(eps=[1e-9], qc=[1], depth=[5])["eps_n"].attrs
+        out = apply_cf(_bin(eps=[1e-9], qc=[1], depth=[5]))
+        attrs = out["eps_n"].attrs
         assert attrs["long_name"] == "Number of windows averaged into eps"
         assert attrs["units"] == "1"
+        assert attrs["cell_methods"] == "depth: sum"
         assert "comment" in attrs
+        assert out["eps"].attrs["cell_methods"] == "depth: mean"
+        assert out["eps"].attrs["ancillary_variables"] == "eps_qc eps_n"
+        assert out["eps_qc"].attrs["cell_methods"] == "depth: maximum"
 
     def test_empty_bin_is_missing(self):
         out = _bin(eps=[1e-9], qc=[1], depth=[5])

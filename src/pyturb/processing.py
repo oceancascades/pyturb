@@ -2,7 +2,6 @@
 
 import logging
 import multiprocessing as mp
-from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -11,26 +10,55 @@ import gsw  # type: ignore[import]
 import numpy as np
 import pandas as pd
 import xarray as xr
+import yaml
 
-from . import __version__, qc
+from . import qc
 from .auxiliary import attach_auxiliary, load_auxiliary
+from .cf import apply_cf
 from .io import load_profile_nc, resolve_input_files
+from .metadata import (
+    USER_ATTRS_KEY,
+    common_attrs,
+    split_shared,
+    stamp_globals,
+    validate_global_attrs,
+)
 from .profile import (
     ProfileConfig,
     prepare_profile,
     process_profile,
+    segment_direction,
     split_into_profiles,
 )
 
 _log = logging.getLogger(__name__)
 
+# Globals bin_profiles keeps when every eps file shares them.
+_BIN_SHARED_ATTRS = ("instrument_vehicle", "instrument_model", "pyturb_config")
+
+# Variable attrs that describe the data rather than one instrument or file
+# (calibration provenance, despike parameters, cal_*). The binned file keeps
+# only these, and only where every profile agrees.
+_BIN_VAR_ATTRS = (
+    "long_name",
+    "units",
+    "standard_name",
+    "positive",
+    "axis",
+    "calendar",
+    "comment",
+    "flag_values",
+    "flag_meanings",
+    "valid_min",
+    "valid_max",
+    "cell_methods",
+    "ancillary_variables",
+)
+
 __all__ = [
     "batch_compute_epsilon",
     "bin_profiles",
 ]
-
-
-_INSTRUMENT_ATTRS = ("instrument_vehicle", "instrument_model", "instrument_sn")
 
 
 def _write_epsilon_profile(
@@ -40,6 +68,8 @@ def _write_epsilon_profile(
     source_file_name: str,
     profile_idx: int,
     config: ProfileConfig,
+    global_attrs: Optional[dict] = None,
+    auxiliary_file: Optional[str] = None,
 ) -> None:
     """Write a processed-profile dataset to NetCDF with stamped metadata.
 
@@ -47,7 +77,8 @@ def _write_epsilon_profile(
     ``lat``/``lon`` attached for VMP-style GPS (see
     :func:`~pyturb.profile._attach_scalar_position`). Reattaches the
     ``frequency`` and ``k`` coordinates, carries over ``time``/``ctd_time``
-    attrs, and stamps source file / profile / instrument metadata.
+    units, and replaces the global attributes with the eps set (see
+    :func:`~pyturb.metadata.stamp_globals`) plus any ``global_attrs``.
     """
     vars_to_keep = [
         v
@@ -63,23 +94,31 @@ def _write_epsilon_profile(
 
     for coord in ("time", "ctd_time"):
         if coord in result.coords and coord in out.coords:
-            for attr in ("units", "long_name"):
-                if attr in result[coord].attrs:
-                    out[coord].attrs[attr] = result[coord].attrs[attr]
+            if "units" in result[coord].attrs:
+                out[coord].attrs["units"] = result[coord].attrs["units"]
 
-    out.attrs["source_file"] = source_file_name
-    out.attrs["profile_index"] = profile_idx
-    out.attrs["profile_direction"] = config.profile_direction
-    out.attrs["pyturb_version"] = __version__
-    out.attrs["pyturb_processed_utc"] = datetime.now(timezone.utc).isoformat(
-        timespec="seconds"
+    pressure_name = (
+        config.pressure_smooth if config.pressure_smooth in result else "pressure"
     )
-    out.attrs["pyturb_config"] = config.to_yaml()
-    for attr in _INSTRUMENT_ATTRS:
-        if attr in source_ds.attrs:
-            out.attrs[attr] = source_ds.attrs[attr]
+    out.attrs = stamp_globals(
+        source_ds.attrs,
+        step="eps",
+        title="Turbulence estimates for one profile",
+        detail=f"{source_file_name} profile {profile_idx}",
+        user_attrs=global_attrs,
+        source_file=source_file_name,
+        **({"auxiliary_file": auxiliary_file} if auxiliary_file else {}),
+        profile_index=profile_idx,
+        profile_direction=segment_direction(result[pressure_name].values, 0, -1),
+        **{
+            k: result.attrs[k]
+            for k in ("fs_fast", "fs_slow", "n_fft", "n_diss")
+            if k in result.attrs
+        },
+        pyturb_config=config.to_yaml(),
+    )
 
-    out.to_netcdf(output_file)
+    apply_cf(out).to_netcdf(output_file)
 
 
 def _has_existing_outputs(stem: str, output_dir: Path) -> bool:
@@ -96,6 +135,8 @@ def _process_file(
     overwrite: bool,
     aux_ds: Optional[xr.Dataset] = None,
     skip_existing: bool = False,
+    global_attrs: Optional[dict] = None,
+    auxiliary_file: Optional[str] = None,
 ) -> list[tuple]:
     """Process a file that may contain multiple profiles.
 
@@ -132,7 +173,14 @@ def _process_file(
             try:
                 result = process_profile(profile_ds, config)
                 _write_epsilon_profile(
-                    result, ds, output_file, input_file.name, profile_idx, config
+                    result,
+                    ds,
+                    output_file,
+                    input_file.name,
+                    profile_idx,
+                    config,
+                    global_attrs,
+                    auxiliary_file,
                 )
                 results.append((input_file, output_file, profile_idx, None))
             except Exception as e:
@@ -171,6 +219,8 @@ def _run_epsilon_pool(
     aux_ds: Optional[xr.Dataset],
     n_workers: int,
     skip_existing: bool = False,
+    global_attrs: Optional[dict] = None,
+    auxiliary_file: Optional[str] = None,
 ) -> list[dict]:
     """Dispatch ``_process_file`` across ``nc_files`` and collect results."""
     worker = partial(
@@ -180,6 +230,8 @@ def _run_epsilon_pool(
         overwrite=overwrite,
         aux_ds=aux_ds,
         skip_existing=skip_existing,
+        global_attrs=global_attrs,
+        auxiliary_file=auxiliary_file,
     )
     effective_workers = min(n_workers, len(nc_files))
     _log.info(f"Using {effective_workers} parallel workers for {len(nc_files)} files")
@@ -228,6 +280,7 @@ def batch_compute_epsilon(
     n_workers: Optional[int] = None,
     overwrite: bool = False,
     skip_existing: bool = False,
+    global_attrs: Optional[dict] = None,
 ) -> list[dict]:
     """Batch compute epsilon from converted NetCDF files.
 
@@ -263,6 +316,11 @@ def batch_compute_epsilon(
         per-profile overwrite check, which still has to load and split the
         file to find its profile names. Ignored if ``overwrite`` is True.
         Default False.
+    global_attrs : dict, optional
+        Extra global attributes for every output file (e.g. ``title``,
+        ``institution``, ``creator_name``); see
+        :func:`pyturb.metadata.load_global_attrs`. ``bin_profiles`` carries
+        them into the binned file when every profile shares them.
 
     Returns
     -------
@@ -285,6 +343,8 @@ def batch_compute_epsilon(
 
     if config is None:
         config = ProfileConfig()
+    if global_attrs:
+        validate_global_attrs(global_attrs)
 
     output_dir = _ensure_output_dir(output_dir)
 
@@ -296,7 +356,15 @@ def batch_compute_epsilon(
         n_workers = mp.cpu_count()
 
     return _run_epsilon_pool(
-        nc_files, output_dir, config, overwrite, aux_ds, n_workers, skip_existing
+        nc_files,
+        output_dir,
+        config,
+        overwrite,
+        aux_ds,
+        n_workers,
+        skip_existing,
+        global_attrs,
+        Path(auxiliary_file).name if auxiliary_file is not None else None,
     )
 
 
@@ -396,10 +464,19 @@ def _bin_var_group(
         ds_binned = xr.merge([ds_binned, counts.sum().fillna(0).astype("i4")])
         for v in value_vars:
             ds_binned[f"{v}_n"].attrs = {
-                "long_name": f"Number of windows averaged into {v}",
-                "units": "1",
                 "comment": f"Count of per-window {v} values averaged in this bin",
             }
+
+    # The QC helpers and groupby reductions drop variable attrs.
+    for v in present:
+        if v in ds:
+            ds_binned[v].attrs.update(ds[v].attrs)
+    for v in qc_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: maximum"
+    for v in count_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: sum"
+    for v in mean_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: mean"
 
     bin_name = f"{bin_var_name}_bins"
     ds_binned[bin_name] = np.array(
@@ -454,12 +531,15 @@ def _bin_single_profile(
     """
     try:
         ds = xr.load_dataset(file, decode_times=False)
+        attrs = {v: dict(ds[v].attrs) for v in ds.data_vars}
 
         # Pre-bin masking: drop high-eps windows flagged questionable/bad
         # (those are likely real instrument problems, not noise-floor noise).
         ds = qc.mask_low_quality_eps(
             ds, ("eps_1", "eps_2", "eps"), questionable_thresh, bad_thresh
         )
+        for v, a in attrs.items():
+            ds[v].attrs = a
 
         coarse_vars = [v for v in variables if v in ds and f"{v}_hires" not in ds]
         hires_bases = [v for v in variables if f"{v}_hires" in ds]
@@ -509,7 +589,6 @@ def _bin_single_profile(
         if "time_var" in ds_binned:
             ds_binned = ds_binned.rename({"time_var": "time"})
             ds_binned["time"].attrs["units"] = "seconds since 1970-01-01 00:00:00"
-            ds_binned["time"].attrs["long_name"] = "Time"
             ds_binned["time"].attrs["calendar"] = "proleptic_gregorian"
 
         # Separate, finer CTD-only grid (keeps the "_hires" names).
@@ -528,10 +607,18 @@ def _bin_single_profile(
             if piece_ctd is not None:
                 ds_binned = xr.merge([ds_binned, piece_ctd], compat="override")
 
-        # Add source file as attribute
-        ds_binned.attrs["source_file"] = file.name
+        ds_binned["source_file"] = file.name
+        ds_binned["source_pfile"] = str(ds.attrs.get("source_pfile", ""))
+        ds_binned["profile_index"] = np.int32(ds.attrs.get("profile_index", -1))
+        ds_binned["profile_direction"] = str(ds.attrs.get("profile_direction", ""))
+        # Only the globals bin_profiles may inherit (see _inherited_globals).
+        user_keys = str(ds.attrs.get(USER_ATTRS_KEY, "")).split()
+        ds_binned.attrs = {
+            k: ds.attrs[k]
+            for k in (*_BIN_SHARED_ATTRS, USER_ATTRS_KEY, *user_keys)
+            if k in ds.attrs
+        }
 
-        # Add instrument serial number as a data variable (to be used as coordinate)
         if "instrument_sn" in ds.attrs:
             ds_binned["instrument_sn"] = ds.attrs["instrument_sn"]
         if "instrument_vehicle" in ds.attrs:
@@ -542,6 +629,46 @@ def _bin_single_profile(
     except Exception:
         _log.error(f"Error binning {file}, skipping.")
         return None
+
+
+def _inherited_globals(
+    profile_attrs: list[dict], own_user_attrs: dict
+) -> tuple[dict, dict]:
+    """Globals every binned profile shares: (pyturb globals, user attributes).
+
+    User attributes are those listed in each eps file's ``pyturb_user_attrs``;
+    ``own_user_attrs`` (bin's own) override them without a mismatch warning.
+    """
+    shared = common_attrs(profile_attrs, list(_BIN_SHARED_ATTRS), "Attribute")
+    if "pyturb_config" in shared:
+        shared["pyturb_eps_config"] = shared.pop("pyturb_config")
+    user_keys = dict.fromkeys(
+        k for a in profile_attrs for k in str(a.get(USER_ATTRS_KEY, "")).split()
+    )
+    user = common_attrs(
+        profile_attrs,
+        [k for k in user_keys if k not in own_user_attrs],
+        "User attribute",
+    )
+    return shared, {**user, **own_user_attrs}
+
+
+def _shared_var_attrs(combined: xr.Dataset, binned: list[xr.Dataset]) -> None:
+    """Replace each variable's attrs with the _BIN_VAR_ATTRS every profile shares.
+
+    xr.concat would otherwise keep one profile's attrs for the whole variable.
+    """
+    differing = []
+    for name in combined.variables:
+        per_profile = [b[name].attrs for b in binned if name in b.variables]
+        shared, diff = split_shared(per_profile, list(_BIN_VAR_ATTRS))
+        combined.variables[name].attrs = shared
+        differing += [f"{name}:{k}" for k in diff]
+    if differing:
+        _log.warning(
+            "Variable attributes differ between profiles and were dropped: "
+            + ", ".join(differing)
+        )
 
 
 def _unpack_bin_args(args: tuple) -> Optional[xr.Dataset]:
@@ -578,6 +705,7 @@ def bin_profiles(
     questionable_thresh: float = 1e-7,
     bad_thresh: float = 1e-9,
     ctd_bin_width: Optional[float] = None,
+    global_attrs: Optional[dict] = None,
 ) -> Optional[xr.Dataset]:
     """
     Bin multiple profile datasets by depth and concatenate.
@@ -623,6 +751,18 @@ def bin_profiles(
         typically finer grid of this width, over the same depth_min/max
         range. Output on a separate ``ctd_depth`` coordinate, keeping the
         ``_hires`` suffix. Default None (skipped).
+    global_attrs : dict, optional
+        Extra global attributes for the binned file (e.g. ``title``); see
+        :func:`pyturb.metadata.load_global_attrs`. User attributes already in
+        the eps files are inherited when every profile has the same value
+        (a warning is logged otherwise); these override them.
+
+    Notes
+    -----
+    Variables keep only descriptive CF attributes (``long_name``, ``units``,
+    ``comment``, flag attributes, ...), and only where every profile agrees.
+    Instrument- and file-specific ones (calibration provenance, despike
+    parameters) are removed.
 
     Returns
     -------
@@ -675,6 +815,9 @@ def bin_profiles(
             "lat",
             "lon",
         ]
+
+    if global_attrs:
+        validate_global_attrs(global_attrs)
 
     nc_files = resolve_input_files(files, "*.nc")
     if not nc_files:
@@ -736,8 +879,30 @@ def bin_profiles(
 
     _log.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
-    # Concatenate along profile dimension
+    inherited, user_attrs = _inherited_globals(
+        [b.attrs for b in binned_datasets], global_attrs or {}
+    )
     combined = xr.concat(binned_datasets, dim="profile")
+    _shared_var_attrs(combined, binned_datasets)
+    bin_config = {
+        "depth_min": float(depth_min),
+        "depth_max": float(depth_max),
+        "bin_width": float(bin_width),
+        "ctd_bin_width": ctd_bin_width,
+        "questionable_thresh": float(questionable_thresh),
+        "bad_thresh": float(bad_thresh),
+        "default_latitude": float(default_latitude),
+        "variables": list(variables),
+    }
+    combined.attrs = stamp_globals(
+        {},
+        step="bin",
+        title="Depth-binned turbulence profiles",
+        detail=f"{len(binned_datasets)} profiles",
+        user_attrs=user_attrs,
+        **inherited,
+        pyturb_bin_config=yaml.safe_dump(bin_config, sort_keys=False),
+    )
 
     # Sort profiles by time (use minimum time per profile to handle NaT values)
     # and attach it as a "profile_time" coordinate so profiles are directly
@@ -753,7 +918,6 @@ def bin_profiles(
             profile_time=("profile", profile_times.values[sort_order])
         )
         combined["profile_time"].attrs = {
-            "long_name": "Profile start time",
             "units": "seconds since 1970-01-01 00:00:00",
             "calendar": "proleptic_gregorian",
         }
@@ -762,7 +926,7 @@ def bin_profiles(
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_netcdf(output_file)
+    apply_cf(combined).to_netcdf(output_file)
 
     _log.info(f"Saved binned data to {output_file}")
 

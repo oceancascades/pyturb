@@ -25,6 +25,7 @@ from ._pfile import (
     read_pfile,
     to_xarray,
 )
+from .cf import apply_cf
 from .signal import despike_variables
 
 # Probes that p2nc will optionally pre-despike. Matches ProfileConfig defaults.
@@ -183,12 +184,6 @@ def save_netcdf(
             smooth=despike_kwargs.get("smooth", 0.5),
             replace_sec=despike_kwargs.get("replace_sec", 0.04),
         )
-        # Persist the parameters used so downstream (eps) callers can audit
-        # them via ncdump -h or xarray attrs.
-        ds.attrs["despike_passes"] = int(despike_kwargs.get("passes", 6))
-        ds.attrs["despike_thresh"] = float(despike_kwargs.get("thresh", 8.0))
-        ds.attrs["despike_smooth"] = float(despike_kwargs.get("smooth", 0.5))
-        ds.attrs["despike_replace_sec"] = float(despike_kwargs.get("replace_sec", 0.04))
 
     encoding = {}
     if compress:
@@ -205,7 +200,7 @@ def save_netcdf(
                 "dtype": "float64",
             }
 
-    ds.to_netcdf(output_file, encoding=encoding, format="NETCDF4")
+    apply_cf(ds).to_netcdf(output_file, encoding=encoding, format="NETCDF4")
 
 
 def _process_single_file(

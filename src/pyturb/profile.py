@@ -699,6 +699,11 @@ def extract_profile_by_indices(
     return ds.sel(t_slow=slice(t0, t1), t_fast=slice(t0, t1))
 
 
+def segment_direction(pressure: np.ndarray, idx_start: int, idx_end: int) -> str:
+    """Return "down" if pressure increases start->end, else "up"."""
+    return "down" if pressure[idx_end] >= pressure[idx_start] else "up"
+
+
 def split_into_profiles(
     ds: xr.Dataset,
     config: ProfileConfig,
@@ -938,6 +943,7 @@ def _preprocess_for_spectra(
 
     if config.force_despike:
         ds = _drop_embedded_clean(ds, config)
+    embedded = {p for p in config.all_probes if despike_mask_name(p) in ds}
     ds = despike_variables(
         ds,
         config.all_probes,
@@ -947,6 +953,18 @@ def _preprocess_for_spectra(
         smooth=config.despike_smooth,
         replace_sec=config.despike_replace_sec,
     )
+    for probe in config.all_probes:
+        if (mask_name := despike_mask_name(probe)) not in ds:
+            continue
+        attrs = ds[mask_name].attrs
+        if probe in embedded:
+            attrs["despike_source"] = "p2nc"
+            # Files converted before the parameters moved onto the variables.
+            for key, value in ds.attrs.items():
+                if key.startswith("despike_"):
+                    attrs.setdefault(key, value)
+        else:
+            attrs["despike_source"] = "eps"
 
     hp_cutoff = _resolve_hp_cutoff(config)
     if hp_cutoff is not None and hp_cutoff > 0:
@@ -1052,7 +1070,11 @@ def _apply_conductivity_matching(ds: xr.Dataset, config: ProfileConfig) -> xr.Da
         reference_speed=config.jac_reference_speed,
     )
     ds = ds.copy()
-    ds["JAC_C"] = ("t_slow", matched.astype(ds["JAC_C"].values.dtype))
+    ds["JAC_C"] = (
+        "t_slow",
+        matched.astype(ds["JAC_C"].values.dtype),
+        ds["JAC_C"].attrs,
+    )
     return ds
 
 
@@ -1088,6 +1110,11 @@ def _resolve_eps_floor(ds: xr.Dataset, config: ProfileConfig) -> float:
     if _vehicle(ds) in _VMP_STYLE_VEHICLES:
         return qc.VMP_EPS_FLOOR
     return qc.DEFAULT_EPS_FLOOR
+
+
+def _calibration_provenance(ds: xr.Dataset, name: str) -> dict:
+    """Attrs recorded by calibrate-fp07/calibrate-jac-c on ``name`` (not ``cal_*``)."""
+    return {k: v for k, v in ds[name].attrs.items() if k.startswith(f"{name}_")}
 
 
 def _build_ctd_vars(
@@ -1139,11 +1166,7 @@ def _build_ctd_vars(
         kappa_T = thermal_diffusivity(S_mean, T_visc, rho_mean, out["pressure"][0])
         out["kappa_T"] = (
             kappa_T,
-            {
-                "long_name": "Molecular thermal diffusivity",
-                "units": "m2 s-1",
-                "comment": "Caldwell (1974) conductivity / (rho * cp0)",
-            },
+            {"comment": "Caldwell (1974) conductivity / (rho * cp0)"},
         )
 
     vmp_style_gps = _is_vmp_style_gps(ds, config)
@@ -1161,34 +1184,15 @@ def _build_ctd_vars(
             lon_arr = aux_mean(ds["aux_longitude"].values)
             out["lon"] = (lon_arr, {})
     if "JAC_C" in means:
-        out["conductivity"] = (means["JAC_C"], {})
-    if "T1" in means:
-        out["T1"] = (
-            means["T1"],
-            {
-                "long_name": "FP07 thermistor 1 temperature",
-                "standard_name": "sea_water_temperature",
-                "units": "degree_C",
-            },
-        )
-    if "T2" in means:
-        out["T2"] = (
-            means["T2"],
-            {
-                "long_name": "FP07 thermistor 2 temperature",
-                "standard_name": "sea_water_temperature",
-                "units": "degree_C",
-            },
-        )
+        out["conductivity"] = (means["JAC_C"], _calibration_provenance(ds, "JAC_C"))
+    for probe in ("T1", "T2"):
+        if probe in means:
+            out[probe] = (means[probe], _calibration_provenance(ds, probe))
+    # Optical units come from the setup file, so aren't in the CF registry.
     for var in config.optical_vars:
         if var in means:
-            out[var] = (
-                means[var],
-                {
-                    "long_name": ds[var].attrs.get("long_name", var),
-                    "units": ds[var].attrs.get("units", ""),
-                },
-            )
+            units = ds[var].attrs.get("units")
+            out[var] = (means[var], {"units": units} if units else {})
 
     lat_for_gsw = (
         lat_arr if lat_arr is not None else np.full(n_out, config.default_latitude)
@@ -1200,12 +1204,7 @@ def _build_ctd_vars(
     z = gsw.z_from_p(out["pressure"][0], lat_for_gsw)
     out["z"] = (
         z,
-        {
-            "long_name": "Height (negative below sea surface)",
-            "standard_name": "height",
-            "units": "m",
-            "comment": "gsw.z_from_p(pressure, lat)",
-        },
+        {"comment": "gsw.z_from_p(pressure, lat)"},
     )
 
     has_real_temperature = config.temperature in means or "aux_temperature" in ds
@@ -1219,30 +1218,11 @@ def _build_ctd_vars(
         CT = gsw.CT_from_t(SA, T_insitu, P_dbar)
         potential_density = gsw.sigma0(SA, CT) + 1000.0
 
-        out["absolute_salinity"] = (
-            SA,
-            {
-                "long_name": "Absolute Salinity",
-                "standard_name": "sea_water_absolute_salinity",
-                "units": "g kg-1",
-            },
-        )
-        out["conservative_temperature"] = (
-            CT,
-            {
-                "long_name": "Conservative Temperature",
-                "standard_name": "sea_water_conservative_temperature",
-                "units": "degC",
-            },
-        )
+        out["absolute_salinity"] = (SA, {})
+        out["conservative_temperature"] = (CT, {})
         out["potential_density"] = (
             potential_density,
-            {
-                "long_name": "Potential density referenced to 0 dbar",
-                "standard_name": "sea_water_potential_density",
-                "units": "kg m-3",
-                "comment": "gsw.sigma0(SA, CT) + 1000",
-            },
+            {"comment": "gsw.sigma0(SA, CT) + 1000, referenced to 0 dbar"},
         )
 
     return out
@@ -1259,10 +1239,8 @@ def _attach_scalar_position(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset
         return ds
     if "aux_latitude" in ds:
         ds["lat"] = float(_first_valid(ds["aux_latitude"].values))
-        ds["lat"].attrs = {"long_name": "Latitude", "units": "degree_north"}
     if "aux_longitude" in ds:
         ds["lon"] = float(_first_valid(ds["aux_longitude"].values))
-        ds["lon"].attrs = {"long_name": "Longitude", "units": "degree_east"}
     return ds
 
 
@@ -1316,9 +1294,6 @@ def _attach_buoyancy_frequency(
     source = "CTD hires bins" if suffix else "dissipation-window means"
     ds[f"N2{suffix}"] = (dim, N2.astype("f4"))
     ds[f"N2{suffix}"].attrs = {
-        "long_name": "Buoyancy frequency squared",
-        "standard_name": "square_of_brunt_vaisala_frequency_in_sea_water",
-        "units": "s-2",
         "comment": (
             "gsw.Nsquared(absolute_salinity, conservative_temperature, "
             f"pressure) from the {source}, interpolated from gsw's "
@@ -1390,7 +1365,6 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
     ds = ds.assign_coords(ctd_time=("ctd_time", means_ctd["t_slow"]))
     if "units" in ds.t_slow.attrs:
         ds.ctd_time.attrs["units"] = ds.t_slow.attrs["units"]
-    ds.ctd_time.attrs["long_name"] = "Time (CTD bins)"
 
     for name, (arr, attrs) in ctd_vars.items():
         out_name = f"{name}_hires"
@@ -1444,8 +1418,6 @@ def _attach_window_scalars(
     ds = ds.assign_coords(time=("time", means["t_slow"]))
     if "units" in ds.t_slow.attrs:
         ds.time.attrs["units"] = ds.t_slow.attrs["units"]
-    if "long_name" in ds.t_slow.attrs:
-        ds.time.attrs["long_name"] = "Time (dissipation windows)"
 
     # Must run before the coarse loop below, which overwrites "T1"/"T2" with
     # their window-mean values -- this reads them at full resolution first.
@@ -1473,10 +1445,11 @@ def _attach_window_scalars(
         out_name = f"{probe}_despike_frac"
         ds[out_name] = ("time", frac.astype("f4"))
         ds[out_name].attrs = {
-            "long_name": f"Fraction of {probe} samples modified by despiking",
-            "units": "1",
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
+            **{
+                k: v for k, v in ds[mask_name].attrs.items() if k.startswith("despike_")
+            },
         }
         ds = ds.drop_vars(mask_name)
 
@@ -1486,11 +1459,10 @@ def _attach_window_scalars(
         frac = _window_mean_slow(mask_slow.astype("f4"), params)
         ds[f"{probe}_range_frac"] = ("time", frac.astype("f4"))
         ds[f"{probe}_range_frac"].attrs = {
-            "long_name": f"Fraction of {probe} raw samples outside "
-            f"[{qc.MIN_SANE_TEMP_C}, {qc.MAX_SANE_TEMP_C}] C",
-            "units": "1",
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
+            "comment": f"Sane range is [{qc.MIN_SANE_TEMP_C}, "
+            f"{qc.MAX_SANE_TEMP_C}] degree_C",
         }
         confident = (fit_confident or {}).get(probe)
         qc_var = f"{probe}_qc"
@@ -1601,8 +1573,6 @@ def _compute_shear_spectra_with_cleaning(
         ds[f"S_{name}"] = (("time", "frequency"), psd.astype("f4"))
         if name in config.temperature_probes:
             ds[f"S_{name}"].attrs = {
-                "long_name": f"Power spectral density of {name}",
-                "units": "K2 m-2 Hz-1",
                 "comment": (
                     "Corrected for the FP07 thermistor's single-pole frequency "
                     "response (Lueck), tau = fp07_tau0 * W^fp07_speed_exp "
@@ -1613,8 +1583,6 @@ def _compute_shear_spectra_with_cleaning(
             }
         elif name in config.shear_probes:
             ds[f"S_{name}"].attrs = {
-                "long_name": f"Power spectral density of {name}",
-                "units": "s-2 Hz-1",
                 "comment": (
                     "Corrected for the shear probe's spatial-averaging and "
                     "anti-alias response with a single-pole transfer function "
@@ -1672,8 +1640,6 @@ def _attach_epsilon(
         ds[f"k_max_{probe_num}"] = ("time", k_max.astype("f4"))
         ds[f"eps_{probe_num}_fm"] = ("time", fm.astype("f4"))
         ds[f"eps_{probe_num}_fm"].attrs = {
-            "long_name": f"Figure of merit for eps_{probe_num} Nasmyth fit",
-            "units": "1",
             "comment": (
                 "FM = mean(|log10(P_sh / Nasmyth)|) * sqrt(dof_spec) over the "
                 "fit wavenumber band. Lower is better; independent of "
@@ -1776,8 +1742,6 @@ def _attach_chi(
         fm = mad * sqrt_dof
         ds[f"chi_{probe_num}"] = ("time", chi.astype("f4"))
         ds[f"chi_{probe_num}"].attrs = {
-            "long_name": f"Temperature variance dissipation rate from {name}",
-            "units": "K2 s-1",
             "comment": (
                 "Integrated response-corrected temperature gradient spectrum, "
                 "corrected for unresolved variance with the Kraichnan "
@@ -1787,8 +1751,6 @@ def _attach_chi(
         ds[f"chi_k_max_{probe_num}"] = ("time", k_max.astype("f4"))
         ds[f"chi_{probe_num}_fm"] = ("time", fm.astype("f4"))
         ds[f"chi_{probe_num}_fm"].attrs = {
-            "long_name": f"Figure of merit for chi_{probe_num} Kraichnan fit",
-            "units": "1",
             "comment": (
                 "FM = mean(|log10(P_gradT / Kraichnan)|) * sqrt(dof_spec) "
                 "over the integration band. Lower is better."

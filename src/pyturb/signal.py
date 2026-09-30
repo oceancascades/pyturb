@@ -418,6 +418,8 @@ def despike_variables(
       - ``var + suffix`` (default ``"_clean"``) — the despiked signal.
       - ``<var>_despike_mask`` — boolean per-sample mask of modified samples.
 
+    Both carry the despike parameters used as ``despike_*`` attributes.
+
     If both companions are already present (e.g., the input file was
     pre-cleaned during ``p2nc``), despiking is skipped for that variable so
     the existing cleaned signal and mask flow through unchanged.
@@ -427,6 +429,12 @@ def despike_variables(
     """
     ds = ds.copy()
     n_samples = int(replace_sec * fs)
+    params = {
+        "despike_passes": np.int32(max_passes),
+        "despike_thresh": float(thresh),
+        "despike_smooth": float(smooth),
+        "despike_replace_sec": float(replace_sec),
+    }
 
     for var in variables:
         if var not in ds:
@@ -445,7 +453,7 @@ def despike_variables(
             n=n_samples,
             max_passes=max_passes,
         )
-        ds[cleaned_name] = ("t_fast", cleaned)
-        ds[mask_name] = ("t_fast", cleaned != original)
+        ds[cleaned_name] = ("t_fast", cleaned, dict(params))
+        ds[mask_name] = ("t_fast", cleaned != original, dict(params))
 
     return ds
