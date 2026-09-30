@@ -1,10 +1,13 @@
 """Quality-control flags (IODE convention: 1 good, 2 not evaluated, 3 questionable,
 4 bad, 9 missing) for per-window estimates and their depth-binned averages."""
 
-from typing import TYPE_CHECKING, Optional
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import xarray as xr
+import yaml
 
 if TYPE_CHECKING:
     from .profile import ProfileConfig
@@ -14,6 +17,13 @@ FLAG_MEANINGS = "good not_evaluated questionable bad missing"
 MISSING = np.int8(9)
 EXCLUDED = np.int8(-1)
 AGREEMENT_FACTOR = 10.0
+
+# Platform noise floors (W/kg): a ship-tethered VMP is far noisier than a
+# MicroRider on a glider or mooring.
+VMP_EPS_FLOOR = 1e-10
+DEFAULT_EPS_FLOOR = 1e-12
+
+OVERRIDE_PROBES = ("sh1", "sh2", "T1", "T2")
 
 # Broad, globally-safe bounds on seawater temperature. A T1/T2 value outside
 # this range usually indicates a calibration extrapolated beyond its fitted
@@ -224,18 +234,22 @@ def select_best_windows(
 ) -> xr.Dataset:
     """Per bin, keep only windows flagged good/questionable if any exist,
     else fall back to the remaining (bad) windows. Dropped windows get NaN
-    and the QC sentinel; ``<var>_n`` marks the windows kept.
+    and the QC sentinel; ``<var>_n`` marks the windows kept. A bin with no
+    finite value keeps flag 4 if any of its windows were flagged bad.
     """
     in_bin = codes >= 0
+    bin_idx = np.where(in_bin, codes, 0)
     for v in value_vars:
         val = ds[v].values.astype("f8", copy=True)
         qc = ds[f"{v}_qc"].values.astype("i1", copy=True)
         finite = np.isfinite(val)
         usable = finite & (qc >= 1) & (qc <= 3)
         has_usable = np.bincount(codes[usable & in_bin], minlength=n_bins) > 0
-        used = finite & in_bin & (usable | ~has_usable[np.where(in_bin, codes, 0)])
+        used = finite & in_bin & (usable | ~has_usable[bin_idx])
+        has_used = np.bincount(codes[used], minlength=n_bins) > 0
+        bad_flag = in_bin & ~has_used[bin_idx] & (qc == 4)
         val[~used] = np.nan
-        qc[~used] = EXCLUDED
+        qc[~(used | bad_flag)] = EXCLUDED
         ds[v] = (ds[v].dims, val)
         ds[f"{v}_qc"] = (ds[v].dims, qc)
         ds[f"{v}_n"] = (ds[v].dims, used.astype("i4"))
@@ -257,3 +271,76 @@ def restore_qc_missing(ds: xr.Dataset, qc_vars: list[str]) -> xr.Dataset:
         out = np.where(np.isnan(arr) | (arr == EXCLUDED), MISSING, arr)
         ds[v] = (ds[v].dims, out.astype("i1"))
     return ds
+
+
+def load_overrides(path: Union[str, Path]) -> list[dict]:
+    """Load manual QC override rules from a YAML file.
+
+    The file holds a list of rules, each with:
+
+      * ``instrument_sn`` (required): matched against the ``instrument_sn`` attr.
+      * ``probes`` (required): any of ``sh1``, ``sh2``, ``T1``, ``T2``. A shear
+        probe flags ``eps_N``; a thermistor flags ``TN`` and ``chi_N``.
+      * ``start`` / ``end`` (optional, ISO 8601 UTC): inclusive time range;
+        omit either for an open-ended range.
+      * ``flag`` (optional, 3 or 4; default 4).
+      * ``reason`` (required): recorded in the flagged variables' comments.
+
+    Overrides only make flags worse. Returns the rules with times as strings.
+    """
+    rules = yaml.safe_load(Path(path).read_text()) or []
+    if not isinstance(rules, list):
+        raise ValueError(f"{path}: expected a list of override rules")
+    out = []
+    for i, r in enumerate(rules):
+        missing = {"instrument_sn", "probes", "reason"} - set(r)
+        if missing:
+            raise ValueError(f"{path}: rule {i} is missing {sorted(missing)}")
+        probes = [r["probes"]] if isinstance(r["probes"], str) else list(r["probes"])
+        unknown = set(probes) - set(OVERRIDE_PROBES)
+        if unknown:
+            raise ValueError(f"{path}: rule {i} has unknown probes {sorted(unknown)}")
+        flag = int(r.get("flag", 4))
+        if flag not in (3, 4):
+            raise ValueError(f"{path}: rule {i} flag must be 3 or 4, got {flag}")
+        rule = {
+            "instrument_sn": str(r["instrument_sn"]).strip(),
+            "probes": probes,
+            "flag": flag,
+            "reason": str(r["reason"]),
+        }
+        for key in ("start", "end"):
+            if r.get(key) is not None:
+                rule[key] = str(np.datetime64(r[key], "s"))
+        out.append(rule)
+    return out
+
+
+def apply_overrides(ds: xr.Dataset, rules: list[dict], qc_vars: list[str]) -> None:
+    """Raise ``qc_vars`` (per-window, on ``time``) to each matching rule's flag, in place."""
+    sn = str(ds.attrs.get("instrument_sn", "")).strip()
+    rules = [r for r in rules if r["instrument_sn"] == sn]
+    if not rules:
+        return
+    times = xr.decode_cf(ds[["time"]])["time"].values.astype("datetime64[s]")
+    for v in qc_vars:
+        if v not in ds:
+            continue
+        n = re.search(r"\d", v).group()
+        probe = f"sh{n}" if v.startswith("eps_") else f"T{n}"
+        for r in rules:
+            if probe not in r["probes"]:
+                continue
+            hit = np.ones(times.shape, bool)
+            if "start" in r:
+                hit &= times >= np.datetime64(r["start"])
+            if "end" in r:
+                hit &= times <= np.datetime64(r["end"])
+            if not hit.any():
+                continue
+            flags = ds[v].values
+            flags[hit] = np.maximum(flags[hit], r["flag"])
+            ds[v].attrs["comment"] = (
+                ds[v].attrs.get("comment", "")
+                + f" Manually flagged {r['flag']}: {r['reason']}"
+            ).strip()

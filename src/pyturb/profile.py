@@ -88,6 +88,12 @@ class ProfileConfig:
     # contributions via max.
     despike_frac_questionable: float = 0.1
     despike_frac_bad: float = 0.2
+    # Platform noise floor: epsilon below this is QC-flagged bad.
+    # None = auto from instrument_vehicle (qc.VMP_EPS_FLOOR for VMP-style
+    # vehicles, qc.DEFAULT_EPS_FLOOR otherwise).
+    eps_floor: Optional[float] = None
+    # Manual QC override rules (see qc.load_overrides); only raise flags.
+    qc_overrides: list[dict] = field(default_factory=list)
 
     # === Default values for missing data ===
     default_temperature: float = 10.0
@@ -1069,8 +1075,19 @@ def _is_vmp_style_gps(ds: xr.Dataset, config: ProfileConfig) -> bool:
     """Whether to use one lat/lon per profile instead of per-window/bin."""
     if config.vmp_style_gps is not None:
         return config.vmp_style_gps
-    vehicle = str(ds.attrs.get("instrument_vehicle", "")).strip().lower()
-    return vehicle in _VMP_STYLE_VEHICLES
+    return _vehicle(ds) in _VMP_STYLE_VEHICLES
+
+
+def _vehicle(ds: xr.Dataset) -> str:
+    return str(ds.attrs.get("instrument_vehicle", "")).strip().lower()
+
+
+def _resolve_eps_floor(ds: xr.Dataset, config: ProfileConfig) -> float:
+    if config.eps_floor is not None:
+        return config.eps_floor
+    if _vehicle(ds) in _VMP_STYLE_VEHICLES:
+        return qc.VMP_EPS_FLOOR
+    return qc.DEFAULT_EPS_FLOOR
 
 
 def _build_ctd_vars(
@@ -1491,6 +1508,7 @@ def _attach_window_scalars(
             "fit_is_confident).",
         )
 
+    qc.apply_overrides(ds, config.qc_overrides, ["T1_qc", "T2_qc"])
     return ds
 
 
@@ -1637,11 +1655,15 @@ def _attach_epsilon(
         two ``config.despike_frac_questionable`` / ``config.despike_frac_bad``
         thresholds. Treated as zero if the despike-fraction variable is
         absent (e.g., probe was never despiked).
+
+    Epsilon below the platform noise floor (see ``_resolve_eps_floor``) is
+    then flagged 4.
     """
     epsilon_results = compute_epsilon(freq, spectra, ds["W"].values, ds["nu"].values)
     sqrt_dof = float(np.sqrt(_dof_spec(params)))
     W = ds["W"].values
     speed_bad = W < config.min_speed
+    eps_floor = _resolve_eps_floor(ds, config)
 
     for name, (eps, k_max, mad) in epsilon_results.items():
         probe_num = name[-1]
@@ -1666,6 +1688,7 @@ def _attach_epsilon(
         else:
             despike_frac = np.zeros(eps.size, dtype="f4")
         qc_flags = qc.compose_qc(eps, fm, speed_bad, despike_frac, config)
+        qc_flags[eps < eps_floor] = 4
         qc_var = f"eps_{probe_num}_qc"
         ds[qc_var] = ("time", qc_flags)
         ds[qc_var].attrs = qc.flag_attrs(
@@ -1674,10 +1697,12 @@ def _attach_epsilon(
             f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
             f"and {name}_despike_frac "
             f"(questionable>{config.despike_frac_questionable}, "
-            f"bad>{config.despike_frac_bad}).",
+            f"bad>{config.despike_frac_bad}); bad below the platform noise "
+            f"floor (eps_floor={eps_floor:g} W/kg).",
         )
 
     ds["k"] = ds.frequency / ds.W
+    qc.apply_overrides(ds, config.qc_overrides, ["eps_1_qc", "eps_2_qc"])
     qc.attach_combined(ds, "eps", "Best epsilon estimate", "W kg-1")
     return ds
 
@@ -1791,9 +1816,9 @@ def _attach_chi(
         if (fit_confident or {}).get(probe) is False:
             bad_frac = np.ones_like(bad_frac)
         qc_flags = qc.compose_qc(chi, fm, speed_bad, bad_frac, config)
-        qc_flags = np.where(
-            qc_flags == qc.MISSING, qc_flags, np.maximum(qc_flags, eps_best_qc)
-        )
+        chi_missing = qc_flags == qc.MISSING
+        qc_flags = np.where(chi_missing, qc_flags, np.maximum(qc_flags, eps_best_qc))
+        qc_flags[chi_missing & (eps_best_qc == 4)] = 4
         qc_var = f"chi_{probe_num}_qc"
         ds[qc_var] = ("time", qc_flags)
         ds[qc_var].attrs = qc.flag_attrs(
@@ -1807,6 +1832,7 @@ def _attach_chi(
             f"confident ({probe}_fp07_confident=0).",
         )
 
+    qc.apply_overrides(ds, config.qc_overrides, ["chi_1_qc", "chi_2_qc"])
     qc.attach_combined(ds, "chi", "Best chi estimate", "K2 s-1")
     return ds
 

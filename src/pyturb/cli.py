@@ -32,6 +32,7 @@ from .pfile import batch_convert_to_netcdf, extract_pfile_segment
 from .processing import batch_compute_epsilon, bin_profiles
 from .profile import ProfileConfig, prepare_profile, split_into_profiles
 from .profile_index import batch_index_profiles
+from .qc import load_overrides
 
 app = typer.Typer()
 calibrate_fp07_app = typer.Typer(
@@ -321,6 +322,28 @@ def eps(
             show_default=True,
         ),
     ] = 0.2,
+    eps_floor: Annotated[
+        Optional[float],
+        typer.Option(
+            "--eps-floor",
+            help=(
+                "Epsilon below which a window is QC-flagged bad (W/kg). "
+                "Defaults to 1e-10 for VMP-style vehicles, 1e-12 otherwise."
+            ),
+        ),
+    ] = None,
+    qc_override: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--qc-override",
+            help=(
+                "YAML file of manual QC rules raising flags for known bad "
+                "sensors (instrument_sn, probes, start/end, flag, reason)."
+            ),
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     pressure_smoothing_period: Annotated[
         float,
         typer.Option(
@@ -607,6 +630,8 @@ def eps(
         diss_len_sec=diss_len,
         fft_len_sec=fft_len,
         min_speed=min_speed,
+        eps_floor=eps_floor,
+        qc_overrides=load_overrides(qc_override) if qc_override else [],
         pressure_smoothing_period=pressure_smoothing_period,
         temperature=temperature,
         speed=speed,

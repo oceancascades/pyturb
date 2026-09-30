@@ -394,6 +394,12 @@ def _bin_var_group(
             ds_subset[bin_var_name], bins=depth_bins
         )
         ds_binned = xr.merge([ds_binned, counts.sum().fillna(0).astype("i4")])
+        for v in value_vars:
+            ds_binned[f"{v}_n"].attrs = {
+                "long_name": f"Number of windows averaged into {v}",
+                "units": "1",
+                "comment": f"Count of per-window {v} values averaged in this bin",
+            }
 
     bin_name = f"{bin_var_name}_bins"
     ds_binned[bin_name] = np.array(
