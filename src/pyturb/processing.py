@@ -19,6 +19,7 @@ from .io import load_profile_nc, resolve_input_files
 from .metadata import (
     USER_ATTRS_KEY,
     common_attrs,
+    split_shared,
     stamp_globals,
     validate_global_attrs,
 )
@@ -34,6 +35,25 @@ _log = logging.getLogger(__name__)
 
 # Globals bin_profiles keeps when every eps file shares them.
 _BIN_SHARED_ATTRS = ("instrument_vehicle", "instrument_model", "pyturb_config")
+
+# Variable attrs that describe the data rather than one instrument or file
+# (calibration provenance, despike parameters, cal_*). The binned file keeps
+# only these, and only where every profile agrees.
+_BIN_VAR_ATTRS = (
+    "long_name",
+    "units",
+    "standard_name",
+    "positive",
+    "axis",
+    "calendar",
+    "comment",
+    "flag_values",
+    "flag_meanings",
+    "valid_min",
+    "valid_max",
+    "cell_methods",
+    "ancillary_variables",
+)
 
 __all__ = [
     "batch_compute_epsilon",
@@ -633,6 +653,24 @@ def _inherited_globals(
     return shared, {**user, **own_user_attrs}
 
 
+def _shared_var_attrs(combined: xr.Dataset, binned: list[xr.Dataset]) -> None:
+    """Replace each variable's attrs with the _BIN_VAR_ATTRS every profile shares.
+
+    xr.concat would otherwise keep one profile's attrs for the whole variable.
+    """
+    differing = []
+    for name in combined.variables:
+        per_profile = [b[name].attrs for b in binned if name in b.variables]
+        shared, diff = split_shared(per_profile, list(_BIN_VAR_ATTRS))
+        combined.variables[name].attrs = shared
+        differing += [f"{name}:{k}" for k in diff]
+    if differing:
+        _log.warning(
+            "Variable attributes differ between profiles and were dropped: "
+            + ", ".join(differing)
+        )
+
+
 def _unpack_bin_args(args: tuple) -> Optional[xr.Dataset]:
     """Unpack arguments for imap_unordered."""
     (
@@ -718,6 +756,13 @@ def bin_profiles(
         :func:`pyturb.metadata.load_global_attrs`. User attributes already in
         the eps files are inherited when every profile has the same value
         (a warning is logged otherwise); these override them.
+
+    Notes
+    -----
+    Variables keep only descriptive CF attributes (``long_name``, ``units``,
+    ``comment``, flag attributes, ...), and only where every profile agrees.
+    Instrument- and file-specific ones (calibration provenance, despike
+    parameters) are removed.
 
     Returns
     -------
@@ -838,6 +883,7 @@ def bin_profiles(
         [b.attrs for b in binned_datasets], global_attrs or {}
     )
     combined = xr.concat(binned_datasets, dim="profile")
+    _shared_var_attrs(combined, binned_datasets)
     bin_config = {
         "depth_min": float(depth_min),
         "depth_max": float(depth_max),

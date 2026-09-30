@@ -119,23 +119,33 @@ def _same(a: Any, b: Any) -> bool:
     return np.array_equal(np.asarray(a), np.asarray(b))
 
 
+def split_shared(attrs_list: list[dict], keys: list[str]) -> tuple[dict, list[str]]:
+    """Split ``keys`` into those identical in every dict and those that aren't.
+
+    Returns ``(shared, differing)``: a key that differs, or is missing from
+    only some dicts, is in ``differing``; one missing from all is in neither.
+    """
+    shared, differing = {}, []
+    for key in keys:
+        values = [a.get(key) for a in attrs_list]
+        if all(v is None for v in values):
+            continue
+        if all(v is not None and _same(v, values[0]) for v in values):
+            shared[key] = values[0]
+        else:
+            differing.append(key)
+    return shared, differing
+
+
 def common_attrs(attrs_list: list[dict], keys: list[str], what: str) -> dict:
     """The ``keys`` whose value is identical in every dict of ``attrs_list``.
 
     A key that differs, or is missing from only some dicts, is omitted with a
     warning; one missing from all of them is omitted silently.
     """
-    shared = {}
-    for key in keys:
-        values = [a.get(key) for a in attrs_list]
-        if all(v is None for v in values):
-            continue
-        if all(v is not None for v in values) and all(
-            _same(v, values[0]) for v in values
-        ):
-            shared[key] = values[0]
-            continue
-        distinct = list(dict.fromkeys(str(v)[:60] for v in values))
+    shared, differing = split_shared(attrs_list, keys)
+    for key in differing:
+        distinct = list(dict.fromkeys(str(a.get(key))[:60] for a in attrs_list))
         _log.warning(
             f"{what} '{key}' differs between profiles ({len(distinct)} distinct "
             f"values, e.g. {distinct[:3]}); omitted from the binned file"

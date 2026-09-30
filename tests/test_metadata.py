@@ -197,6 +197,25 @@ class TestBinInheritance:
         assert _load(tmp_path / "bin.nc").attrs["institution"] == "Chosen"
         assert "institution" not in caplog.text
 
+    def test_instrument_specific_var_attrs_removed(self, outputs):
+        binned = _load(outputs["bin"])
+        assert "JAC_C_offset_applied" not in binned["conductivity"].attrs
+        assert not any(
+            k.startswith("despike_") for k in binned["sh1_despike_frac"].attrs
+        )
+        assert binned["conductivity"].attrs["long_name"] == "Conductivity"
+
+    def test_differing_var_attrs_dropped(self, outputs, tmp_path, caplog):
+        ds = _load(outputs["eps"])
+        ds["eps_qc"].attrs["comment"] = "different config"
+        ds.to_netcdf(tmp_path / "b.nc")
+        with caplog.at_level(logging.WARNING, logger="pyturb.processing"):
+            _bin([outputs["eps"], tmp_path / "b.nc"], tmp_path / "bin.nc")
+        attrs = _load(tmp_path / "bin.nc")["eps_qc"].attrs
+        assert "comment" not in attrs
+        assert "flag_values" in attrs
+        assert "eps_qc:comment" in caplog.text
+
     def test_cli_eps_attrs_inherited_by_bin(self, outputs, tmp_path):
         attrs_file = tmp_path / "attrs.yml"
         attrs_file.write_text(yaml.safe_dump({"project": "CLI test"}))
