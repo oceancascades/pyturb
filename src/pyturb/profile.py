@@ -46,6 +46,9 @@ class ProfileConfig:
     # === Variable names (raw input) ===
     pressure: str = "P"
     speed: str = "W"
+    # Multiplies whichever speed is used (onboard, aux, or pressure-derived),
+    # e.g. 0.9 for an EM speed sensor that reads high.
+    speed_factor: float = 1.0
     temperature: str = "JAC_T"
     pitch: str = "Incl_Y"  # Pitch angle variable (degrees, positive nose up)
 
@@ -222,7 +225,7 @@ def estimate_speed_from_pressure(
     dbar_to_m: float = 1.005,
 ) -> np.ndarray:
     """
-    Estimate fall speed from pressure rate of change. Optionally corrects for pitch.
+    Estimate platform speed from pressure rate of change. Optionally corrects for pitch.
 
     Parameters
     ----------
@@ -387,8 +390,9 @@ def prepare_profile(
     Returns
     -------
     xr.Dataset
-        Dataset with two added variables: ``{speed}_smooth`` and
-        ``{pressure}_smooth``. Probe channels are unchanged.
+        Dataset with two added variables: ``{speed}_smooth`` (scaled by
+        ``config.speed_factor``) and ``{pressure}_smooth``. Probe channels
+        are unchanged.
     """
     if config is None:
         config = ProfileConfig()
@@ -465,6 +469,9 @@ def prepare_profile(
         # Speed is already smoothed in estimate_speed_from_pressure
         ds[config.speed_smooth] = ("t_slow", speed_est)
 
+    if config.speed_factor <= 0:
+        raise ValueError(f"speed_factor must be positive, got {config.speed_factor}")
+    ds[config.speed_smooth] = ds[config.speed_smooth] * config.speed_factor
     return ds
 
 
@@ -1461,21 +1468,21 @@ def _attach_window_scalars(
         ds[f"{probe}_range_frac"].attrs = {
             "valid_min": np.float32(0.0),
             "valid_max": np.float32(1.0),
-            "comment": f"Sane range is [{qc.MIN_SANE_TEMP_C}, "
-            f"{qc.MAX_SANE_TEMP_C}] degree_C",
+            "comment": f"Valid range is [{qc.MIN_VALID_TEMP_C}, "
+            f"{qc.MAX_VALID_TEMP_C}] degree_C",
         }
         confident = (fit_confident or {}).get(probe)
         qc_var = f"{probe}_qc"
         ds[qc_var] = ("time", qc.compose_range_qc(frac, config, confident))
         ds[qc_var].attrs = qc.flag_attrs(
             f"QC flag for {probe}",
-            f"Composed from {probe}_range_frac -- the fraction of raw "
-            f"{probe} samples outside a physically sane seawater "
-            "temperature range in this window, e.g. from a calibration "
-            "extrapolated beyond its fitted range "
+            f"Composed from {probe}_range_frac, the fraction of raw {probe} "
+            "samples in the window outside the valid seawater temperature "
+            f"range [{qc.MIN_VALID_TEMP_C}, {qc.MAX_VALID_TEMP_C}] degree_C, "
+            "e.g. from a calibration extrapolated beyond its fitted range "
             f"(questionable>{config.despike_frac_questionable}, "
-            f"bad>{config.despike_frac_bad}) -- and floored to bad if "
-            f"the calibration fit itself wasn't confident "
+            f"bad>{config.despike_frac_bad}). Set to 4 (bad) if the "
+            "calibration fit did not meet the fit quality criteria "
             f"({probe}_fp07_confident=0; see fp07_calibration."
             "fit_is_confident).",
         )
@@ -1578,7 +1585,7 @@ def _compute_shear_spectra_with_cleaning(
                     "response (Lueck), tau = fp07_tau0 * W^fp07_speed_exp "
                     f"(fp07_tau0={config.fp07_tau0}, "
                     f"fp07_speed_exp={config.fp07_speed_exp}); W is the "
-                    "per-window mean fall speed."
+                    "per-window mean platform speed."
                 ),
             }
         elif name in config.shear_probes:
@@ -1588,7 +1595,7 @@ def _compute_shear_spectra_with_cleaning(
                     "anti-alias response with a single-pole transfer function "
                     "(Macoun & Lueck; Rockland Technical Note 026): "
                     "H^-2 = 1 + (k/48)^2 for k <= 150 cpm, else 1, with "
-                    "k = frequency / W (W = per-window mean fall speed)."
+                    "k = frequency / W (W = per-window mean platform speed)."
                 ),
             }
     return ds, freq, spectra
@@ -1642,8 +1649,9 @@ def _attach_epsilon(
         ds[f"eps_{probe_num}_fm"].attrs = {
             "comment": (
                 "FM = mean(|log10(P_sh / Nasmyth)|) * sqrt(dof_spec) over the "
-                "fit wavenumber band. Lower is better; independent of "
-                "fft/diss window length. NaN if the fit band was too narrow."
+                "fit wavenumber band. Lower values indicate closer agreement "
+                "with the Nasmyth spectrum; independent of fft/diss window "
+                "length. NaN where the fit band is too narrow to evaluate."
             ),
         }
         # The despike-fraction contribution: sh1 drives eps_1's flag, sh2
@@ -1663,13 +1671,13 @@ def _attach_epsilon(
             f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
             f"and {name}_despike_frac "
             f"(questionable>{config.despike_frac_questionable}, "
-            f"bad>{config.despike_frac_bad}); bad below the platform noise "
-            f"floor (eps_floor={eps_floor:g} W/kg).",
+            f"bad>{config.despike_frac_bad}). Set to 4 (bad) below the "
+            f"platform noise floor (eps_floor={eps_floor:g} W/kg).",
         )
 
     ds["k"] = ds.frequency / ds.W
     qc.apply_overrides(ds, config.qc_overrides, ["eps_1_qc", "eps_2_qc"])
-    qc.attach_combined(ds, "eps", "Best epsilon estimate", "W kg-1")
+    qc.attach_combined(ds, "eps", "Epsilon", "W kg-1")
     return ds
 
 
@@ -1688,7 +1696,7 @@ def _attach_chi(
     taken as the per-window combined shear-probe estimate (see
     :func:`pyturb.qc.attach_combined` and :func:`pyturb.temperature.estimate_chi`).
     QC composition mirrors epsilon: speed, FM vs the Kraichnan model, and the
-    matching gradT despike fraction, then floored to the combined eps QC.
+    matching gradT despike fraction, then raised to at least the combined eps QC.
 
     ``cal_params`` (from :func:`process_profile`, keyed by probe e.g.
     ``"T1"``) lets each window's predicted electronics noise floor (see
@@ -1753,7 +1761,8 @@ def _attach_chi(
         ds[f"chi_{probe_num}_fm"].attrs = {
             "comment": (
                 "FM = mean(|log10(P_gradT / Kraichnan)|) * sqrt(dof_spec) "
-                "over the integration band. Lower is better."
+                "over the integration band. Lower values indicate closer "
+                "agreement with the Kraichnan spectrum."
             ),
         }
         despike_frac_var = f"{name}_despike_frac"
@@ -1771,8 +1780,8 @@ def _attach_chi(
         else:
             range_frac = np.zeros(n, dtype="f4")
         bad_frac = np.clip(despike_frac + range_frac, 0.0, 1.0)
-        # Floor to bad if the calibration fit itself wasn't confident (see
-        # qc.compose_range_qc's docstring) -- a bad-but-not-implausible fit
+        # Set to bad if the calibration fit did not meet the fit quality
+        # criteria (see qc.compose_range_qc's docstring) -- an inaccurate fit
         # corrupts the gradient the same way, and no per-sample check can
         # catch it either.
         if (fit_confident or {}).get(probe) is False:
@@ -1789,13 +1798,13 @@ def _attach_chi(
             f"FM (fm_good={config.fm_good}, fm_bad={config.fm_bad}), "
             f"{name}_despike_frac + {probe}_range_frac "
             f"(questionable>{config.despike_frac_questionable}, "
-            f"bad>{config.despike_frac_bad}), the combined epsilon QC, "
-            f"and floored to bad if the calibration fit itself wasn't "
-            f"confident ({probe}_fp07_confident=0).",
+            f"bad>{config.despike_frac_bad}), and the combined epsilon QC. "
+            "Set to 4 (bad) if the calibration fit did not meet the fit "
+            f"quality criteria ({probe}_fp07_confident=0).",
         )
 
     qc.apply_overrides(ds, config.qc_overrides, ["chi_1_qc", "chi_2_qc"])
-    qc.attach_combined(ds, "chi", "Best chi estimate", "K2 s-1")
+    qc.attach_combined(ds, "chi", "Chi", "K2 s-1")
     return ds
 
 

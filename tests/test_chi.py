@@ -293,7 +293,7 @@ class TestChiPipeline:
         written = xr.load_dataset(chi_eps_file, decode_times=False)
         assert set(np.unique(written["chi_1_qc"].values)) <= {1, 2, 3, 4, 9}
 
-    def test_noise_floor_cap_is_exercised_and_sane(self, chi_eps_file):
+    def test_noise_floor_cap_is_exercised_and_bounded(self, chi_eps_file):
         # This real PFILE does carry cal_* attrs, so process_profile's
         # noise-floor cap (see _attach_chi/thermistor_noise_phi) is
         # actually engaged for this fixture, not silently skipped -- and
@@ -376,7 +376,7 @@ class TestTemperatureRangeQC:
     (e.g. from a calibration extrapolated beyond its fitted range) -- that's
     flagged via QC at the eps step instead (see qc.temperature_range_mask /
     qc.compose_range_qc / process_profile), per policy: don't
-    destroy data, mark it untrustworthy and let the consumer decide.
+    destroy data, flag it and let the consumer decide.
     """
 
     def _process_with_corrupted_t1(self, frac_corrupted=1 / 3):
@@ -430,20 +430,20 @@ class TestTemperatureRangeQC:
         # where chi_1_qc was forced bad by the corrupted T1.
         assert (chi_2_qc[range_frac_1 > 0.2] != 4).any()
 
-    def test_no_effect_when_t1_always_sane(self):
+    def test_no_effect_when_t1_always_valid(self):
         result, _ = self._process_with_corrupted_t1(frac_corrupted=0.0)
         assert (result["T1_qc"].values == 1).all()
         assert (result["T1_range_frac"].values == 0).all()
 
 
 class TestCalibrationConfidenceQC:
-    """A calibration fit that wasn't confident (see fp07_calibration.
+    """A calibration fit that did not meet the fit quality criteria (see fp07_calibration.
     fit_is_confident) can still produce values within a normal-looking
     temperature range while being substantially wrong -- no per-sample
     range check catches that. apply_probe_calibration stamps
-    *_fp07_confident from the fit itself; process_profile must floor
-    T1_qc/chi_1_qc to bad wherever it's False, uniformly, regardless of how
-    sane the values look.
+    *_fp07_confident from the fit itself; process_profile must set
+    T1_qc/chi_1_qc to bad wherever it's False, uniformly, regardless of
+    whether the values fall within the valid range.
     """
 
     def _process_with_confidence(self, confident: bool | None):

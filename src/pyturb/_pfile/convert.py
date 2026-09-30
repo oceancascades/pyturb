@@ -392,7 +392,7 @@ def convert_all_channels(
     Notes
     -----
     gradT outputs are time derivatives (K/s). To convert to spatial gradients
-    (K/m), divide by fall speed in the processing pipeline, which is a
+    (K/m), divide by platform speed in the processing pipeline, which is a
     platform-dependent calculation.
     """
     if exclude_types is None:

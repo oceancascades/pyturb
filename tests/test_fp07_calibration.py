@@ -33,7 +33,7 @@ A, B, G, E_B, ADC_FS, ADC_BITS = -11.5, 0.99954, 6.0, 0.68294, 4.096, 16
 
 
 def _make_fit(**overrides) -> ProbeCalibrationFit:
-    """A synthetic fit with sane, confident defaults; pass e.g.
+    """A synthetic fit with valid, confident defaults; pass e.g.
     new_T_0=713.0 or lag_corr=0.2 to make one field implausible/unconfident
     for a specific test."""
     fields = dict(
@@ -70,10 +70,10 @@ def _make_fit(**overrides) -> ProbeCalibrationFit:
 class TestFitIsPlausible:
     """T_0/beta_1 are real physical quantities (a reference temperature, a
     positive thermistor material constant) -- a fit that puts either far
-    outside a sane range indicates a poorly-conditioned regression, even
+    outside its physical range indicates a poorly-conditioned regression, even
     if its own-segment lag and residual look good."""
 
-    def test_sane_coefficients_are_plausible(self):
+    def test_physical_coefficients_are_plausible(self):
         assert fit_is_plausible(_make_fit(new_T_0=288.0, new_beta_1=3050.0))
 
     def test_t0_far_above_range_is_implausible(self):
@@ -587,8 +587,8 @@ class TestApplyProbeCalibration:
 
     def test_stamps_confident_attr_reflecting_fit_is_confident(self, prepared_profile):
         # T1_qc/T2_qc/chi_N_qc read *_fp07_confident (not the resulting
-        # value's plausibility) to flag a fit whose own quality is
-        # untrustworthy -- see fit_is_confident's docstring.
+        # value's plausibility) to flag a fit that did not meet the fit
+        # quality criteria -- see fit_is_confident's docstring.
         ds_prepared, config = prepared_profile
         raw = to_xarray(load_pfile_phys(PFILE))
 
@@ -766,7 +766,7 @@ class TestNoMaskingOnExtrapolation:
 
     def test_does_not_mask_extrapolation_blowup(self):
         n = 3000
-        # -4000 counts -> ~9.8C (sane); 20000 counts -> ~59.6C (physically
+        # -4000 counts -> ~9.8C (valid); 20000 counts -> ~59.6C (physically
         # implausible for seawater, but must be left as computed here).
         counts = np.full(n, -4000.0)
         counts[1000:1100] = 20000.0

@@ -53,3 +53,19 @@ class TestSpeedSourcePriority:
         np.testing.assert_allclose(
             onboard_out["W_smooth"].values, aux_out["W_smooth"].values
         )
+
+
+class TestSpeedFactor:
+    @pytest.mark.parametrize("source", ["W", "aux_speed", None])
+    def test_scales_every_speed_source(self, source):
+        extra = {source: np.full(2000, 1.0)} if source else {}
+        base = prepare_profile(_make_raw_ds(**extra), ProfileConfig())
+        scaled = prepare_profile(_make_raw_ds(**extra), ProfileConfig(speed_factor=0.9))
+        np.testing.assert_allclose(
+            scaled["W_smooth"].values, 0.9 * base["W_smooth"].values
+        )
+
+    @pytest.mark.parametrize("factor", [0.0, -1.0])
+    def test_non_positive_raises(self, factor):
+        with pytest.raises(ValueError, match="speed_factor"):
+            prepare_profile(_make_raw_ds(), ProfileConfig(speed_factor=factor))

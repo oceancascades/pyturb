@@ -93,6 +93,7 @@ There are numerous options (see `pyturb eps --help`). Some important options are
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
+- `--speed-factor`: Multiply the speed by this factor, e.g. 0.9 if the EM speed sensor reads high (default: 1.0). Affects the output speed, spectra, and dissipation estimates.
 - `--qc-override`: Apply bad flags to data manually.
 - `--attrs`: Add descriptive global attributes (title, institution, ...) from a yml file.
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)

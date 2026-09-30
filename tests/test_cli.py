@@ -592,7 +592,7 @@ class TestFitFromMiddleOfGroupSkipsRailedCandidates:
 
 
 def _make_fit(**overrides) -> ProbeCalibrationFit:
-    """A synthetic fit with sane defaults; pass e.g. new_T_0=713.0 to make
+    """A synthetic fit with valid defaults; pass e.g. new_T_0=713.0 to make
     one field implausible for a specific test."""
     fields = dict(
         probe="T1",
