@@ -12,7 +12,7 @@ Install using `pip`.
 flowchart TD;
     pfile[L0: .p] -->|pyturb p2nc| ncfile[L1: .nc];
     ncfile --- C[ ]:::empty;
-    glider[glider.data.nc (optional)] --- C;
+    glider[glider.data.nc] --- C;
     C -->|pyturb eps| l2[L2: *_0001.nc, ... *_N.nc];
     l2 -->|pyturb bin| l3[L3: .binned.nc];
     
