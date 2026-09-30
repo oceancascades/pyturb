@@ -51,7 +51,6 @@ _BIN_VAR_ATTRS = (
     "flag_meanings",
     "valid_min",
     "valid_max",
-    "cell_methods",
     "ancillary_variables",
 )
 
@@ -471,12 +470,6 @@ def _bin_var_group(
     for v in present:
         if v in ds:
             ds_binned[v].attrs.update(ds[v].attrs)
-    for v in qc_vars:
-        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: maximum"
-    for v in count_vars:
-        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: sum"
-    for v in mean_vars:
-        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: mean"
 
     bin_name = f"{bin_var_name}_bins"
     ds_binned[bin_name] = np.array(

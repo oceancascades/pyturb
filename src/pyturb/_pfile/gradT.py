@@ -43,7 +43,7 @@ def make_gradT(
 
     Notes
     -----
-    To convert to spatial gradient dT/dz, divide by fall speed in the
+    To convert to spatial gradient dT/dz, divide by platform speed in the
     processing pipeline (platform-dependent calculation).
     """
     if len(T_dT) == 0:

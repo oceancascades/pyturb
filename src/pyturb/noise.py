@@ -93,7 +93,7 @@ def thermistor_noise_phi(
     observed, response-corrected spectrum.
 
     f    : frequency (Hz)
-    W    : mean fall speed for this window (m/s)
+    W    : mean platform speed for this window (m/s)
     T_celsius : window-mean temperature (degC) -- sets the thermistor's
         resistance ratio, and hence the scale factor, operating point.
     params : calibration dict from :func:`_channel_calibration_params`

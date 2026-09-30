@@ -46,9 +46,8 @@ def test_binned_attrs(outputs):
     assert ds.attrs["Conventions"] == "CF-1.8"
     assert ds["source_pfile"].values[0] == PFILE.name
     assert ds["depth"].attrs["positive"] == "down"
-    assert ds["eps"].attrs["cell_methods"] == "depth: mean"
     assert ds["eps"].attrs["ancillary_variables"] == "eps_qc eps_n"
-    assert ds["eps_1_qc"].attrs["cell_methods"] == "depth: maximum"
+    assert not any("cell_methods" in ds[v].attrs for v in ds.variables)
     assert "flag_values" in ds["eps_1_qc"].attrs
 
 

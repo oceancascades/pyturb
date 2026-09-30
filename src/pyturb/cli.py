@@ -376,6 +376,18 @@ def eps(
             show_default=True,
         ),
     ] = "W",
+    speed_factor: Annotated[
+        float,
+        typer.Option(
+            "--speed-factor",
+            help=(
+                "Multiply the speed (onboard, auxiliary, or pressure-derived) "
+                "by this factor, e.g. 0.9 if the EM speed sensor reads high. "
+                "Affects the output speed and the spectral conversion."
+            ),
+            show_default=True,
+        ),
+    ] = 1.0,
     angle_of_attack: Annotated[
         float,
         typer.Option(
@@ -648,6 +660,7 @@ def eps(
         pressure_smoothing_period=pressure_smoothing_period,
         temperature=temperature,
         speed=speed,
+        speed_factor=speed_factor,
         angle_of_attack=angle_of_attack,
         use_pitch_correction=use_pitch_correction,
         profile_direction=profile_direction,

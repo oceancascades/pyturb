@@ -723,8 +723,8 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
         ds[name].attrs[f"{fit.probe}_fp07_cal_source"] = (
             f"{fit.fit_file}:p{fit.profile_index}"
         )
-        # Whether the *fit itself* was trustworthy (see fit_is_confident) --
-        # not whether the resulting values happen to look physically sane. A
+        # Whether the fit met the fit quality criteria (see fit_is_confident),
+        # not whether the resulting values fall within the valid range. A
         # fit from a too-noisy signal can produce values within a
         # normal-looking range while being substantially wrong;
         # pyturb.profile's T1_qc/T2_qc/chi_N_qc read this to flag that case,

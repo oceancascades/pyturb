@@ -74,7 +74,7 @@ profile_direction: {long_name: Cast direction}
 "T{n}": {long_name: "Temperature FP07 {n}", units: degree_C, standard_name: sea_water_temperature}
 "T{n}_counts": {long_name: "ADC counts FP07 {n}", units: "1"}
 "T{n}_dT{n}": {long_name: "ADC counts pre-emphasized FP07 {n}", units: "1"}
-"T{n}_range_frac": {long_name: "Fraction of T{n} raw samples outside the sane temperature range", units: "1"}
+"T{n}_range_frac": {long_name: "Fraction of T{n} raw samples outside the valid temperature range", units: "1"}
 "S_sh{n}": {long_name: "Shear variance {n}", units: s-2 Hz-1}
 "S_gradT{n}": {long_name: "Temperature gradient variance {n}", units: K2 m-2 Hz-1}
 "eps_{n}": {long_name: "Epsilon {n}", units: W kg-1, standard_name: specific_turbulent_kinetic_energy_dissipation_in_sea_water}

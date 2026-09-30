@@ -52,11 +52,8 @@ class TestBestWindowBinning:
         attrs = out["eps_n"].attrs
         assert attrs["long_name"] == "Number of windows averaged into eps"
         assert attrs["units"] == "1"
-        assert attrs["cell_methods"] == "depth: sum"
         assert "comment" in attrs
-        assert out["eps"].attrs["cell_methods"] == "depth: mean"
         assert out["eps"].attrs["ancillary_variables"] == "eps_qc eps_n"
-        assert out["eps_qc"].attrs["cell_methods"] == "depth: maximum"
 
     def test_empty_bin_is_missing(self):
         out = _bin(eps=[1e-9], qc=[1], depth=[5])

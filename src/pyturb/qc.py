@@ -30,10 +30,10 @@ OVERRIDE_PROBES = ("sh1", "sh2", "T1", "T2")
 # range (e.g. applied to an anomalous profile) rather than real data.
 # calibrate-fp07's apply_probe_calibration applies the best available fit
 # as-is and does not mask this -- flagged via QC here instead, at the eps
-# step, per policy: don't destroy data, mark it untrustworthy and let the
+# step, per policy: don't destroy data, flag it and let the
 # consumer decide.
-MIN_SANE_TEMP_C = -3.0
-MAX_SANE_TEMP_C = 40.0
+MIN_VALID_TEMP_C = -3.0
+MAX_VALID_TEMP_C = 40.0
 
 
 def flag_attrs(long_name: str, comment: str) -> dict:
@@ -49,8 +49,8 @@ def flag_attrs(long_name: str, comment: str) -> dict:
 
 
 def temperature_range_mask(T: np.ndarray) -> np.ndarray:
-    """True where T is missing or outside the physically sane seawater range."""
-    return ~np.isfinite(T) | (T < MIN_SANE_TEMP_C) | (T > MAX_SANE_TEMP_C)
+    """True where T is missing or outside the valid seawater temperature range."""
+    return ~np.isfinite(T) | (T < MIN_VALID_TEMP_C) | (T > MAX_VALID_TEMP_C)
 
 
 def compose_range_qc(
@@ -59,8 +59,8 @@ def compose_range_qc(
     fit_confident: Optional[bool] = None,
 ) -> np.ndarray:
     """QC flag from the fraction of a temperature probe's raw samples that
-    fell outside the physically sane range within a window, floored to
-    "bad" if the calibration fit itself wasn't confident.
+    fell outside the valid range within a window, set to 4 (bad) if the
+    calibration fit did not meet the fit quality criteria.
 
       * fit_confident is False                 -> 4 (bad), regardless of
         range_frac -- a fit that isn't confident (see fp07_calibration.
@@ -180,15 +180,17 @@ def attach_combined(ds: xr.Dataset, name: str, long_name: str, units: str) -> bo
         "comment": (
             f"Mean of {name}_1 and {name}_2 where both are flagged good or "
             f"questionable and agree within a factor of "
-            f"{AGREEMENT_FACTOR:g}; the minimum where they disagree; the "
-            "single usable probe otherwise."
+            f"{AGREEMENT_FACTOR:g}; the minimum where they differ by more; "
+            "the value from the one probe flagged good or questionable "
+            "otherwise."
         ),
     }
     ds[f"{name}_qc"] = ("time", qc)
     ds[f"{name}_qc"].attrs = flag_attrs(
         f"QC flag for {name}",
-        f"Max of {name}_1_qc and {name}_2_qc where both are used and agree; "
-        "3 (questionable) if they disagree or only one is used; 9 (missing) "
+        f"Max of {name}_1_qc and {name}_2_qc where both probes are used and "
+        f"agree within a factor of {AGREEMENT_FACTOR:g}; 3 (questionable) "
+        "where they differ by more or only one probe is used; 9 (missing) "
         "if both are missing, else 4 (bad).",
     )
     return True
