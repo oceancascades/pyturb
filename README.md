@@ -89,10 +89,11 @@ pyturb eps ./converted/*.nc -o ./eps_output/
 
 The `eps` command automatically detects multiple profiles within each input file. Output files are named `{input_stem}_p{NNNN}.nc`. Data from other instruments may be merged at this step to improve the calculations. For example, temperature and salinity may be merged from a glider CTD and used to esimate viscosity. Velocity from a calibrated glider flight model may also be used.
 
-A selection of options:
+There are numerous options (see `pyturb eps --help`). Some important options are:
 - `--diss-len`: Dissipation window length in seconds (default: 4.0)
 - `--fft-len`: FFT segment length in seconds (default: 1.0)  
 - `--min-speed`: Minimum speed threshold in m/s (default: 0.2)
+- `--qc-override`: Apply bad flags to data manually.
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
@@ -106,13 +107,18 @@ CTD variables such as pressure, temperature, salinity, conductivity, density, an
 
 Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables.
 
-The per-window response-corrected power spectra (see details below) are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate.
+The per-window response-corrected power spectra (processing details below) are also written out `S_sh1`/`S_gradT1`, on the `frequency` coordinate.
 
-See `pyturb eps --help` formore details. 
+QC flags are applied based on figure of merit and other criteria. Sometimes it is necessary to manually flag bad data, such as in the case of a probe breaking part way through a deployment. In this case, use the `--qc-override` flag and pass it a yml file specifying the details. 
 
-Example processing just up casts:
-```bash
-pyturb eps -o ./eps/ --direction up ./converted/*.nc
+An override.yml file may look like:
+```
+- instrument_sn: 194
+  probes: [sh1, sh2, T1, T2]
+  start: 2026-08-06T18:45:30
+  end: 2026-08-06T21:30:00
+  flag: 4
+  reason: Shear probes and thermistors broken by bottom crash.
 ```
 
 ### `bin` - bin average the data
