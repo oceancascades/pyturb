@@ -19,6 +19,7 @@ import numpy as np
 import xarray as xr
 
 from . import __version__
+from .cf import apply_cf
 from .io import load_profile_nc, resolve_input_files
 from .processing import _ensure_output_dir, _init_worker_logging
 from .profile import (
@@ -70,10 +71,7 @@ def _index_from_segments(
         },
         coords={"profile": np.arange(n)},
     )
-    idx_ds["start_idx"].attrs["long_name"] = "t_slow index of profile start (inclusive)"
-    idx_ds["end_idx"].attrs["long_name"] = "t_slow index of profile end (inclusive)"
-    idx_ds["direction"].attrs["long_name"] = "cast direction"
-    for attr in ("units", "calendar", "long_name"):
+    for attr in ("units", "calendar"):
         if attr in ds.t_slow.attrs:
             idx_ds["start_time"].attrs[attr] = ds.t_slow.attrs[attr]
             idx_ds["end_time"].attrs[attr] = ds.t_slow.attrs[attr]
@@ -113,7 +111,7 @@ def _write_profile_index(
         if attr in source_attrs:
             idx_ds.attrs[attr] = source_attrs[attr]
 
-    idx_ds.to_netcdf(output_file, format="NETCDF4")
+    apply_cf(idx_ds).to_netcdf(output_file, format="NETCDF4")
 
 
 def _write_hires_profile(
@@ -148,7 +146,7 @@ def _write_hires_profile(
             if coord in out.coords:
                 encoding[coord] = {"zlib": True, "complevel": compression_level}
 
-    out.to_netcdf(output_file, encoding=encoding, format="NETCDF4")
+    apply_cf(out).to_netcdf(output_file, encoding=encoding, format="NETCDF4")
 
 
 def _materialize_profiles(

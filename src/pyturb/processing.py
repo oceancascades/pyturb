@@ -14,6 +14,7 @@ import xarray as xr
 
 from . import __version__, qc
 from .auxiliary import attach_auxiliary, load_auxiliary
+from .cf import apply_cf
 from .io import load_profile_nc, resolve_input_files
 from .profile import (
     ProfileConfig,
@@ -63,9 +64,8 @@ def _write_epsilon_profile(
 
     for coord in ("time", "ctd_time"):
         if coord in result.coords and coord in out.coords:
-            for attr in ("units", "long_name"):
-                if attr in result[coord].attrs:
-                    out[coord].attrs[attr] = result[coord].attrs[attr]
+            if "units" in result[coord].attrs:
+                out[coord].attrs["units"] = result[coord].attrs["units"]
 
     out.attrs["source_file"] = source_file_name
     out.attrs["profile_index"] = profile_idx
@@ -79,7 +79,7 @@ def _write_epsilon_profile(
         if attr in source_ds.attrs:
             out.attrs[attr] = source_ds.attrs[attr]
 
-    out.to_netcdf(output_file)
+    apply_cf(out).to_netcdf(output_file)
 
 
 def _has_existing_outputs(stem: str, output_dir: Path) -> bool:
@@ -396,10 +396,19 @@ def _bin_var_group(
         ds_binned = xr.merge([ds_binned, counts.sum().fillna(0).astype("i4")])
         for v in value_vars:
             ds_binned[f"{v}_n"].attrs = {
-                "long_name": f"Number of windows averaged into {v}",
-                "units": "1",
                 "comment": f"Count of per-window {v} values averaged in this bin",
             }
+
+    # The QC helpers and groupby reductions drop variable attrs.
+    for v in present:
+        if v in ds:
+            ds_binned[v].attrs.update(ds[v].attrs)
+    for v in qc_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: maximum"
+    for v in count_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: sum"
+    for v in mean_vars:
+        ds_binned[v].attrs["cell_methods"] = f"{coord_name}: mean"
 
     bin_name = f"{bin_var_name}_bins"
     ds_binned[bin_name] = np.array(
@@ -454,12 +463,15 @@ def _bin_single_profile(
     """
     try:
         ds = xr.load_dataset(file, decode_times=False)
+        attrs = {v: dict(ds[v].attrs) for v in ds.data_vars}
 
         # Pre-bin masking: drop high-eps windows flagged questionable/bad
         # (those are likely real instrument problems, not noise-floor noise).
         ds = qc.mask_low_quality_eps(
             ds, ("eps_1", "eps_2", "eps"), questionable_thresh, bad_thresh
         )
+        for v, a in attrs.items():
+            ds[v].attrs = a
 
         coarse_vars = [v for v in variables if v in ds and f"{v}_hires" not in ds]
         hires_bases = [v for v in variables if f"{v}_hires" in ds]
@@ -509,7 +521,6 @@ def _bin_single_profile(
         if "time_var" in ds_binned:
             ds_binned = ds_binned.rename({"time_var": "time"})
             ds_binned["time"].attrs["units"] = "seconds since 1970-01-01 00:00:00"
-            ds_binned["time"].attrs["long_name"] = "Time"
             ds_binned["time"].attrs["calendar"] = "proleptic_gregorian"
 
         # Separate, finer CTD-only grid (keeps the "_hires" names).
@@ -736,8 +747,15 @@ def bin_profiles(
 
     _log.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
-    # Concatenate along profile dimension
+    source_files = [b.attrs.get("source_file", "") for b in binned_datasets]
     combined = xr.concat(binned_datasets, dim="profile")
+    combined.attrs = {
+        "Conventions": "CF-1.8",
+        "title": "Depth-binned turbulence profiles",
+        "pyturb_version": __version__,
+        "date_created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_files": ", ".join(sorted(source_files)),
+    }
 
     # Sort profiles by time (use minimum time per profile to handle NaT values)
     # and attach it as a "profile_time" coordinate so profiles are directly
@@ -753,7 +771,6 @@ def bin_profiles(
             profile_time=("profile", profile_times.values[sort_order])
         )
         combined["profile_time"].attrs = {
-            "long_name": "Profile start time",
             "units": "seconds since 1970-01-01 00:00:00",
             "calendar": "proleptic_gregorian",
         }
@@ -762,7 +779,7 @@ def bin_profiles(
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_netcdf(output_file)
+    apply_cf(combined).to_netcdf(output_file)
 
     _log.info(f"Saved binned data to {output_file}")
 

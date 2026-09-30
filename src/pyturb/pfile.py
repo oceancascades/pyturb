@@ -25,6 +25,7 @@ from ._pfile import (
     read_pfile,
     to_xarray,
 )
+from .cf import apply_cf
 from .signal import despike_variables
 
 # Probes that p2nc will optionally pre-despike. Matches ProfileConfig defaults.
@@ -205,7 +206,7 @@ def save_netcdf(
                 "dtype": "float64",
             }
 
-    ds.to_netcdf(output_file, encoding=encoding, format="NETCDF4")
+    apply_cf(ds).to_netcdf(output_file, encoding=encoding, format="NETCDF4")
 
 
 def _process_single_file(

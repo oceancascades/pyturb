@@ -321,9 +321,8 @@ class TestChiPipeline:
             comment = written[v].attrs.get("comment", "")
             assert "single-pole" in comment.lower()
             assert "fp07_tau0" in comment
-            assert (
-                written[v].attrs.get("long_name")
-                == f"Power spectral density of {v[2:]}"
+            assert written[v].attrs.get("long_name") == (
+                f"Temperature gradient variance {v[-1]}"
             )
 
     def test_shear_spectra_are_response_corrected_with_comment(self, chi_eps_file):
@@ -335,10 +334,7 @@ class TestChiPipeline:
             comment = written[v].attrs.get("comment", "")
             assert "single-pole" in comment.lower()
             assert "48" in comment
-            assert (
-                written[v].attrs.get("long_name")
-                == f"Power spectral density of {v[2:]}"
-            )
+            assert written[v].attrs.get("long_name") == f"Shear variance {v[-1]}"
 
     def test_kappa_t_written(self, chi_eps_file):
         written = xr.load_dataset(chi_eps_file, decode_times=False)

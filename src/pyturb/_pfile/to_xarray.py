@@ -3,44 +3,7 @@ from typing import Dict, Optional
 import numpy as np
 import xarray as xr
 
-# CF-compliant variable metadata
-# Maps variable names to (standard_name, long_name, units)
-# standard_name follows CF conventions where applicable
-_CF_VARIABLE_METADATA = {
-    # Pressure
-    "P": ("sea_water_pressure", "Pressure", "dbar"),
-    "P_raw": ("sea_water_pressure", "Raw pressure (without pre-emphasis)", "dbar"),
-    # Shear probes
-    "sh1": (None, "Velocity time derivative from probe 1", "m2 s-3"),
-    "sh2": (None, "Velocity time derivative from probe 2", "m2 s-3"),
-    # Temperature gradients
-    "gradT1": (None, "Temperature time derivative from thermistor 1", "K s-1"),
-    "gradT2": (None, "Temperature time derivative from thermistor 2", "K s-1"),
-    # EM current meter
-    "U_EM": (None, "EM current meter velocity", "m s-1"),
-    # EM current meter driving current (fast channel, used as Goodman noise reference)
-    "EMC_Cur": (None, "EM current meter driving current", "counts"),
-    "EM_Cur": (None, "EM current meter driving current", "counts"),
-    # JAC CT sensor
-    "JAC_T": ("sea_water_temperature", "JAC CT temperature", "degree_C"),
-    "JAC_C": ("sea_water_electrical_conductivity", "JAC CT conductivity", "mS cm-1"),
-    # FP07 thermistors
-    "T1": ("sea_water_temperature", "FP07 thermistor 1 temperature", "degree_C"),
-    "T2": ("sea_water_temperature", "FP07 thermistor 2 temperature", "degree_C"),
-    "T1_counts": (None, "FP07 thermistor 1 raw counts (pre-conversion)", "counts"),
-    "T2_counts": (None, "FP07 thermistor 2 raw counts (pre-conversion)", "counts"),
-    # Pre-emphasized thermistor signals
-    "T1_dT1": (None, "Pre-emphasized thermistor 1 signal", "counts"),
-    "T2_dT2": (None, "Pre-emphasized thermistor 2 signal", "counts"),
-    # Accelerometers
-    "Ax": (None, "Acceleration X", "m s-2"),
-    "Ay": (None, "Acceleration Y", "m s-2"),
-    "Az": (None, "Acceleration Z", "m s-2"),
-    # Inclinometers
-    "Incl_X": (None, "Inclinometer X angle", "degree"),
-    "Incl_Y": (None, "Inclinometer Y angle", "degree"),
-    # "Incl_T": (None, "Inclinometer temperature", "degree_C"),
-}
+from ..cf import normalize_units
 
 # Suffixes stripped (in order) to find a variable's underlying channel name
 # in the setup config, e.g. "T1_counts" and "T1_raw" both look up "T1".
@@ -173,24 +136,9 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
 
         out_name = _OUTPUT_RENAME.get(var_name, var_name)
 
-        # Build attributes
-        attrs = {}
-
-        # Get CF metadata if available
-        if var_name in _CF_VARIABLE_METADATA:
-            standard_name, long_name, cf_units = _CF_VARIABLE_METADATA[var_name]
-            if standard_name:
-                attrs["standard_name"] = standard_name
-            if long_name:
-                attrs["long_name"] = long_name
-            # Use CF units, falling back to data units
-            attrs["units"] = cf_units
-        else:
-            # Use units from data if available
-            if var_name in units_dict:
-                attrs["units"] = units_dict[var_name]
-            attrs["long_name"] = out_name
-
+        attrs = {"long_name": out_name}
+        if var_name in units_dict:
+            attrs["units"] = normalize_units(units_dict[var_name])
         attrs.update(_channel_calibration_attrs(cfg, var_name))
 
         data_vars[out_name] = (dims, var_data, attrs)
@@ -207,20 +155,12 @@ def to_xarray(data: Dict, variables: Optional[list] = None) -> xr.Dataset:
         "t_fast": (
             "t_fast",
             t_fast.astype(np.float64),
-            {
-                "long_name": "Time (fast sampling)",
-                "units": time_units,
-                "axis": "T",
-            },
+            {"units": time_units},
         ),
         "t_slow": (
             "t_slow",
             t_slow.astype(np.float64),
-            {
-                "long_name": "Time (slow sampling)",
-                "units": time_units,
-                "axis": "T",
-            },
+            {"units": time_units},
         ),
     }
 
