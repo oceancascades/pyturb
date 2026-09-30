@@ -40,6 +40,18 @@ class TestBestWindowBinning:
         np.testing.assert_array_equal(out["eps_qc"].values, [1, 4])
         np.testing.assert_array_equal(out["eps_n"].values, [1, 1])
 
+    def test_bad_without_value_stays_bad(self):
+        out = _bin(eps=[np.nan, np.nan, 1e-9], qc=[4, 9, 1], depth=[5, 5, 15])
+        assert np.isnan(out["eps"].values[0])
+        np.testing.assert_array_equal(out["eps_qc"].values, [4, 1])
+        np.testing.assert_array_equal(out["eps_n"].values, [0, 1])
+
+    def test_count_attrs(self):
+        attrs = _bin(eps=[1e-9], qc=[1], depth=[5])["eps_n"].attrs
+        assert attrs["long_name"] == "Number of windows averaged into eps"
+        assert attrs["units"] == "1"
+        assert "comment" in attrs
+
     def test_empty_bin_is_missing(self):
         out = _bin(eps=[1e-9], qc=[1], depth=[5])
         assert np.isnan(out["eps"].values[1])
