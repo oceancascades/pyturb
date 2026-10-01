@@ -108,6 +108,7 @@ There are numerous options (see `pyturb eps --help`). Some important options are
 - `--attrs`: Add descriptive global attributes (title, institution, ...) from a yml file.
 - `--direction`: Profile direction to process: `down`, `up`, or `both` (default: down)
 - `--peaks-height`: Minimum peak height for profile detection in dbar (default: 25.0). Relies on [profinder](github.com/oceancascades/profinder.git)
+- `--trim-bottom-impact`/`--no-trim-bottom-impact`: End down profiles at the last good sample before a bottom impact, detected as a burst in the accelerometers (default: off). Dissipation windows are aligned to that sample, and a per-profile `bottom_impact` flag is written. `--impact-thresh` sets the size of burst, relative to the accelerometer background over the profile, that counts as an impact (default: 10).
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
 - `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw, including potential density and buoyancy frequency.
 - `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).

@@ -74,7 +74,8 @@ def _write_epsilon_profile(
 
     Keeps time- and ctd_time-dimensioned data variables, plus the scalar
     ``lat``/``lon`` attached for VMP-style GPS (see
-    :func:`~pyturb.profile._attach_scalar_position`). Reattaches the
+    :func:`~pyturb.profile._attach_scalar_position`) and ``bottom_impact``.
+    Reattaches the
     ``frequency`` and ``k`` coordinates, carries over ``time``/``ctd_time``
     units, and replaces the global attributes with the eps set (see
     :func:`~pyturb.metadata.stamp_globals`) plus any ``global_attrs``.
@@ -84,7 +85,7 @@ def _write_epsilon_profile(
         for v in result.data_vars
         if "time" in result[v].dims
         or "ctd_time" in result[v].dims
-        or (v in ("lat", "lon") and len(result[v].dims) == 0)
+        or (v in ("lat", "lon", "bottom_impact") and len(result[v].dims) == 0)
     ]
     out = result[vars_to_keep].assign_coords(
         frequency=result.frequency,
@@ -640,7 +641,20 @@ def _inherited_globals(
     User attributes are those listed in each eps file's ``pyturb_user_attrs``;
     ``own_user_attrs`` (bin's own) override them without a mismatch warning.
     """
-    shared = common_attrs(profile_attrs, list(_BIN_SHARED_ATTRS), "Attribute")
+    # Vehicle type is case-insensitive (see profile._vehicle), e.g. "VMP" vs "vmp".
+    # Compare it lowercased, but keep the first profile's spelling.
+    vehicles = [
+        a["instrument_vehicle"] for a in profile_attrs if "instrument_vehicle" in a
+    ]
+    lowered = [
+        {**a, "instrument_vehicle": str(a["instrument_vehicle"]).strip().lower()}
+        if "instrument_vehicle" in a
+        else a
+        for a in profile_attrs
+    ]
+    shared = common_attrs(lowered, list(_BIN_SHARED_ATTRS), "Attribute")
+    if "instrument_vehicle" in shared:
+        shared["instrument_vehicle"] = vehicles[0]
     if "pyturb_config" in shared:
         shared["pyturb_eps_config"] = shared.pop("pyturb_config")
     user_keys = dict.fromkeys(
@@ -818,6 +832,7 @@ def bin_profiles(
             "kappa_T",
             "lat",
             "lon",
+            "bottom_impact",
         ]
 
     if global_attrs:

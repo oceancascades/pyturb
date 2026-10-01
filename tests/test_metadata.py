@@ -197,6 +197,16 @@ class TestBinInheritance:
         assert _load(tmp_path / "bin.nc").attrs["institution"] == "Chosen"
         assert "institution" not in caplog.text
 
+    def test_vehicle_case_difference_is_not_a_mismatch(self, outputs, tmp_path, caplog):
+        vehicle = _load(outputs["eps"]).attrs["instrument_vehicle"]
+        other = self._variant(
+            outputs, tmp_path, "b.nc", instrument_vehicle=vehicle.swapcase()
+        )
+        with caplog.at_level(logging.WARNING, logger="pyturb.metadata"):
+            _bin([outputs["eps"], other], tmp_path / "bin.nc")
+        assert _load(tmp_path / "bin.nc").attrs["instrument_vehicle"] == vehicle
+        assert "instrument_vehicle" not in caplog.text
+
     def test_instrument_specific_var_attrs_removed(self, outputs):
         binned = _load(outputs["bin"])
         assert "JAC_C_offset_applied" not in binned["conductivity"].attrs
