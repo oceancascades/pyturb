@@ -1,16 +1,19 @@
 """Command line interface for pyturb."""
 
 import logging
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
 import numpy as np
 import typer
 import xarray as xr
+import yaml
 from typing_extensions import Annotated
 
 from . import __version__
 from .auxiliary import attach_auxiliary, infer_sample_rate, load_auxiliary
+from .conductivity import fit_ct_response
 from .fp07_calibration import (
     MAX_PLAUSIBLE_BETA1,
     MAX_PLAUSIBLE_T0_K,
@@ -1220,6 +1223,114 @@ def calibrate_jac_c(
         typer.echo(
             f"Warning: no files matched instrument_sn '{instrument_sn}'.", err=True
         )
+    if not ok:
+        raise typer.Exit(1)
+
+
+def _jac_records(files: list[Path]):
+    for f in files:
+        with xr.open_dataset(f, decode_times=False) as ds:
+            yield ds["JAC_T"].values, ds["JAC_C"].values, ds["P"].values
+
+
+@app.command("calibrate-jac-lag")
+def calibrate_jac_lag(
+    input_files: Annotated[
+        list[Path], typer.Argument(help="Converted (p2nc) NetCDF files to fit")
+    ],
+    direction: Annotated[
+        Literal["down", "up", "both"],
+        typer.Option("--direction", help="Profiling direction to fit on"),
+    ] = "down",
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", "-r", help="Also write the fits as YAML"),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write updated files here instead of overwriting in place",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite",
+            "-w/-W",
+            help="Required to overwrite files in place (ignored with --output)",
+            show_default=True,
+        ),
+    ] = False,
+):
+    """Fit the lag and time constant of JAC_T relative to JAC_C, per instrument.
+
+    Salinity spikes where temperature changes quickly unless conductivity is
+    delayed and smoothed to match the slower thermometer. This fits that
+    response from the cross-spectrum of JAC_T and JAC_C, pooled over every
+    file of an instrument, and records it as `JAC_C_lag`/`JAC_C_tau`
+    attributes (seconds) on JAC_C. `eps` then uses the fitted values in place
+    of its speed-scaled defaults. JAC_C itself is not modified.
+
+    Run this on p2nc-converted files, before `eps`. An instrument without
+    enough profiling data through a temperature gradient is left untouched.
+
+    Examples:
+        pyturb calibrate-jac-lag converted/*.nc --overwrite
+        pyturb calibrate-jac-lag converted/*.nc -o converted_calibrated/ -r jac_lag.yaml
+    """
+    files = resolve_input_files(input_files, "*.nc")
+    if not files:
+        typer.echo("Error: No input files specified.", err=True)
+        raise typer.Exit(1)
+    _require_output_target(output_dir, overwrite)
+
+    groups: dict[str, list[Path]] = {}
+    fs: dict[str, float] = {}
+    for f in files:
+        with xr.open_dataset(f, decode_times=False) as ds:
+            if not all(v in ds for v in ("JAC_T", "JAC_C", "P")):
+                typer.echo(f"{f.name}: no JAC_T/JAC_C/P variables, skipped")
+                continue
+            sn = str(ds.attrs.get("instrument_sn", "unknown"))
+            groups.setdefault(sn, []).append(f)
+            fs.setdefault(sn, float(ds.fs_slow))
+
+    ok = True
+    fits = []
+    for sn, group in groups.items():
+        fit = fit_ct_response(_jac_records(group), fs[sn], direction=direction)
+        if fit is None:
+            typer.echo(
+                f"SN {sn}: no confident fit, {len(group)} file(s) left untouched",
+                err=True,
+            )
+            continue
+        typer.echo(
+            f"SN {sn}: lag {fit.lag:.3f} s, tau {fit.tau:.3f} s "
+            f"({fit.n_segments} segments at {fit.speed:.2f} dbar/s, "
+            f"{len(group)} file(s))"
+        )
+        fits.append({"instrument_sn": sn, **asdict(fit), "n_files": len(group)})
+        for f in group:
+            try:
+                ds = load_profile_nc(f)
+                ds["JAC_C"].attrs["JAC_C_lag"] = np.float32(fit.lag)
+                ds["JAC_C"].attrs["JAC_C_tau"] = np.float32(fit.tau)
+                ds.attrs["history"] = append_history(
+                    ds.attrs,
+                    "calibrate-jac-lag",
+                    f"JAC_C lag {fit.lag:.3f} s, tau {fit.tau:.3f} s",
+                )
+                ds.to_netcdf((output_dir / f.name) if output_dir is not None else f)
+            except Exception as e:
+                ok = False
+                typer.echo(f"{f.name}: FAILED ({e}), left untouched", err=True)
+
+    if report is not None:
+        report.write_text(yaml.safe_dump(fits, sort_keys=False))
+        typer.echo(f"Wrote report to '{report}'")
     if not ok:
         raise typer.Exit(1)
 

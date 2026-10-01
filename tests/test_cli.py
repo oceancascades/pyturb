@@ -12,6 +12,7 @@ from pyturb.cli import (
     _is_railed,
     app,
 )
+from pyturb.conductivity import CTResponseFit
 from pyturb.fp07_calibration import ProbeCalibrationFit
 from pyturb.profile import ProfileConfig
 
@@ -521,6 +522,51 @@ class TestCalibrateJacCCommand:
             "JAC_C"
         ].values
         np.testing.assert_allclose(corrected, before - 0.05, atol=1e-4)
+
+
+class TestCalibrateJacLagCommand:
+    """Test the calibrate-jac-lag CLI command."""
+
+    CAL_PFILE = Path(__file__).parent / "data" / "RIOTSHAKE_VMP142_0010_cut.p"
+
+    def _convert(self, tmp_path: Path) -> Path:
+        runner.invoke(app, ["p2nc", "--output", str(tmp_path), str(self.CAL_PFILE)])
+        return tmp_path / f"{self.CAL_PFILE.stem}.nc"
+
+    def test_writes_fit_attrs_and_report(self, tmp_path, monkeypatch):
+        # The test file is too short to fit, so stand in a known response.
+        monkeypatch.setattr(
+            "pyturb.cli.fit_ct_response",
+            lambda records, fs, direction: CTResponseFit(0.05, 0.15, 30, 1.2),
+        )
+        converted = self._convert(tmp_path)
+        before = xr.load_dataset(converted, decode_times=False)["JAC_C"].values.copy()
+        report = tmp_path / "jac_lag.yaml"
+
+        result = runner.invoke(
+            app,
+            ["calibrate-jac-lag", str(converted), "--overwrite", "-r", str(report)],
+        )
+        assert result.exit_code == 0, result.output
+
+        ds = xr.load_dataset(converted, decode_times=False)
+        np.testing.assert_array_equal(ds["JAC_C"].values, before)
+        assert ds["JAC_C"].attrs["JAC_C_lag"] == np.float32(0.05)
+        assert ds["JAC_C"].attrs["JAC_C_tau"] == np.float32(0.15)
+        assert "calibrate-jac-lag" in ds.attrs["history"]
+        assert "instrument_sn: '142'" in report.read_text()
+
+    def test_no_confident_fit_leaves_file_untouched(self, tmp_path):
+        converted = self._convert(tmp_path)
+        result = runner.invoke(app, ["calibrate-jac-lag", str(converted), "-w"])
+        assert result.exit_code == 0, result.output
+        ds = xr.load_dataset(converted, decode_times=False)
+        assert "JAC_C_lag" not in ds["JAC_C"].attrs
+
+    def test_requires_overwrite_or_output(self, tmp_path):
+        converted = self._convert(tmp_path)
+        result = runner.invoke(app, ["calibrate-jac-lag", str(converted)])
+        assert result.exit_code != 0
 
 
 class TestIsRailed:

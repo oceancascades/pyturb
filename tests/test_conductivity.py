@@ -1,8 +1,9 @@
 """Tests for JAC-CT conductivity/temperature matching (port of salinity_JAC.m)."""
 
 import numpy as np
+import scipy.signal as sig
 
-from pyturb.conductivity import match_conductivity_to_temperature
+from pyturb.conductivity import fit_ct_response, match_conductivity_to_temperature
 
 FS = 64.0
 
@@ -100,3 +101,34 @@ class TestMatchConductivityToTemperature:
         err_ref = abs(_crossing_index(out_ref) - true_idx)
         err_fast = abs(_crossing_index(out_fast) - true_idx)
         assert err_ref < err_fast
+
+
+def _lagged_ct(tau: float, lag: float, n: int = 64 * 600, seed: int = 0):
+    """Synthetic profile whose thermometer lags conductivity by a pole plus a delay."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) / FS
+    T_true = 20.0 - 0.1 * t + np.cumsum(rng.normal(0, 0.01, n))
+    C = 0.9 * T_true + rng.normal(0, 0.002, n)
+    a = 1 - np.exp(-1 / (FS * tau))
+    T = sig.lfilter([a], [1, a - 1], np.interp(t - lag, t, T_true))
+    return T, C, 5.0 + t
+
+
+class TestFitCTResponse:
+    def test_recovers_known_response(self):
+        fit = fit_ct_response([_lagged_ct(tau=0.15, lag=0.05)], FS)
+        assert fit is not None
+        assert abs(fit.tau - 0.15) < 0.01
+        assert abs(fit.lag - 0.05) < 0.01
+        assert abs(fit.speed - 1.0) < 0.01
+
+    def test_pools_records(self):
+        records = [_lagged_ct(0.15, 0.05, n=64 * 120, seed=s) for s in range(4)]
+        single = fit_ct_response(records[:1], FS)
+        pooled = fit_ct_response(records, FS)
+        assert pooled.n_segments > single.n_segments
+
+    def test_none_without_profiling_data(self):
+        T, C, P = _lagged_ct(0.15, 0.05)
+        assert fit_ct_response([(T, C, np.full_like(P, 50.0))], FS) is None
+        assert fit_ct_response([(T, C, P)], FS, direction="up") is None

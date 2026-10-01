@@ -1,14 +1,129 @@
-"""Lag and low-pass filter conductivity to match a co-located thermometer's response."""
+"""Fit and apply the lag and low-pass filter matching conductivity to a co-located thermometer."""
 
 import logging
+from dataclasses import dataclass
+from typing import Iterable, Literal, Optional
 
 import numpy as np
 import scipy.signal as sig
 from numpy.typing import ArrayLike, NDArray
+from scipy.optimize import minimize
+
+from .signal import despike
 
 _log = logging.getLogger(__name__)
 
-__all__ = ["match_conductivity_to_temperature"]
+__all__ = [
+    "CTResponseFit",
+    "fit_ct_response",
+    "match_conductivity_to_temperature",
+]
+
+_SEGMENT_SEC = 8.0
+_MIN_SEGMENTS = 20
+_FIT_BAND_HZ = (0.1, 2.5)
+_MIN_COHERENCE = 0.5
+_TAU_BOUNDS = (0.05, 0.4)
+_LAG_BOUNDS = (0.0, 0.15)
+
+
+@dataclass
+class CTResponseFit:
+    """Thermometer response relative to conductivity, from :func:`fit_ct_response`."""
+
+    lag: float  # s
+    tau: float  # s
+    n_segments: int
+    speed: float  # dbar/s, mean over the segments used
+
+
+def fit_ct_response(
+    records: Iterable[tuple[ArrayLike, ArrayLike, ArrayLike]],
+    fs: float,
+    direction: Literal["down", "up", "both"] = "down",
+    min_speed: float = 0.5,
+    min_temperature_change: float = 0.3,
+    min_pressure: float = 3.0,
+) -> Optional[CTResponseFit]:
+    """Fit the lag and time constant of a thermometer relative to conductivity.
+
+    Conductivity follows temperature closely, so their cross-spectrum gives the
+    thermometer's response: it is fitted to a single pole of time constant
+    ``tau`` plus a pure delay ``lag``. Delaying conductivity by ``lag`` and
+    low-pass filtering it with ``tau`` then matches it to the thermometer.
+
+    Parameters
+    ----------
+    records : iterable of (T, C, P)
+        Temperature, conductivity and pressure (dbar) arrays sampled at ``fs``.
+        Spectra are pooled over all records, e.g. every file of one instrument.
+    fs : float
+        Sampling rate, in Hz.
+    direction : {"down", "up", "both"}, default "down"
+        Profiling direction of the segments to use.
+    min_speed : float, default 0.5
+        Minimum profiling speed of a segment, in dbar/s.
+    min_temperature_change : float, default 0.3
+        Minimum temperature change across a segment.
+    min_pressure : float, default 3.0
+        Segments reaching shallower than this (dbar) are skipped.
+
+    Returns
+    -------
+    CTResponseFit or None
+        None if too few segments qualify or the fit is implausible.
+    """
+    n = round(_SEGMENT_SEC * fs)
+    window = np.hanning(n)
+    TT = CC = TC = 0.0
+    speeds = []
+    for T, C, P in records:
+        T, C, P = (np.asarray(x, dtype=float) for x in (T, C, P))
+        if len(C) > n and np.isfinite(C).all():
+            C = despike(C, fs=fs)[0]
+        for i in range(0, len(P) - n, n // 4):
+            s = slice(i, i + n)
+            speed = (P[i + n - 1] - P[i]) / _SEGMENT_SEC
+            if direction == "up":
+                speed = -speed
+            elif direction == "both":
+                speed = abs(speed)
+            if not (
+                speed > min_speed
+                and P[s].min() > min_pressure
+                and abs(T[i + n - 1] - T[i]) > min_temperature_change
+                and np.isfinite(C[s]).all()
+            ):
+                continue
+            # First difference to whiten the red spectra before windowing
+            dT, dC = np.diff(T[s], prepend=T[i]), np.diff(C[s], prepend=C[i])
+            FT = np.fft.rfft(window * (dT - dT.mean()))
+            FC = np.fft.rfft(window * (dC - dC.mean()))
+            TT, CC, TC = TT + np.abs(FT) ** 2, CC + np.abs(FC) ** 2, TC + FT.conj() * FC
+            speeds.append(speed)
+
+    if len(speeds) < _MIN_SEGMENTS:
+        return None
+
+    f = np.fft.rfftfreq(n, 1 / fs)
+    coherence = np.abs(TC) ** 2 / (TT * CC)
+    band = (f > _FIT_BAND_HZ[0]) & (f < _FIT_BAND_HZ[1]) & (coherence > _MIN_COHERENCE)
+    if band.sum() < 6:
+        return None
+    H, w, weight = (TC / TT)[band], 2j * np.pi * f[band], coherence[band]
+
+    def cost(p):
+        gain, tau, lag = p
+        return np.sum(
+            weight * np.abs(gain * (1 + w * tau) * np.exp(w * lag) / H - 1) ** 2
+        )
+
+    _, tau, lag = minimize(cost, [np.abs(H[0]), 0.15, 0.05], method="Nelder-Mead").x
+    if not (
+        _TAU_BOUNDS[0] < tau < _TAU_BOUNDS[1] and _LAG_BOUNDS[0] < lag < _LAG_BOUNDS[1]
+    ):
+        return None
+    return CTResponseFit(float(lag), float(tau), len(speeds), float(np.mean(speeds)))
 
 
 def _lag_filter(C: NDArray, lag_samples: float) -> NDArray:
