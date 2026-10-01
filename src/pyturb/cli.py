@@ -485,6 +485,24 @@ def eps(
             show_default=True,
         ),
     ] = 0.0,
+    trim_bottom_impact: Annotated[
+        bool,
+        typer.Option(
+            "--trim-bottom-impact/--no-trim-bottom-impact",
+            help="End down profiles at the last good sample before a bottom "
+            "impact, detected from the accelerometers",
+            show_default=True,
+        ),
+    ] = False,
+    impact_thresh: Annotated[
+        float,
+        typer.Option(
+            "--impact-thresh",
+            help="Bottom impact threshold: accelerometer moving std relative "
+            "to its background over the profile",
+            show_default=True,
+        ),
+    ] = 10.0,
     peaks: Annotated[
         Optional[str],
         typer.Option(
@@ -668,6 +686,8 @@ def eps(
         use_pitch_correction=use_pitch_correction,
         profile_direction=profile_direction,
         min_profile_pressure=min_profile_pressure,
+        trim_bottom_impact=trim_bottom_impact,
+        impact_thresh=impact_thresh,
         aux_latitude=aux_lat,
         aux_longitude=aux_lon,
         aux_temperature=aux_temp,
@@ -735,6 +755,24 @@ def profiles(
             show_default=True,
         ),
     ] = 0.0,
+    trim_bottom_impact: Annotated[
+        bool,
+        typer.Option(
+            "--trim-bottom-impact/--no-trim-bottom-impact",
+            help="End down profiles at the last good sample before a bottom "
+            "impact, detected from the accelerometers",
+            show_default=True,
+        ),
+    ] = False,
+    impact_thresh: Annotated[
+        float,
+        typer.Option(
+            "--impact-thresh",
+            help="Bottom impact threshold: accelerometer moving std relative "
+            "to its background over the profile",
+            show_default=True,
+        ),
+    ] = 10.0,
     peaks: Annotated[
         Optional[str],
         typer.Option(
@@ -862,6 +900,8 @@ def profiles(
         use_pitch_correction=use_pitch_correction,
         profile_direction=direction,
         min_profile_pressure=min_profile_pressure,
+        trim_bottom_impact=trim_bottom_impact,
+        impact_thresh=impact_thresh,
     )
     if peaks_kwargs is not None:
         cfg_kwargs["peaks_kwargs"] = peaks_kwargs
@@ -947,7 +987,7 @@ def bin(
                 "eps_1,eps_2,chi_1,chi_2,W,temperature,conductivity,T1,T2,"
                 "turbidity,chlorophyll,"
                 "salinity,density,z,absolute_salinity,conservative_temperature,"
-                "potential_density,N2,nu,kappa_T,lat,lon)"
+                "potential_density,N2,nu,kappa_T,lat,lon,bottom_impact)"
             ),
         ),
     ] = None,

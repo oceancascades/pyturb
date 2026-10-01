@@ -9,6 +9,7 @@ import numpy as np
 import scipy.signal as sig
 import xarray as xr
 import yaml
+from numpy.lib.stride_tricks import sliding_window_view
 from profinder import find_profiles  # type: ignore[import]
 
 from . import qc
@@ -194,6 +195,10 @@ class ProfileConfig:
             "prominence": 25,
         }
     )  # kwargs for scipy.signal.find_peaks
+    # End down profiles at the last good sample before a bottom impact, found
+    # where the accelerometer moving std exceeds impact_thresh x its background.
+    trim_bottom_impact: bool = False
+    impact_thresh: float = 10.0
 
     @property
     def all_probes(self) -> tuple[str, ...]:
@@ -712,6 +717,97 @@ def segment_direction(pressure: np.ndarray, idx_start: int, idx_end: int) -> str
     return "down" if pressure[idx_end] >= pressure[idx_start] else "up"
 
 
+_IMPACT_WINDOW_SEC = 0.04  # moving std window
+_IMPACT_SEARCH_SEC = (3.0, 0.5)  # before and after the detected profile end
+_IMPACT_QUIET = 3.0  # x background, below which the signal is undisturbed
+
+
+def find_bottom_impact(
+    ds: xr.Dataset, idx_start: int, idx_end: int, config: ProfileConfig
+) -> Optional[int]:
+    """Find the last good sample before a bottom impact at the end of a profile.
+
+    An impact shows as a burst in the accelerometers: the moving standard
+    deviation, averaged over ``config.accel_channels``, jumps far above its
+    median over the rest of the profile.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset containing the accelerometer channels on ``t_fast``.
+    idx_start, idx_end : int
+        Inclusive ``t_slow`` indices of the profile, as returned by
+        :func:`find_all_profiles`.
+    config : ProfileConfig
+        Supplies ``accel_channels`` and ``impact_thresh``.
+
+    Returns
+    -------
+    int or None
+        ``t_slow`` index of the last good sample, or None if no impact is found.
+    """
+    channels = [c for c in config.accel_channels if c in ds]
+    if not channels:
+        return None
+
+    fs = float(ds.fs_fast)
+    ratio = round(fs / float(ds.fs_slow))
+    n_win = round(_IMPACT_WINDOW_SEC * fs) | 1
+    f_start, f_end = idx_start * ratio, idx_end * ratio
+    f_stop = min(f_end + int(_IMPACT_SEARCH_SEC[1] * fs), ds.sizes["t_fast"])
+    if f_stop - f_start < n_win:
+        return None
+
+    std = np.mean(
+        [
+            sliding_window_view(ds[c].values[f_start:f_stop], n_win).std(axis=1)
+            for c in channels
+        ],
+        axis=0,
+    )
+    centre = f_start + n_win // 2 + np.arange(len(std))
+    searched = centre >= f_end - int(_IMPACT_SEARCH_SEC[0] * fs)
+    if searched.all():
+        return None
+    background = np.median(std[~searched])
+
+    hits = np.flatnonzero(searched & (std > config.impact_thresh * background))
+    if hits.size == 0:
+        return None
+    quiet = np.flatnonzero(std[: hits[0]] < _IMPACT_QUIET * background)
+    if quiet.size == 0:
+        return None
+    last_good = min(idx_end, int(centre[quiet[-1]] // ratio))
+    return last_good if last_good > idx_start else None
+
+
+def trim_bottom_impacts(
+    ds: xr.Dataset, segments: list[tuple[int, int]], config: ProfileConfig
+) -> tuple[list[tuple[int, int]], list[bool]]:
+    """End down profiles at the last good sample before a bottom impact.
+
+    Returns the segments and whether each one ended in an impact. A no-op
+    unless ``config.trim_bottom_impact`` is set.
+    """
+    impacted = [False] * len(segments)
+    if not config.trim_bottom_impact:
+        return segments, impacted
+    if not any(c in ds for c in config.accel_channels):
+        _log.warning("No accelerometer channels found; bottom impacts not trimmed.")
+        return segments, impacted
+
+    pressure = ds[config.pressure_smooth].values
+    trimmed = []
+    for i, (start, end) in enumerate(segments):
+        if segment_direction(pressure, start, end) == "down":
+            last_good = find_bottom_impact(ds, start, end, config)
+            if last_good is not None:
+                end, impacted[i] = last_good, True
+        trimmed.append((start, end))
+    _log.info(f"Trimmed {sum(impacted)} profile(s) at a bottom impact")
+    return trimmed, impacted
+
+
 def split_into_profiles(
     ds: xr.Dataset,
     config: ProfileConfig,
@@ -743,10 +839,15 @@ def split_into_profiles(
     ...     result = process_profile(profile_ds, config)
     ...     result.to_netcdf(f'profile_{i:03d}.nc')
     """
-    segments = find_all_profiles(ds, config)
+    segments, impacted = trim_bottom_impacts(ds, find_all_profiles(ds, config), config)
 
     for i, (idx_start, idx_end) in enumerate(segments):
         profile_ds = extract_profile_by_indices(ds, idx_start, idx_end)
+        # .sel shares the parent's attrs dict, so without a copy every
+        # profile would end up with the last profile's metadata.
+        profile_ds.attrs = dict(profile_ds.attrs)
+        if config.trim_bottom_impact:
+            profile_ds.attrs["bottom_impact"] = int(impacted[i])
 
         # Add profile metadata
         profile_ds.attrs["profile_index"] = i
@@ -1878,17 +1979,11 @@ def process_profile(
         config = ProfileConfig()
 
     # Grabbed before _attach_window_scalars overwrites T1/T2 with their
-    # window-mean values (dropping the cal_* attrs and the raw samples
-    # range_masks needs) -- see _attach_chi and _attach_window_scalars.
+    # window-mean values (dropping the cal_* attrs) -- see _attach_chi.
     cal_params = {
         probe: p
         for probe in ("T1", "T2")
         if (p := _channel_calibration_params(ds, probe))
-    }
-    range_masks = {
-        probe: qc.temperature_range_mask(ds[probe].values)
-        for probe in ("T1", "T2")
-        if probe in ds
     }
     # None (key absent) means "never run through calibrate-fp07" -- no
     # penalty, unlike an explicit False (see qc.compose_range_qc).
@@ -1898,8 +1993,19 @@ def process_profile(
         if probe in ds and f"{probe}_fp07_confident" in ds[probe].attrs
     }
 
+    bottom_impact = ds.attrs.get("bottom_impact", 0)
+
     ds, params = _preprocess_for_spectra(ds, config)
+    # After trimming to complete windows, so the masks line up with the data.
+    range_masks = {
+        probe: qc.temperature_range_mask(ds[probe].values)
+        for probe in ("T1", "T2")
+        if probe in ds
+    }
     ds = _attach_window_scalars(ds, params, config, range_masks, fit_confident)
     ds, freq, spectra = _compute_shear_spectra_with_cleaning(ds, params, config)
     ds = _attach_epsilon(ds, freq, spectra, config, params)
-    return _attach_chi(ds, freq, spectra, config, params, cal_params, fit_confident)
+    ds = _attach_chi(ds, freq, spectra, config, params, cal_params, fit_confident)
+    if config.trim_bottom_impact:
+        ds["bottom_impact"] = np.int8(bottom_impact)
+    return ds

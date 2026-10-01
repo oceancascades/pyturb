@@ -674,7 +674,7 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
 
     instrument_sn = str(ds.attrs.get("instrument_sn", "unknown"))
     if instrument_sn != fit.instrument_sn:
-        _log.warning(
+        _log.debug(
             f"Instrument SN mismatch (file has '{instrument_sn}', fit is for "
             f"'{fit.instrument_sn}'); skipping {fit.probe}."
         )
@@ -683,7 +683,7 @@ def apply_probe_calibration(ds: xr.Dataset, fit: ProbeCalibrationFit) -> xr.Data
     params = _channel_params(ds, fit.probe)
     sn = str(params.get("sn", "unknown"))
     if sn != fit.sn:
-        _log.warning(
+        _log.debug(
             f"{fit.probe} SN mismatch (file has '{sn}', fit is for '{fit.sn}'); skipping."
         )
         return ds

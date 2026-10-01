@@ -28,6 +28,7 @@ from .profile import (
     find_all_profiles,
     prepare_profile,
     segment_direction,
+    trim_bottom_impacts,
 )
 
 _log = logging.getLogger(__name__)
@@ -76,15 +77,19 @@ def _index_from_segments(
 def build_profile_index(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
     """Detect profiles in ds and return a small per-profile index dataset.
 
-    Only touches the slow-channel pressure record (via find_all_profiles);
-    never slices the fast-channel probe arrays.
+    Only touches the slow-channel pressure record (via find_all_profiles),
+    plus the accelerometers when ``config.trim_bottom_impact`` is set.
 
     Returns a Dataset with a ``profile`` dimension holding ``start_idx``,
     ``end_idx`` (inclusive t_slow indices), ``start_time``, ``end_time``,
-    and ``direction`` ("down"/"up").
+    and ``direction`` ("down"/"up"), plus ``bottom_impact`` when trimming
+    bottom impacts.
     """
-    segments = find_all_profiles(ds, config)
-    return _index_from_segments(ds, config, segments)
+    segments, impacted = trim_bottom_impacts(ds, find_all_profiles(ds, config), config)
+    idx_ds = _index_from_segments(ds, config, segments)
+    if config.trim_bottom_impact:
+        idx_ds["bottom_impact"] = ("profile", np.array(impacted, dtype="i1"))
+    return idx_ds
 
 
 def _write_profile_index(
