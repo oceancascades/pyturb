@@ -1010,20 +1010,24 @@ def bin(
 
     qc_opts = _parse_input_list(qc_thresh, "qc-thresh", _QC_THRESH_FIELDS) or {}
 
-    result = bin_profiles(
-        files=input_files,
-        output_file=output_file,
-        depth_min=depth_min,
-        depth_max=depth_max,
-        bin_width=bin_width,
-        variables=var_list,
-        default_latitude=default_latitude,
-        n_workers=n_workers,
-        questionable_thresh=qc_opts.get("questionable", 1e-7),
-        bad_thresh=qc_opts.get("bad", 1e-9),
-        ctd_bin_width=ctd_bin_width,
-        global_attrs=load_global_attrs(attrs_file) if attrs_file else None,
-    )
+    try:
+        result = bin_profiles(
+            files=input_files,
+            output_file=output_file,
+            depth_min=depth_min,
+            depth_max=depth_max,
+            bin_width=bin_width,
+            variables=var_list,
+            default_latitude=default_latitude,
+            n_workers=n_workers,
+            questionable_thresh=qc_opts.get("questionable", 1e-7),
+            bad_thresh=qc_opts.get("bad", 1e-9),
+            ctd_bin_width=ctd_bin_width,
+            global_attrs=load_global_attrs(attrs_file) if attrs_file else None,
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
 
     if result is None:
         typer.echo("Error: No data was binned.", err=True)

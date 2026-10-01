@@ -534,7 +534,14 @@ def _bin_single_profile(
         for v, a in attrs.items():
             ds[v].attrs = a
 
-        coarse_vars = [v for v in variables if v in ds and f"{v}_hires" not in ds]
+        # Per-profile scalars (e.g. VMP-style lat/lon) are carried through
+        # unbinned; groupby would broadcast them across every depth bin.
+        scalar_vars = [v for v in variables if v in ds and ds[v].ndim == 0]
+        coarse_vars = [
+            v
+            for v in variables
+            if v in ds and v not in scalar_vars and f"{v}_hires" not in ds
+        ]
         hires_bases = [v for v in variables if f"{v}_hires" in ds]
         hires_names = [f"{v}_hires" for v in hires_bases]
 
@@ -600,6 +607,9 @@ def _bin_single_profile(
             if piece_ctd is not None:
                 ds_binned = xr.merge([ds_binned, piece_ctd], compat="override")
 
+        for v in scalar_vars:
+            ds_binned[v] = ds[v]
+
         ds_binned["source_file"] = file.name
         ds_binned["source_pfile"] = str(ds.attrs.get("source_pfile", ""))
         ds_binned["profile_index"] = np.int32(ds.attrs.get("profile_index", -1))
@@ -614,8 +624,6 @@ def _bin_single_profile(
 
         if "instrument_sn" in ds.attrs:
             ds_binned["instrument_sn"] = ds.attrs["instrument_sn"]
-        if "instrument_vehicle" in ds.attrs:
-            ds_binned["instrument_vehicle"] = ds.attrs["instrument_vehicle"]
 
         return ds_binned
 
@@ -728,6 +736,7 @@ def bin_profiles(
     variables : list of str, optional
         Variables to include in binned output. Default includes eps_1, eps_2,
         W, temperature, salinity, density, nu, latitude, longitude.
+        Floating-point variables are written to the file as float32.
     default_latitude : float, optional
         Latitude to use for pressure-to-depth conversion if not available
         in the data. Default 45.0 degrees.
@@ -762,6 +771,11 @@ def bin_profiles(
     xr.Dataset
         Binned and concatenated dataset with dimensions (profile, depth).
 
+    Raises
+    ------
+    ValueError
+        If the profiles come from more than one vehicle type.
+
     Examples
     --------
     >>> from pyturb.processing import bin_profiles
@@ -785,10 +799,6 @@ def bin_profiles(
             "chi_2_fm",
             "chi_1_qc",
             "chi_2_qc",
-            "sh1_despike_frac",
-            "sh2_despike_frac",
-            "gradT1_despike_frac",
-            "gradT2_despike_frac",
             "W",
             "temperature",
             "conductivity",
@@ -870,6 +880,19 @@ def bin_profiles(
         _log.info("No datasets were successfully binned.")
         return None
 
+    vehicles = sorted(
+        {
+            str(b.attrs["instrument_vehicle"]).strip().lower()
+            for b in binned_datasets
+            if "instrument_vehicle" in b.attrs
+        }
+    )
+    if len(vehicles) > 1:
+        raise ValueError(
+            f"Cannot bin profiles from different vehicles ({', '.join(vehicles)}); "
+            "bin each vehicle separately."
+        )
+
     _log.info(f"Concatenating {len(binned_datasets)} binned profiles...")
 
     inherited, user_attrs = _inherited_globals(
@@ -877,6 +900,8 @@ def bin_profiles(
     )
     combined = xr.concat(binned_datasets, dim="profile")
     _shared_var_attrs(combined, binned_datasets)
+    if "instrument_vehicle" in inherited:
+        combined["instrument_vehicle"] = inherited["instrument_vehicle"]
     bin_config = {
         "depth_min": float(depth_min),
         "depth_max": float(depth_max),
@@ -919,7 +944,13 @@ def bin_profiles(
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    apply_cf(combined).to_netcdf(output_file)
+    # float32 on disk only; time needs float64 to resolve epoch seconds.
+    encoding = {
+        v: {"dtype": "float32"}
+        for v in combined.data_vars
+        if combined[v].dtype == np.float64 and v != "time"
+    }
+    apply_cf(combined).to_netcdf(output_file, encoding=encoding)
 
     _log.info(f"Saved binned data to {output_file}")
 

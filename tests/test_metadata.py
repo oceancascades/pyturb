@@ -200,10 +200,30 @@ class TestBinInheritance:
     def test_instrument_specific_var_attrs_removed(self, outputs):
         binned = _load(outputs["bin"])
         assert "JAC_C_offset_applied" not in binned["conductivity"].attrs
-        assert not any(
-            k.startswith("despike_") for k in binned["sh1_despike_frac"].attrs
-        )
         assert binned["conductivity"].attrs["long_name"] == "Conductivity"
+
+    def test_despike_frac_not_binned(self, outputs):
+        assert not any("despike_frac" in v for v in _load(outputs["bin"]).variables)
+
+    def test_floats_saved_as_float32(self, outputs):
+        binned = _load(outputs["bin"])
+        float64 = {v for v in binned.data_vars if binned[v].dtype == np.float64}
+        assert float64 == {"time"}
+        assert binned["eps"].dtype == np.float32
+
+    def test_returned_dataset_stays_float64(self, outputs, tmp_path):
+        assert _bin([outputs["eps"]], tmp_path / "bin.nc")["eps"].dtype == np.float64
+
+    def test_vehicle_is_scalar(self, outputs):
+        vehicle = _load(outputs["bin"])["instrument_vehicle"]
+        assert vehicle.dims == ()
+        assert str(vehicle.values) == "VMP"
+
+    def test_mixed_vehicles_rejected(self, outputs, tmp_path):
+        self._variant(outputs, tmp_path, "b.nc", instrument_vehicle="slocum_glider")
+        with pytest.raises(ValueError, match="different vehicles"):
+            _bin([outputs["eps"], tmp_path / "b.nc"], tmp_path / "bin.nc")
+        assert not (tmp_path / "bin.nc").exists()
 
     def test_differing_var_attrs_dropped(self, outputs, tmp_path, caplog):
         ds = _load(outputs["eps"])

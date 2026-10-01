@@ -78,12 +78,14 @@ class TestBinWithScalarPosition:
             bin_width=2.0,
         )
         assert binned is not None
-        assert "lat" in binned
-        # A single position broadcasts across all depth bins for that profile.
-        lat_vals = binned["lat"].values.ravel()
-        finite = lat_vals[np.isfinite(lat_vals)]
-        assert finite.size > 0
-        assert np.unique(finite).size == 1
+        # One position per profile, not repeated over depth.
+        assert binned["lat"].dims == ("profile",)
+        assert binned["lon"].dims == ("profile",)
+        assert np.isfinite(binned["lat"].values).all()
+        on_disk = xr.load_dataset(tmp_path / "binned.nc")
+        assert on_disk["lat"].dims == ("profile",)
+        assert on_disk["lon"].dims == ("profile",)
+        assert on_disk["eps_1"].dims == ("profile", "depth")
 
     def test_bin_profiles_includes_z_and_n2_by_default(
         self, eps_file_with_position, tmp_path
