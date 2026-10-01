@@ -208,7 +208,8 @@ class TestBinInheritance:
     def test_floats_saved_as_float32(self, outputs):
         binned = _load(outputs["bin"])
         float64 = {v for v in binned.data_vars if binned[v].dtype == np.float64}
-        assert float64 == {"time"}
+        assert float64 <= {"time", "lat", "lon"}
+        assert "time" in float64
         assert binned["eps"].dtype == np.float32
 
     def test_returned_dataset_stays_float64(self, outputs, tmp_path):

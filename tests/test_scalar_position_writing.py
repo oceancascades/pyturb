@@ -85,6 +85,8 @@ class TestBinWithScalarPosition:
         on_disk = xr.load_dataset(tmp_path / "binned.nc")
         assert on_disk["lat"].dims == ("profile",)
         assert on_disk["lon"].dims == ("profile",)
+        assert on_disk["lat"].dtype == np.float64
+        assert on_disk["lon"].dtype == np.float64
         assert on_disk["eps_1"].dims == ("profile", "depth")
 
     def test_bin_profiles_includes_z_and_n2_by_default(

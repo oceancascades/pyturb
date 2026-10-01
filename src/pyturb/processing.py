@@ -736,7 +736,8 @@ def bin_profiles(
     variables : list of str, optional
         Variables to include in binned output. Default includes eps_1, eps_2,
         W, temperature, salinity, density, nu, latitude, longitude.
-        Floating-point variables are written to the file as float32.
+        Floating-point variables are written to the file as float32, except
+        time, lat and lon.
     default_latitude : float, optional
         Latitude to use for pressure-to-depth conversion if not available
         in the data. Default 45.0 degrees.
@@ -944,11 +945,11 @@ def bin_profiles(
     # Save to file
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    # float32 on disk only; time needs float64 to resolve epoch seconds.
+    # float32 on disk only; time (epoch seconds) and position need float64.
     encoding = {
         v: {"dtype": "float32"}
         for v in combined.data_vars
-        if combined[v].dtype == np.float64 and v != "time"
+        if combined[v].dtype == np.float64 and v not in ("time", "lat", "lon")
     }
     apply_cf(combined).to_netcdf(output_file, encoding=encoding)
 
