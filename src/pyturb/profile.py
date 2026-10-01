@@ -19,6 +19,7 @@ from .shear import single_pole_correction as shear_response_correction
 from .signal import (
     block_mean,
     clean_spec,
+    despike,
     despike_mask_name,
     despike_variables,
     window_mean,
@@ -1060,21 +1061,56 @@ def _derive_thermo(
     return T_mean, S_mean, rho_mean, T_visc, salinity_from_jac
 
 
+def _despike_conductivity(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
+    """Despike JAC_C on the raw signal, keeping a mask of the modified samples."""
+    if "JAC_C" not in ds:
+        return ds
+    C = ds["JAC_C"].values
+    if len(C) < 5 or not np.isfinite(C).all():
+        return ds
+
+    fs = float(ds.fs_slow)
+    cleaned = despike(
+        C.astype(float),
+        thresh=config.despike_thresh,
+        smooth=config.despike_smooth,
+        fs=fs,
+        n=int(config.despike_replace_sec * fs),
+        max_passes=config.despike_max_passes,
+    )[0]
+    ds = ds.copy()
+    ds[despike_mask_name("JAC_C")] = ("t_slow", cleaned != C)
+    ds["JAC_C"] = ("t_slow", cleaned.astype(C.dtype), ds["JAC_C"].attrs)
+    return ds
+
+
 def _apply_conductivity_matching(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
-    """Lag/low-pass match JAC_C to temperature, on the raw signal before window-averaging."""
+    """Lag/low-pass match JAC_C to temperature, on the raw signal before window-averaging.
+
+    Uses the response fitted by ``calibrate-jac-lag`` (``JAC_C_lag``/``JAC_C_tau``
+    attributes) as is when present, otherwise the speed-scaled config defaults.
+    """
     if not config.match_conductivity:
         return ds
     if "JAC_C" not in ds or config.temperature not in ds:
         return ds
 
     speed = float(np.nanmean(np.abs(ds[config.speed_smooth].values)))
+    attrs = ds["JAC_C"].attrs
+    if "JAC_C_lag" in attrs and "JAC_C_tau" in attrs:
+        lag = float(attrs["JAC_C_lag"])
+        f_tc = 1 / (2 * np.pi * float(attrs["JAC_C_tau"]))
+        reference_speed = speed
+    else:
+        lag, f_tc = config.jac_lag, config.jac_f_tc
+        reference_speed = config.jac_reference_speed
     matched = match_conductivity_to_temperature(
         ds["JAC_C"].values,
         float(ds.fs_slow),
         speed,
-        lag=config.jac_lag,
-        f_tc=config.jac_f_tc,
-        reference_speed=config.jac_reference_speed,
+        lag=lag,
+        f_tc=f_tc,
+        reference_speed=reference_speed,
     )
     ds = ds.copy()
     ds["JAC_C"] = (
@@ -1192,6 +1228,11 @@ def _build_ctd_vars(
             out["lon"] = (lon_arr, {})
     if "JAC_C" in means:
         out["conductivity"] = (means["JAC_C"], _calibration_provenance(ds, "JAC_C"))
+    if (mask_name := despike_mask_name("JAC_C")) in means:
+        out["conductivity_despike_frac"] = (
+            means[mask_name],
+            {"valid_min": np.float32(0.0), "valid_max": np.float32(1.0)},
+        )
     for probe in ("T1", "T2"):
         if probe in means:
             out[probe] = (means[probe], _calibration_provenance(ds, probe))
@@ -1337,6 +1378,7 @@ def _attach_hires_ctd_vars(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
         config.speed_smooth,
         config.temperature,
         "JAC_C",
+        despike_mask_name("JAC_C"),
         "T1",
         "T2",
         *config.optical_vars,
@@ -1405,6 +1447,7 @@ def _attach_window_scalars(
     pressure_var = config.pressure_smooth
     speed_var = config.speed_smooth
 
+    ds = _despike_conductivity(ds, config)
     ds = _apply_conductivity_matching(ds, config)
 
     means = compute_window_means(
@@ -1415,6 +1458,7 @@ def _attach_window_scalars(
             speed_var,
             config.temperature,
             "JAC_C",
+            despike_mask_name("JAC_C"),
             "T1",
             "T2",
             *config.optical_vars,

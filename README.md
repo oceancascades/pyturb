@@ -22,7 +22,7 @@ classDef empty fill:none,stroke:none,color:transparent,width:1px,height:1px;
 Pyturb is primarily a CLI. The processing should be run in the following order:
 
 1. Convert p files to netCDF using `pyturb p2nc`. Optionally, merge converted p files with `pyturb merge`.
-2. Calibrate the fp07 sensors using `pyturb calibrate-fp07` and adjust conductivity if needed.
+2. Calibrate the fp07 sensors using `pyturb calibrate-fp07`, and adjust conductivity (`pyturb calibrate-jac-c`) and fit its lag relative to temperature (`pyturb calibrate-jac-lag`) if needed.
 3. Calculate turbulence estimates per-profile using `pyturb eps`.
 4. Bin estimates onto a regular grid with `pyturb bin`.
 
@@ -79,6 +79,16 @@ pyturb calibrate-jac-c 194 converted/RIOT_VMP194_*.nc --offset -0.05 -o converte
 
 Only files whose `instrument_sn` attribute matches the given serial number are modified; run it before `eps` so the correction also carries through to the salinity and density derived from `JAC_C`.
 
+### `calibrate-jac-lag` - fit the conductivity-temperature lag (optional)
+
+Salinity spikes wherever temperature changes quickly unless conductivity is delayed and smoothed to match the slower `JAC_T` thermometer. By default `eps` does this with generic values scaled by profiling speed, which can leave spikes, particularly for fast profilers. This command instead fits the lag and time constant of `JAC_T` relative to `JAC_C` from their cross-spectrum, pooled over all files of each instrument:
+
+```bash
+pyturb calibrate-jac-lag converted/*.nc --overwrite -r jac_lag.yaml
+```
+
+The fit is stored as `JAC_C_lag` and `JAC_C_tau` attributes (seconds) on `JAC_C`, which `eps` then uses as is. `JAC_C` itself is not modified. An instrument without enough profiling data through a temperature gradient is left untouched and keeps the defaults.
+
 ### `eps` - calculate the dissipation rate
 
 Estimate turbulent kinetic energy dissipation rate from converted NetCDF files:
@@ -101,11 +111,13 @@ There are numerous options (see `pyturb eps --help`). Some important options are
 - `--aux`: Auxiliary NetCDF file with platform data (e.g. glider lat, lon, T, S)
 - `--thermo`/`--no-thermo`: Compute additional thermodynamic variables with gsw, including potential density and buoyancy frequency.
 - `--chi`/`--no-chi`: Compute the dissipation rate of temperature variance (`chi_1`, `chi_2`) from the microstructure temperature gradient probes (default: on).
-- `--match-conductivity`/`--no-match-conductivity`: Apply lag corrections for conductivity and temperature.
+- `--match-conductivity`/`--no-match-conductivity`: Lag and low-pass filter conductivity to match temperature, using the response fitted by `calibrate-jac-lag` when present.
 - `--skip-existing`/`--no-skip-existing`: Skip a file entirely if any output already exists for its stem. Ignored with `--overwrite`.
 - `--vmp-style-gps`/`--no-vmp-style-gps`: Use one lat/lon per profile instead of interpolating a continuously-tracked position onto every bin. Default: auto-detected from the p-file's `vehicle` field (`vmp`/`rvmp`/`xmp` are treated as VMP-style; anything else is treated as continuously tracked).
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
+
+`JAC_C` is despiked before use, and the fraction of samples replaced is recorded in `conductivity_despike_frac` (and `conductivity_despike_frac_hires`).
 
 Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables.
 
