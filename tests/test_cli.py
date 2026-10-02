@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
 from typer.testing import CliRunner
 
 from pyturb.cli import (
@@ -567,6 +568,30 @@ class TestCalibrateJacLagCommand:
         converted = self._convert(tmp_path)
         result = runner.invoke(app, ["calibrate-jac-lag", str(converted)])
         assert result.exit_code != 0
+
+
+class TestEpsJacDespikeOption:
+    def test_reaches_config(self, tmp_path):
+        runner.invoke(app, ["p2nc", "--output", str(tmp_path), str(PFILE)])
+        result = runner.invoke(
+            app,
+            [
+                "eps",
+                "-o",
+                str(tmp_path / "eps"),
+                "--jac-despike",
+                "3,12,0.1,0.08",
+                str(tmp_path / f"{PFILE.stem}.nc"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        out = next((tmp_path / "eps").glob("*.nc"))
+        config = yaml.safe_load(xr.load_dataset(out).attrs["pyturb_config"])
+        assert config["jac_despike_max_passes"] == 3
+        assert config["jac_despike_thresh"] == 12.0
+        assert config["jac_despike_smooth"] == 0.1
+        assert config["jac_despike_replace_sec"] == 0.08
+        assert config["despike_thresh"] == 8.0
 
 
 class TestIsRailed:

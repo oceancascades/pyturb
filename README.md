@@ -118,7 +118,7 @@ There are numerous options (see `pyturb eps --help`). Some important options are
 
 CTD variables such as pressure, temperature, salinity, conductivity, density, and the individual FP07 thermistors `T1`/`T2` can be attached to a finer `ctd_time` axis (`*_hires` variables, e.g. `T1_hires`). Bin width is set by `ctd_bin_sec`. Pass `ctd_bin_sec=0` to disable.
 
-`JAC_C` is despiked before use, and the fraction of samples replaced is recorded in `conductivity_despike_frac` (and `conductivity_despike_frac_hires`).
+`JAC_C` is despiked before use, and the fraction of samples replaced is recorded in `conductivity_despike_frac` (and `conductivity_despike_frac_hires`). It has its own settings (`--jac-despike`, same format as `--despike`), because conductivity glitches last up to a few tenths of a second, much longer than shear spikes, and spikes are filled by linear interpolation.
 
 Turbidity and chlorophyll fluorometer channels (named `Turbidity`/`Chlorophyll` in the setup string, renamed to lowercase `turbidity`/`chlorophyll` on output), when present on an instrument, are extracted by `p2nc` and processed like other CTD variables.
 
