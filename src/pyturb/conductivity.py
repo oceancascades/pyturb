@@ -15,6 +15,7 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "CTResponseFit",
+    "despike_conductivity",
     "fit_ct_response",
     "match_conductivity_to_temperature",
 ]
@@ -25,6 +26,46 @@ _FIT_BAND_HZ = (0.1, 2.5)
 _MIN_COHERENCE = 0.5
 _TAU_BOUNDS = (0.05, 0.4)
 _LAG_BOUNDS = (0.0, 0.15)
+
+
+def despike_conductivity(
+    C: NDArray,
+    fs: float,
+    thresh: float = 10.0,
+    smooth: float = 0.05,
+    replace_sec: float = 0.04,
+    max_passes: int = 6,
+) -> NDArray:
+    """Despike conductivity, linearly interpolating across each spike.
+
+    Conductivity glitches last up to a few tenths of a second, much longer
+    than shear spikes, so the envelope is smoothed over a longer time than
+    the :func:`pyturb.signal.despike` default to keep them detectable.
+
+    Parameters
+    ----------
+    C : ndarray
+        Conductivity signal.
+    fs : float
+        Sampling rate of C, in Hz.
+    thresh, smooth, replace_sec, max_passes
+        As for :func:`pyturb.signal.despike`, with ``replace_sec`` the
+        replacement window around each spike in seconds.
+
+    Returns
+    -------
+    ndarray
+        Despiked conductivity.
+    """
+    return despike(
+        np.asarray(C, dtype=float),
+        thresh=thresh,
+        smooth=smooth,
+        fs=fs,
+        n=int(replace_sec * fs),
+        max_passes=max_passes,
+        fill="linear",
+    )[0]
 
 
 @dataclass
@@ -80,7 +121,7 @@ def fit_ct_response(
     for T, C, P in records:
         T, C, P = (np.asarray(x, dtype=float) for x in (T, C, P))
         if len(C) > n and np.isfinite(C).all():
-            C = despike(C, fs=fs)[0]
+            C = despike_conductivity(C, fs)
         for i in range(0, len(P) - n, n // 4):
             s = slice(i, i + n)
             speed = (P[i + n - 1] - P[i]) / _SEGMENT_SEC

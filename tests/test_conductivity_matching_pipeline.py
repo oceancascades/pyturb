@@ -97,7 +97,37 @@ class TestDespikeConductivity:
         out = _despike_conductivity(ds, ProfileConfig())
         assert abs(out["JAC_C"].values[1500] - clean[1500]) < 0.01
         mask = out["JAC_C_despike_mask"].values
-        assert mask[1500] and mask.sum() < 10
+        assert mask[1500] and mask.sum() < 30
+
+    def _noisy_ramp(self) -> xr.Dataset:
+        rng = np.random.default_rng(0)
+        t = np.arange(3000) / FS_SLOW
+        return _make_ds(JAC_C=40.0 - 0.05 * t + rng.normal(0, 0.005, t.size))
+
+    def test_removes_broad_drop_along_the_trend(self):
+        ds = self._noisy_ramp()
+        clean = ds["JAC_C"].values.copy()
+        ds["JAC_C"].values[1500:1516] -= 1.0  # 0.25 s
+        out = _despike_conductivity(ds, ProfileConfig())
+        assert np.abs(out["JAC_C"].values - clean).max() < 0.03
+        assert out["JAC_C_despike_mask"].values[1500:1516].all()
+
+    def test_real_step_untouched(self):
+        ds = self._noisy_ramp()
+        ds["JAC_C"].values[1500:] -= np.minimum(np.arange(1500) / 6, 1.0)  # over 0.1 s
+        out = _despike_conductivity(ds, ProfileConfig())
+        assert not out["JAC_C_despike_mask"].values.any()
+
+    def test_independent_of_probe_despike_settings(self):
+        ds = self._noisy_ramp()
+        ds["JAC_C"].values[1500:1516] -= 1.0
+        default = _despike_conductivity(ds, ProfileConfig())
+        probe = _despike_conductivity(
+            ds, ProfileConfig(despike_thresh=100.0, despike_smooth=5.0)
+        )
+        np.testing.assert_array_equal(probe["JAC_C"].values, default["JAC_C"].values)
+        own = _despike_conductivity(ds, ProfileConfig(jac_despike_thresh=1e6))
+        assert not own["JAC_C_despike_mask"].values.any()
 
     def test_noop_without_jac_c(self):
         ds = _make_ds().drop_vars("JAC_C")

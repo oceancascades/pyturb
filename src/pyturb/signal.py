@@ -1,7 +1,7 @@
 # Methods for signal processing, including despiking, power spectra and windowed means
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import scipy.signal as sig
@@ -111,6 +111,7 @@ def despike(
     fs: float = 512.0,
     n: Optional[int] = None,
     max_passes: int = 6,
+    fill: Literal["flat", "linear"] = "flat",
 ) -> tuple[NDArray, NDArray, int, float]:
     """
     Remove spikes from a signal using iterative filtering and replacement.
@@ -130,6 +131,12 @@ def despike(
     max_passes : int, optional
         Maximum number of despike iterations. Default 6. Use 1 for ~4x faster
         processing with slightly less aggressive spike removal.
+    fill : {"flat", "linear"}, optional
+        How each spike is replaced. "flat" (default) uses the mean of the
+        good samples within ``fs / (4 * smooth)`` samples either side, which
+        suits zero-mean signals such as shear. "linear" finds the same
+        samples, then interpolates across them between the nearest good
+        samples, which suits signals with a trend.
 
     Returns
     -------
@@ -156,6 +163,11 @@ def despike(
             break
         all_spikes = np.union1d(all_spikes, spikes)
         pass_count += 1
+
+    bad = cleaned != signal
+    if fill == "linear" and bad.any() and not bad.all():
+        x = np.arange(len(signal))
+        cleaned[bad] = np.interp(x[bad], x[~bad], signal[~bad])
 
     despike_fraction = np.sum(cleaned != signal) / len(signal)
     return cleaned, all_spikes, pass_count, despike_fraction

@@ -536,6 +536,17 @@ def eps(
             ),
         ),
     ] = None,
+    jac_despike: Annotated[
+        Optional[str],
+        typer.Option(
+            "--jac-despike",
+            help=(
+                "JAC_C conductivity despike parameters, in the same format as "
+                "--despike: passes,thresh,smooth,replace_sec. "
+                "Defaults: 6,10.0,0.05,0.04."
+            ),
+        ),
+    ] = None,
     accel_clean: Annotated[
         bool,
         typer.Option(
@@ -711,6 +722,12 @@ def eps(
         cfg_kwargs["despike_smooth"] = despike_opts["smooth"]
         cfg_kwargs["despike_replace_sec"] = despike_opts["replace_sec"]
         cfg_kwargs["force_despike"] = True
+    jac_despike_opts = _parse_input_list(jac_despike, "jac-despike", _DESPIKE_FIELDS)
+    if jac_despike_opts is not None:
+        cfg_kwargs["jac_despike_max_passes"] = jac_despike_opts["passes"]
+        cfg_kwargs["jac_despike_thresh"] = jac_despike_opts["thresh"]
+        cfg_kwargs["jac_despike_smooth"] = jac_despike_opts["smooth"]
+        cfg_kwargs["jac_despike_replace_sec"] = jac_despike_opts["replace_sec"]
     peaks_kwargs = _parse_input_list(peaks, "peaks", _PEAKS_FIELDS)
     if peaks_kwargs is not None:
         cfg_kwargs["peaks_kwargs"] = peaks_kwargs

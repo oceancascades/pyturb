@@ -13,14 +13,13 @@ from numpy.lib.stride_tricks import sliding_window_view
 from profinder import find_profiles  # type: ignore[import]
 
 from . import qc
-from .conductivity import match_conductivity_to_temperature
+from .conductivity import despike_conductivity, match_conductivity_to_temperature
 from .noise import _channel_calibration_params, thermistor_noise_phi
 from .shear import estimate_epsilon, viscosity
 from .shear import single_pole_correction as shear_response_correction
 from .signal import (
     block_mean,
     clean_spec,
-    despike,
     despike_mask_name,
     despike_variables,
     window_mean,
@@ -124,6 +123,12 @@ class ProfileConfig:
     jac_lag: float = 0.0234  # seconds, at jac_reference_speed
     jac_f_tc: float = 0.73  # Hz, at jac_reference_speed
     jac_reference_speed: float = 0.62  # m/s
+    # JAC_C despiking (see conductivity.despike_conductivity). Separate from
+    # the probe despike_* settings: conductivity glitches are much longer.
+    jac_despike_max_passes: int = 6
+    jac_despike_thresh: float = 10.0
+    jac_despike_smooth: float = 0.05  # Hz
+    jac_despike_replace_sec: float = 0.04
 
     # === High-resolution CTD output ===
     # CTD scalars (pressure, temperature, salinity, conductivity, density)
@@ -1170,15 +1175,14 @@ def _despike_conductivity(ds: xr.Dataset, config: ProfileConfig) -> xr.Dataset:
     if len(C) < 5 or not np.isfinite(C).all():
         return ds
 
-    fs = float(ds.fs_slow)
-    cleaned = despike(
-        C.astype(float),
-        thresh=config.despike_thresh,
-        smooth=config.despike_smooth,
-        fs=fs,
-        n=int(config.despike_replace_sec * fs),
-        max_passes=config.despike_max_passes,
-    )[0]
+    cleaned = despike_conductivity(
+        C,
+        float(ds.fs_slow),
+        thresh=config.jac_despike_thresh,
+        smooth=config.jac_despike_smooth,
+        replace_sec=config.jac_despike_replace_sec,
+        max_passes=config.jac_despike_max_passes,
+    )
     ds = ds.copy()
     ds[despike_mask_name("JAC_C")] = ("t_slow", cleaned != C)
     ds["JAC_C"] = ("t_slow", cleaned.astype(C.dtype), ds["JAC_C"].attrs)
