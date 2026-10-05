@@ -34,7 +34,7 @@ from .profile import (
 _log = logging.getLogger(__name__)
 
 # Globals bin_profiles keeps when every eps file shares them.
-_BIN_SHARED_ATTRS = ("instrument_vehicle", "instrument_model", "pyturb_config")
+_BIN_SHARED_ATTRS = ("instrument_vehicle", "instrument_model")
 
 # Variable attrs that describe the data rather than one instrument or file
 # (calibration provenance, despike parameters, cal_*). The binned file keeps
@@ -655,8 +655,6 @@ def _inherited_globals(
     shared = common_attrs(lowered, list(_BIN_SHARED_ATTRS), "Attribute")
     if "instrument_vehicle" in shared:
         shared["instrument_vehicle"] = vehicles[0]
-    if "pyturb_config" in shared:
-        shared["pyturb_eps_config"] = shared.pop("pyturb_config")
     user_keys = dict.fromkeys(
         k for a in profile_attrs for k in str(a.get(USER_ATTRS_KEY, "")).split()
     )
@@ -937,6 +935,8 @@ def bin_profiles(
         **inherited,
         pyturb_bin_config=yaml.safe_dump(bin_config, sort_keys=False),
     )
+    # Only bin itself needs this bookkeeping, to find user attrs in eps files.
+    combined.attrs.pop(USER_ATTRS_KEY, None)
 
     # Sort profiles by time (use minimum time per profile to handle NaT values)
     # and attach it as a "profile_time" coordinate so profiles are directly

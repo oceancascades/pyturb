@@ -67,9 +67,7 @@ BIN_ATTRS = {
     "pyturb_version",
     "date_created",
     "pyturb_bin_config",
-    "pyturb_eps_config",
     "history",
-    "pyturb_user_attrs",
 } | set(USER_ATTRS)
 
 
@@ -128,7 +126,9 @@ class TestGlobalSets:
         for stage in ("eps", "bin"):
             attrs = _load(outputs[stage]).attrs
             assert {k: attrs[k] for k in USER_ATTRS} == USER_ATTRS
-            assert attrs["pyturb_user_attrs"] == "title institution creator_name"
+        eps_attrs = _load(outputs["eps"]).attrs
+        assert eps_attrs["pyturb_user_attrs"] == "title institution creator_name"
+        assert "pyturb_user_attrs" not in _load(outputs["bin"]).attrs
 
 
 class TestVariableProvenance:
